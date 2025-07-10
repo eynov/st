@@ -14,9 +14,15 @@ if [[ -z "$CF_API_TOKEN" || -z "$CF_ZONE_ID" ]]; then
 fi
 
 CONF_DIR="/etc/nginx/conf.d"
-CERT_PATH="/etc/ssl/certs/eynov.pem"
-KEY_PATH="/etc/ssl/private/eynov.key"
-TRUSTED_CERT="/etc/ssl/certs/origin_ca_ecc_root.pem"
+
+read -p "请输入证书路径（默认 /etc/ssl/certs/eynov.pem）: " CERT_PATH
+CERT_PATH=${CERT_PATH:-/etc/ssl/certs/eynov.pem}
+
+read -p "请输入私钥路径（默认 /etc/ssl/private/eynov.key）: " KEY_PATH
+KEY_PATH=${KEY_PATH:-/etc/ssl/private/eynov.key}
+
+read -p "请输入 Cloudflare 根证书路径（默认 /etc/ssl/certs/origin_ca_ecc_root.pem）: " TRUSTED_CERT
+TRUSTED_CERT=${TRUSTED_CERT:-/etc/ssl/certs/origin_ca_ecc_root.pem}
 
 # ========== Cloudflare 同步函数 ==========
 function sync_to_cloudflare() {
