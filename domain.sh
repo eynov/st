@@ -40,11 +40,11 @@ else
 fi
 
 # ========== Cloudflare 同步函数 ==========
+CONF_DIR="/etc/nginx/conf.d"
 function sync_to_cloudflare() {
     local DOMAIN=$1
     local IP=$2
     local PROXIED=$3
-
     echo "🔄 正在同步 $DOMAIN 到 Cloudflare..."
 
     RECORD_ID=$(curl -s -X GET "https://api.cloudflare.com/client/v4/zones/$CF_ZONE_ID/dns_records?type=A&name=$DOMAIN" \
