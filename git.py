@@ -21,7 +21,7 @@ def get_repositories():
     """
     获取用户的 GitHub 仓库，包括私有仓库。
     """
-    url = 'https://api.github.com/user/repos?type=private&per_page=100'
+    url = 'https://api.github.com/user/repos?visibility=all&per_page=100'
     headers = {'Authorization': f'token {os.getenv("GITHUB_TOKEN")}'}
     response = requests.get(url, headers=headers)
     response.raise_for_status()  # 如果请求失败，将抛出异常
