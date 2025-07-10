@@ -13,8 +13,8 @@ check_git_config()
 # 设置工作目录
 work_dir = "/srv/git"
 if not os.path.exists(work_dir):
-    os.makedirs(work_dir)  # 如果目录不存在，则创建
-os.chdir(work_dir)  # 切换到指定目录
+    os.makedirs(work_dir)
+os.chdir(work_dir)
 
 
 def get_repositories():
@@ -24,30 +24,29 @@ def get_repositories():
     url = 'https://api.github.com/user/repos?visibility=all&per_page=100'
     headers = {'Authorization': f'token {os.getenv("GITHUB_TOKEN")}'}
     response = requests.get(url, headers=headers)
-    response.raise_for_status()  # 如果请求失败，将抛出异常
+    response.raise_for_status()
     repos = response.json()
     return [repo['ssh_url'] for repo in repos]
 
 
 def clone_or_update_repo(repo_url):
     """
-    根据仓库 SSH URL 克隆或更新仓库。
+    强制以远程仓库为准进行克隆或更新。
     """
-    # 提取仓库名称
     repo_name = repo_url.split('/')[-1].replace('.git', '')
 
     if os.path.isdir(repo_name):
-        print(f"Directory '{repo_name}' already exists. Pulling latest changes...")
-        os.chdir(repo_name)
-        subprocess.run(['git', 'pull'], check=True)  # 拉取最新代码
-        os.chdir('..')
+        print(f"📁 '{repo_name}' 已存在，强制同步远程内容...")
+        repo_dir = os.path.join(work_dir, repo_name)
+        subprocess.run(['git', 'fetch', '--all'], cwd=repo_dir, check=True)
+        subprocess.run(['git', 'reset', '--hard', 'origin/main'], cwd=repo_dir, check=True)
+        subprocess.run(['git', 'clean', '-fd'], cwd=repo_dir, check=True)
     else:
-        print(f"Directory '{repo_name}' does not exist. Cloning repository...")
-        subprocess.run(['git', 'clone', repo_url], check=True)  # 克隆仓库
+        print(f"📥 克隆仓库：{repo_name}")
+        subprocess.run(['git', 'clone', repo_url], check=True)
 
 
 if __name__ == "__main__":
-    # 获取仓库列表并克隆或更新
     repos = get_repositories()
     for repo in repos:
         clone_or_update_repo(repo)
