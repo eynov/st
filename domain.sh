@@ -13,16 +13,31 @@ if [[ -z "$CF_API_TOKEN" || -z "$CF_ZONE_ID" ]]; then
     exit 1
 fi
 
-CONF_DIR="/etc/nginx/conf.d"
+CONFIG_FILE="/etc/nginx/.ssl_config"
 
-read -p "请输入证书路径（默认 /etc/ssl/certs/eynov.pem）: " CERT_PATH
-CERT_PATH=${CERT_PATH:-/etc/ssl/certs/eynov.pem}
+if [[ -f "$CONFIG_FILE" ]]; then
+    # 如果配置文件存在，读取路径
+    source "$CONFIG_FILE"
+    echo "✅ 已加载之前的证书配置："
+    echo "CERT_PATH=$CERT_PATH"
+    echo "KEY_PATH=$KEY_PATH"
+    echo "TRUSTED_CERT=$TRUSTED_CERT"
+else
+    # 第一次运行：询问路径并保存
+    read -p "请输入证书路径（默认 /etc/ssl/certs/eyes.pem）: " CERT_PATH
+    CERT_PATH=${CERT_PATH:-/etc/ssl/certs/eyes.pem}
 
-read -p "请输入私钥路径（默认 /etc/ssl/private/eynov.key）: " KEY_PATH
-KEY_PATH=${KEY_PATH:-/etc/ssl/private/eynov.key}
+    read -p "请输入私钥路径（默认 /etc/ssl/private/eyes.key）: " KEY_PATH
+    KEY_PATH=${KEY_PATH:-/etc/ssl/private/eyes.key}
 
-read -p "请输入 Cloudflare 根证书路径（默认 /etc/ssl/certs/origin_ca_ecc_root.pem）: " TRUSTED_CERT
-TRUSTED_CERT=${TRUSTED_CERT:-/etc/ssl/certs/origin_ca_ecc_root.pem}
+    read -p "请输入 Cloudflare 根证书路径（默认 /etc/ssl/certs/origin_ca_ecc_root.pem）: " TRUSTED_CERT
+    TRUSTED_CERT=${TRUSTED_CERT:-/etc/ssl/certs/origin_ca_ecc_root.pem}
+
+    echo "CERT_PATH=\"$CERT_PATH\"" > "$CONFIG_FILE"
+    echo "KEY_PATH=\"$KEY_PATH\"" >> "$CONFIG_FILE"
+    echo "TRUSTED_CERT=\"$TRUSTED_CERT\"" >> "$CONFIG_FILE"
+    echo "✅ 证书路径配置已保存到 $CONFIG_FILE"
+fi
 
 # ========== Cloudflare 同步函数 ==========
 function sync_to_cloudflare() {
