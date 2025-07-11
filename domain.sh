@@ -82,6 +82,8 @@ server {
     listen 443 ssl http2;
     server_name ${SUBDOMAIN};
 
+    client_max_body_size 100m;
+    
     ssl_certificate $CERT_PATH;
     ssl_certificate_key $KEY_PATH;
     ssl_trusted_certificate $TRUSTED_CERT;
@@ -171,6 +173,8 @@ server {
     listen 443 ssl;
     server_name ${ROOT_DOMAIN} www.${ROOT_DOMAIN};
 
+    client_max_body_size 100m;
+    
     ssl_certificate $CERT_PATH;
     ssl_certificate_key $KEY_PATH;
     ssl_trusted_certificate $TRUSTED_CERT;
