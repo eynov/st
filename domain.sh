@@ -129,66 +129,24 @@ function delete_domain() {
     nginx -t && systemctl reload nginx && echo "🗑️ 删除成功：${SUBDOMAIN}"
 }
 
-# ========== 批量添加 ==========
+# ========== 批量推送子域名到 Cloudflare（无 Nginx） ==========
 function batch_add() {
-    read -p "请输入批量配置文件路径（格式: 子域名 后端地址）: " FILE
+    read -p "请输入批量配置文件路径（格式: 子域名 IP）: " FILE
     [[ ! -f "$FILE" ]] && echo "❌ 文件不存在" && return
 
     read -p "是否启用 Cloudflare CDN（橙色云）？[y/N]: " PROXY_CHOICE
     [[ "$PROXY_CHOICE" == "y" || "$PROXY_CHOICE" == "Y" ]] && PROXIED=true || PROXIED=false
-    SERVER_IP=$(curl -s https://api.ipify.org)
 
     while read -r line; do
         SUBDOMAIN=$(echo "$line" | awk '{print $1}')
-        BACKEND=$(echo "$line" | awk '{print $2}')
-        CONF_PATH="${CONF_DIR}/${SUBDOMAIN}.conf"
+        IP=$(echo "$line" | awk '{print $2}')
+        [[ -z "$SUBDOMAIN" || -z "$IP" ]] && continue
 
-        echo "➡️ 添加 $SUBDOMAIN -> $BACKEND"
-
-        cat > "$CONF_PATH" <<EOF
-server {
-    listen 443 ssl http2;
-    server_name ${SUBDOMAIN};
-
-    ssl_certificate $CERT_PATH;
-    ssl_certificate_key $KEY_PATH;
-    ssl_trusted_certificate $TRUSTED_CERT;
-
-    ssl_protocols TLSv1.2 TLSv1.3;
-    ssl_ciphers HIGH:!aNULL:!MD5;
-    ssl_prefer_server_ciphers on;
-    ssl_session_timeout 1d;
-    ssl_session_cache shared:SSL:10m;
-    ssl_session_tickets off;
-
-    ssl_stapling on;
-    ssl_stapling_verify on;
-
-    add_header Strict-Transport-Security "max-age=31536000" always;
-
-    location / {
-        proxy_pass http://${BACKEND};
-        proxy_set_header Host \$host;
-        proxy_set_header X-Real-IP \$remote_addr;
-        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto \$scheme;
-    }
-}
-EOF
-
-        cat > "${CONF_DIR}/${SUBDOMAIN}_redirect.conf" <<EOF
-server {
-    listen 80;
-    server_name ${SUBDOMAIN};
-
-    return 301 https://\$host\$request_uri;
-}
-EOF
-
-        sync_to_cloudflare "$SUBDOMAIN" "$SERVER_IP" "$PROXIED"
+        echo "➡️ 推送 $SUBDOMAIN -> $IP 到 Cloudflare"
+        sync_to_cloudflare "$SUBDOMAIN" "$IP" "$PROXIED"
     done < "$FILE"
 
-    nginx -t && systemctl reload nginx && echo "✅ 批量添加完成"
+    echo "✅ 批量 DNS 推送完成"
 }
 
 # ========== 列出 ==========
