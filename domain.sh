@@ -66,11 +66,11 @@ function sync_to_cloudflare() {
     fi
 }
 
-# ========== 添加子域名 ==========
+# ========== 添加域名 ==========
 function add_domain() {
-    read -p "请输入子域名 : " SUBDOMAIN
+    read -p "请输入域名 : " SUBDOMAIN
     read -p "请输入后端地址 : " BACKEND
-    read -p "是否启用 Cloudflare CDN（橙色云）？[y/N]: " PROXY_CHOICE
+    read -p "是否启用 Cloudflare CDN？[y/N]: " PROXY_CHOICE
 
     [[ "$PROXY_CHOICE" == "y" || "$PROXY_CHOICE" == "Y" ]] && PROXIED=true || PROXIED=false
     SERVER_IP=$(curl -s https://api.ipify.org)
@@ -124,7 +124,7 @@ EOF
 
 # ========== 删除 ==========
 function delete_domain() {
-    read -p "请输入要删除的子域名 : " SUBDOMAIN
+    read -p "请输入要删除的域名 : " SUBDOMAIN
     rm -f "${CONF_DIR}/${SUBDOMAIN}.conf" "${CONF_DIR}/${SUBDOMAIN}_redirect.conf"
     nginx -t && systemctl reload nginx && echo "🗑️ 删除成功：${SUBDOMAIN}"
 }
@@ -151,7 +151,7 @@ function batch_add() {
 
 # ========== 列出 ==========
 function list_domains() {
-    echo "📄 已添加的子域名："
+    echo "📄 已添加的域名："
     for file in "$CONF_DIR"/*.conf; do
         [[ -f "$file" ]] || continue
         domain=$(basename "$file" .conf)
@@ -207,10 +207,10 @@ EOF
 # ========== 主菜单 ==========
 while true; do
     echo -e "\n====== Nginx 子域名管理工具 v2.0 ======"
-    echo "1. 添加子域名"
+    echo "1. 添加域名"
     echo "2. 批量添加子域名"
-    echo "3. 删除子域名"
-    echo "4. 列出已添加子域名"
+    echo "3. 删除域名"
+    echo "4. 列出已添加域名"
     echo "5. 添加主域名并返回 204 空响应"
     echo "0. 退出"
     read -p "请选择操作 [0-5]: " CHOICE
