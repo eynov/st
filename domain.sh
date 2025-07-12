@@ -16,14 +16,12 @@ fi
 CONFIG_FILE="/etc/nginx/.ssl_config"
 
 if [[ -f "$CONFIG_FILE" ]]; then
-    # 如果配置文件存在，读取路径
     source "$CONFIG_FILE"
-    echo "✅ 已加载之前的证书配置："
+    echo "✅ 已加载证书配置："
     echo "CERT_PATH=$CERT_PATH"
     echo "KEY_PATH=$KEY_PATH"
     echo "TRUSTED_CERT=$TRUSTED_CERT"
 else
-    # 第一次运行：询问路径并保存
     read -p "请输入证书路径（默认 /etc/ssl/certs/eyes.pem）: " CERT_PATH
     CERT_PATH=${CERT_PATH:-/etc/ssl/certs/eyes.pem}
 
@@ -36,11 +34,14 @@ else
     echo "CERT_PATH=\"$CERT_PATH\"" > "$CONFIG_FILE"
     echo "KEY_PATH=\"$KEY_PATH\"" >> "$CONFIG_FILE"
     echo "TRUSTED_CERT=\"$TRUSTED_CERT\"" >> "$CONFIG_FILE"
-    echo "✅ 证书路径配置已保存到 $CONFIG_FILE"
+    echo "✅ 证书路径已保存到 $CONFIG_FILE"
 fi
 
-# ========== Cloudflare 同步函数 ==========
-CONF_DIR="/etc/nginx/conf.d"
+# ========== 配置目录 ==========
+AVAILABLE_DIR="/etc/nginx/sites-available"
+ENABLED_DIR="/etc/nginx/sites-enabled"
+
+# ========== Cloudflare 同步 ==========
 function sync_to_cloudflare() {
     local DOMAIN=$1
     local IP=$2
@@ -75,7 +76,7 @@ function add_domain() {
     [[ "$PROXY_CHOICE" == "y" || "$PROXY_CHOICE" == "Y" ]] && PROXIED=true || PROXIED=false
     SERVER_IP=$(curl -s https://api.ipify.org)
 
-    CONF_PATH="${CONF_DIR}/${SUBDOMAIN}.conf"
+    CONF_PATH="${AVAILABLE_DIR}/${SUBDOMAIN}.conf"
 
     cat > "$CONF_PATH" <<EOF
 server {
@@ -83,7 +84,7 @@ server {
     server_name ${SUBDOMAIN};
 
     client_max_body_size 100m;
-    
+
     ssl_certificate $CERT_PATH;
     ssl_certificate_key $KEY_PATH;
     ssl_trusted_certificate $TRUSTED_CERT;
@@ -110,7 +111,7 @@ server {
 }
 EOF
 
-    cat > "${CONF_DIR}/${SUBDOMAIN}_redirect.conf" <<EOF
+    cat > "${AVAILABLE_DIR}/${SUBDOMAIN}_redirect.conf" <<EOF
 server {
     listen 80;
     server_name ${SUBDOMAIN};
@@ -119,7 +120,16 @@ server {
 }
 EOF
 
-    nginx -t && systemctl reload nginx && echo "✅ 添加成功：${SUBDOMAIN}"
+    echo "✅ 已生成配置文件：${AVAILABLE_DIR}/${SUBDOMAIN}.conf"
+
+    read -p "是否现在启用该域名？[y/N]: " ENABLE_CHOICE
+    if [[ "$ENABLE_CHOICE" == "y" || "$ENABLE_CHOICE" == "Y" ]]; then
+        ln -sf "${AVAILABLE_DIR}/${SUBDOMAIN}.conf" "${ENABLED_DIR}/${SUBDOMAIN}.conf"
+        ln -sf "${AVAILABLE_DIR}/${SUBDOMAIN}_redirect.conf" "${ENABLED_DIR}/${SUBDOMAIN}_redirect.conf"
+        nginx -t && systemctl reload nginx && echo "✅ 已启用：${SUBDOMAIN}"
+    else
+        echo "⏸️ 已跳过启用，可稍后在菜单中手动启用"
+    fi
 
     sync_to_cloudflare "$SUBDOMAIN" "$SERVER_IP" "$PROXIED"
 }
@@ -127,11 +137,12 @@ EOF
 # ========== 删除 ==========
 function delete_domain() {
     read -p "请输入要删除的域名 : " SUBDOMAIN
-    rm -f "${CONF_DIR}/${SUBDOMAIN}.conf" "${CONF_DIR}/${SUBDOMAIN}_redirect.conf"
+    rm -f "${AVAILABLE_DIR}/${SUBDOMAIN}.conf" "${AVAILABLE_DIR}/${SUBDOMAIN}_redirect.conf"
+    rm -f "${ENABLED_DIR}/${SUBDOMAIN}.conf" "${ENABLED_DIR}/${SUBDOMAIN}_redirect.conf"
     nginx -t && systemctl reload nginx && echo "🗑️ 删除成功：${SUBDOMAIN}"
 }
 
-# ========== 批量推送子域名到 Cloudflare（无 Nginx） ==========
+# ========== 批量推送 ==========
 function batch_add() {
     read -p "请输入批量配置文件路径（格式: 子域名 IP）: " FILE
     [[ ! -f "$FILE" ]] && echo "❌ 文件不存在" && return
@@ -143,7 +154,6 @@ function batch_add() {
         SUBDOMAIN=$(echo "$line" | awk '{print $1}')
         IP=$(echo "$line" | awk '{print $2}')
         [[ -z "$SUBDOMAIN" || -z "$IP" ]] && continue
-
         echo "➡️ 推送 $SUBDOMAIN -> $IP 到 Cloudflare"
         sync_to_cloudflare "$SUBDOMAIN" "$IP" "$PROXIED"
     done < "$FILE"
@@ -151,80 +161,55 @@ function batch_add() {
     echo "✅ 批量 DNS 推送完成"
 }
 
+# ========== 启用 ==========
+function enable_site() {
+    read -p "输入要启用的域名 : " DOMAIN
+    if [[ -f "${AVAILABLE_DIR}/${DOMAIN}.conf" ]]; then
+        ln -sf "${AVAILABLE_DIR}/${DOMAIN}.conf" "${ENABLED_DIR}/${DOMAIN}.conf"
+        [[ -f "${AVAILABLE_DIR}/${DOMAIN}_redirect.conf" ]] && \
+        ln -sf "${AVAILABLE_DIR}/${DOMAIN}_redirect.conf" "${ENABLED_DIR}/${DOMAIN}_redirect.conf"
+        nginx -t && systemctl reload nginx && echo "✅ 已启用：$DOMAIN"
+    else
+        echo "❌ 未找到配置文件：${DOMAIN}.conf"
+    fi
+}
+
+# ========== 禁用 ==========
+function disable_site() {
+    read -p "输入要禁用的域名 : " DOMAIN
+    rm -f "${ENABLED_DIR}/${DOMAIN}.conf" "${ENABLED_DIR}/${DOMAIN}_redirect.conf"
+    nginx -t && systemctl reload nginx && echo "✅ 已禁用：$DOMAIN"
+}
+
 # ========== 列出 ==========
 function list_domains() {
-    echo "📄 已添加的域名："
-    for file in "$CONF_DIR"/*.conf; do
+    echo "📄 已启用的域名："
+    for file in "$ENABLED_DIR"/*.conf; do
         [[ -f "$file" ]] || continue
         domain=$(basename "$file" .conf)
         echo "- $domain"
     done
 }
 
-# ========== 添加主域名 ==========
-function add_main_domain_204() {
-    read -p "请输入主域名（如 eynov.com）: " ROOT_DOMAIN
-    read -p "是否启用 Cloudflare CDN（橙色云）？[y/N]: " PROXY_CHOICE
-    [[ "$PROXY_CHOICE" == "y" || "$PROXY_CHOICE" == "Y" ]] && PROXIED=true || PROXIED=false
-    SERVER_IP=$(curl -s https://api.ipify.org)
-
-    cat > "${CONF_DIR}/${ROOT_DOMAIN}.conf" <<EOF
-server {
-    listen 443 ssl;
-    server_name ${ROOT_DOMAIN} www.${ROOT_DOMAIN};
-
-    client_max_body_size 100m;
-    
-    ssl_certificate $CERT_PATH;
-    ssl_certificate_key $KEY_PATH;
-    ssl_trusted_certificate $TRUSTED_CERT;
-
-    ssl_protocols TLSv1.2 TLSv1.3;
-    ssl_ciphers HIGH:!aNULL:!MD5;
-    ssl_prefer_server_ciphers on;
-    ssl_session_timeout 1d;
-    ssl_session_cache shared:SSL:10m;
-    ssl_session_tickets off;
-
-    add_header Strict-Transport-Security "max-age=31536000" always;
-
-    location / {
-        return 204;
-    }
-}
-EOF
-
-    cat > "${CONF_DIR}/${ROOT_DOMAIN}_redirect.conf" <<EOF
-server {
-    listen 80;
-    server_name ${ROOT_DOMAIN} www.${ROOT_DOMAIN};
-
-    return 301 https://\$host\$request_uri;
-}
-EOF
-
-    nginx -t && systemctl reload nginx && echo "✅ 主域名配置完成"
-
-    sync_to_cloudflare "$ROOT_DOMAIN" "$SERVER_IP" "$PROXIED"
-}
-
 # ========== 主菜单 ==========
 while true; do
-    echo -e "\n====== Nginx 子域名管理工具 v2.0 ======"
+    echo -e "\n====== Nginx 子域名管理工具 v2.2 ======"
     echo "1. 添加域名"
     echo "2. 批量添加子域名"
-    echo "3. 删除域名"
-    echo "4. 列出已添加域名"
-    echo "5. 添加主域名并返回 204 空响应"
+    echo "3. 删除域名（配置+软链）"
+    echo "4. 启用已配置但未启用的域名"
+    echo "5. 禁用正在启用的域名"
+    echo "6. 列出已启用域名"
     echo "0. 退出"
-    read -p "请选择操作 [0-5]: " CHOICE
+    read -p "请选择操作 [0-6]: " CHOICE
 
     case $CHOICE in
         1) add_domain ;;
         2) batch_add ;;
         3) delete_domain ;;
-        4) list_domains ;;
-        5) add_main_domain_204 ;;
+        4) enable_site ;;
+        5) disable_site ;;
+        6) list_domains ;;
         0) exit 0 ;;
         *) echo "❌ 无效选择，请重新输入。" ;;
     esac
