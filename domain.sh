@@ -99,7 +99,7 @@ server {
     server_name localhost;
 
     location / {
-        root /srv/git/cloud;
+        root /srv;
         autoindex on;
         default_type text/plain;
     }
