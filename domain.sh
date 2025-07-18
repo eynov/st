@@ -173,9 +173,34 @@ EOF
 # ========== 删除 ==========
 function delete_domain() {
     read -p "请输入要删除的域名 : " SUBDOMAIN
-    rm -f "${AVAILABLE_DIR}/${SUBDOMAIN}.conf" "${AVAILABLE_DIR}/${SUBDOMAIN}_redirect.conf"
-    rm -f "${ENABLED_DIR}/${SUBDOMAIN}.conf" "${ENABLED_DIR}/${SUBDOMAIN}_redirect.conf"
-    nginx -t && systemctl reload nginx && echo "🗑️ 删除成功：${SUBDOMAIN}"
+
+    CONF_FILE="${AVAILABLE_DIR}/${SUBDOMAIN}.conf"
+    LOCAL_SERVICE_DELETED=false
+
+    # 如果存在配置文件，检查是否有本地监听端口
+    if [[ -f "$CONF_FILE" ]]; then
+        BACKEND_LINE=$(grep -E "proxy_pass http://127.0.0.1:[0-9]+" "$CONF_FILE")
+        if [[ "$BACKEND_LINE" =~ 127.0.0.1:([0-9]+) ]]; then
+            PORT="${BASH_REMATCH[1]}"
+            echo "🔍 检测到本地监听端口：$PORT，正在删除本地服务配置..."
+            rm -f "${AVAILABLE_DIR}/local_static_${PORT}.conf"
+            rm -f "${ENABLED_DIR}/local_static_${PORT}.conf"
+            LOCAL_SERVICE_DELETED=true
+        fi
+    fi
+
+    # 删除域名配置文件
+    rm -f "${AVAILABLE_DIR}/${SUBDOMAIN}.conf" \
+          "${AVAILABLE_DIR}/${SUBDOMAIN}_redirect.conf" \
+          "${ENABLED_DIR}/${SUBDOMAIN}.conf" \
+          "${ENABLED_DIR}/${SUBDOMAIN}_redirect.conf"
+
+    nginx -t && systemctl reload nginx
+
+    echo "🗑️ 删除成功：${SUBDOMAIN}"
+    if [[ "$LOCAL_SERVICE_DELETED" == true ]]; then
+        echo "✅ 同步删除了本地监听服务：local_static_${PORT}.conf"
+    fi
 }
 
 # ========== 批量推送 ==========
