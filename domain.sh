@@ -70,11 +70,48 @@ function sync_to_cloudflare() {
 # ========== 添加域名 ==========
 function add_domain() {
     read -p "请输入域名 : " SUBDOMAIN
-    read -p "请输入后端地址 : " BACKEND
-    read -p "是否启用 Cloudflare CDN？[y/N]: " PROXY_CHOICE
 
+    read -p "请输入后端地址 : " BACKEND
+    if [[ ! "$BACKEND" =~ ^[a-zA-Z0-9.-]+:[0-9]+$ ]]; then
+        echo "❌ 格式不正确，应为 域名或IP:端口，例如 example.com:8080 或 127.0.0.1:8080"
+        return 1
+    fi
+
+    read -p "是否启用 Cloudflare CDN？[y/N]: " PROXY_CHOICE
     [[ "$PROXY_CHOICE" == "y" || "$PROXY_CHOICE" == "Y" ]] && PROXIED=true || PROXIED=false
     SERVER_IP=$(curl -s https://api.ipify.org)
+
+    # 解析IP和端口
+    IP=$(echo "$BACKEND" | cut -d':' -f1)
+    PORT=$(echo "$BACKEND" | cut -d':' -f2)
+
+    # 仅当后端IP是127.0.0.1时，创建本地静态服务配置
+    if [[ "$IP" == "127.0.0.1" ]]; then
+        LOCAL_STATIC_CONF="/etc/nginx/sites-available/local_static_${PORT}.conf"
+        if [[ ! -f "$LOCAL_STATIC_CONF" ]]; then
+            echo "🔧 正在创建本地静态目录服务（监听 127.0.0.1:${PORT}）..."
+
+            mkdir -p /srv
+
+            cat > "$LOCAL_STATIC_CONF" <<EOF
+server {
+    listen 127.0.0.1:${PORT};
+    server_name localhost;
+
+    location / {
+        root /srv/git/cloud;
+        autoindex on;
+        default_type text/plain;
+    }
+}
+EOF
+
+            ln -sf "$LOCAL_STATIC_CONF" "/etc/nginx/sites-enabled/local_static_${PORT}.conf"
+            echo "✅ 已启用本地静态目录服务 (127.0.0.1:${PORT})"
+        else
+            echo "ℹ️ 本地静态服务 (127.0.0.1:${PORT}) 已存在，跳过创建"
+        fi
+    fi
 
     CONF_PATH="${AVAILABLE_DIR}/${SUBDOMAIN}.conf"
 
@@ -133,7 +170,6 @@ EOF
 
     sync_to_cloudflare "$SUBDOMAIN" "$SERVER_IP" "$PROXIED"
 }
-
 # ========== 删除 ==========
 function delete_domain() {
     read -p "请输入要删除的域名 : " SUBDOMAIN
