@@ -72,6 +72,11 @@ function add_domain() {
     read -p "请输入域名 : " SUBDOMAIN
 
     read -p "请输入后端地址 : " BACKEND
+
+    read -p "后端是否为 HTTPS 服务？ [y/N]: " USE_HTTPS_BACKEND
+[[ "$USE_HTTPS_BACKEND" == "y" || "$USE_HTTPS_BACKEND" == "Y" ]] && BACKEND_SCHEME="https" || BACKEND_SCHEME="http"
+
+
     if [[ ! "$BACKEND" =~ ^[a-zA-Z0-9.-]+:[0-9]+$ ]]; then
         echo "❌ 格式不正确，应为 域名或IP:端口，例如 example.com:8080 或 127.0.0.1:8080"
         return 1
@@ -115,6 +120,11 @@ EOF
 
     CONF_PATH="${AVAILABLE_DIR}/${SUBDOMAIN}.conf"
 
+    EXTRA_PROXY_SSL=""
+    if [[ "$BACKEND_SCHEME" == "https" ]]; then
+    EXTRA_PROXY_SSL="        proxy_ssl_verify off;"
+    fi
+    
     cat > "$CONF_PATH" <<EOF
 server {
     listen 443 ssl http2;
@@ -139,14 +149,16 @@ server {
     add_header Strict-Transport-Security "max-age=31536000" always;
 
     location / {
-        proxy_pass http://${BACKEND};
+        proxy_pass ${BACKEND_SCHEME}://${BACKEND};
         proxy_set_header Host \$host;
         proxy_set_header X-Real-IP \$remote_addr;
         proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto \$scheme;
+        $EXTRA_PROXY_SSL 
     }
 }
 EOF
+    
 
     cat > "${AVAILABLE_DIR}/${SUBDOMAIN}_redirect.conf" <<EOF
 server {
