@@ -15,11 +15,13 @@ SHORTCUT="alias p='bash $HOME/vps.sh'"
 if ! grep -Fxq "$SHORTCUT" "$ZSHRC" 2>/dev/null; then
     echo "$SHORTCUT" >> "$ZSHRC"
     echo "[*] 已将快捷键 'p' 添加到 ~/.zshrc"
+    source "$ZSHRC"  # 立即生效
 fi
 
 if [ -f "$BASHRC" ] && ! grep -Fxq "$SHORTCUT" "$BASHRC" 2>/dev/null; then
     echo "$SHORTCUT" >> "$BASHRC"
     echo "[*] 已将快捷键 'p' 添加到 ~/.bashrc"
+    source "$BASHRC"  # 立即生效
 fi
 
 # --- 获取仓库文件列表（只保留 .sh 和 .py 文件，去重） ---
