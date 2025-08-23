@@ -78,9 +78,8 @@ if ! systemctl is-active --quiet systemd-resolved \
     echo -e "$DNS_CONTENT" > /etc/resolv.conf
 fi
 
-# 显示当前 DNS 状态
 echo "[*] 当前 DNS 状态："
-resolvectl status
+cat /etc/resolv.conf
 
 # systemd 自动启动服务
 SERVICE_FILE="/etc/systemd/system/custom-dns.service"
