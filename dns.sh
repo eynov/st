@@ -81,6 +81,8 @@ fi
 echo "[*] 当前 DNS 状态："
 cat /etc/resolv.conf
 
+
+
 # systemd 自动启动服务
 SERVICE_FILE="/etc/systemd/system/custom-dns.service"
 if [ ! -f "$SERVICE_FILE" ]; then
@@ -103,3 +105,6 @@ EOF
     systemctl enable custom-dns.service
     echo "[*] systemd 服务已启用，开机自动应用 DNS"
 fi
+
+echo "[*] 正在刷新 apt 缓存 ..."
+apt-get update --fix-missing
