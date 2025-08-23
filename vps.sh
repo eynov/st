@@ -1,47 +1,70 @@
-#!/bin/bash
-# vps.sh - ST 脚本面板
-# 仓库: https://github.com/eynov/st
+#!/usr/bin/env bash
+# vps.sh - 仓库文件面板（支持快捷键 p 启动）
 
-REPO_URL="https://raw.githubusercontent.com/eynov/st/main"
+REPO_USER="eynov"
+REPO_NAME="st"
+BRANCH="main"
+REPO_URL="https://github.com/$REPO_USER/$REPO_NAME/tree/$BRANCH"
+RAW_BASE="https://raw.githubusercontent.com/$REPO_USER/$REPO_NAME/$BRANCH"
 
-WORKDIR="/tmp/st-panel"
-mkdir -p "$WORKDIR"
+# --- 添加快捷键 p ---
+ZSHRC="$HOME/.zshrc"
+BASHRC="$HOME/.bashrc"
+SHORTCUT="alias p='bash $HOME/vps.sh'"
 
-download_script() {
-    local script=$1
-    local url="$REPO_URL/$script"
-    local path="$WORKDIR/$script"
+if ! grep -Fxq "$SHORTCUT" "$ZSHRC" 2>/dev/null; then
+    echo "$SHORTCUT" >> "$ZSHRC"
+    echo "[*] 已将快捷键 'p' 添加到 ~/.zshrc"
+fi
 
-    echo "[*] 下载 $script ..."
-    if curl -fsSL "$url" -o "$path"; then
-        chmod +x "$path"
-        echo "[*] 运行 $script"
-        bash "$path"
-    else
-        echo "[!] 下载失败: $url"
-        sleep 2
-    fi
-}
+if [ -f "$BASHRC" ] && ! grep -Fxq "$SHORTCUT" "$BASHRC" 2>/dev/null; then
+    echo "$SHORTCUT" >> "$BASHRC"
+    echo "[*] 已将快捷键 'p' 添加到 ~/.bashrc"
+fi
 
+# --- 获取仓库文件列表（排除目录） ---
+FILES=($(curl -s "$REPO_URL" \
+    | grep -o 'title="[^"]*"' \
+    | awk -F'"' '{print $2}' \
+    | grep -v '/$'))
+
+if [ ${#FILES[@]} -eq 0 ]; then
+    echo "未获取到文件，请检查仓库 URL 或网络"
+    exit 1
+fi
+
+# --- 面板主循环 ---
 while true; do
-    clear
-    echo "==================="
-    echo "    VPS 面板工具"
-    echo "==================="
-    echo "1) 域名管理 (domain.sh)"
-    echo "2) DNS 管理 (dns.sh)"
-    echo "3) 防火墙管理 (nft.sh)"
-    echo "4) Zsh 配置 (zsh.sh)"
+    echo "======================================"
+    echo "      仓库文件面板 (vps.sh)"
+    echo "======================================"
+    for i in "${!FILES[@]}"; do
+        echo "$((i+1))) ${FILES[i]}"
+    done
     echo "0) 退出"
-    echo "==================="
-    read -rp "请选择功能: " choice
+    echo "======================================"
+    read -rp "输入编号选择文件: " choice
 
-    case $choice in
-        1) download_script "domain.sh" ;;
-        2) download_script "dns.sh" ;;
-        3) download_script "nft.sh" ;;
-        4) download_script "zsh.sh" ;;
-        0) echo "退出面板"; exit 0 ;;
-        *) echo "无效选择，请重试"; sleep 1 ;;
-    esac
+    if [[ "$choice" == "0" ]]; then
+        echo "退出面板"
+        exit 0
+    fi
+
+    ((choice--))
+    if [[ "$choice" -lt 0 || "$choice" -ge ${#FILES[@]} ]]; then
+        echo "无效编号，请重新选择"
+        continue
+    fi
+
+    FILE="${FILES[choice]}"
+    RAW_URL="$RAW_BASE/$FILE"
+    TMP_FILE="/tmp/$FILE"
+
+    echo "正在下载并执行: $FILE ..."
+    curl -s "$RAW_URL" -o "$TMP_FILE"
+    chmod +x "$TMP_FILE"
+    "$TMP_FILE"
+
+    echo "======================================"
+    read -rp "按回车返回菜单..." _
 done
