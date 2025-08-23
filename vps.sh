@@ -22,11 +22,12 @@ if [ -f "$BASHRC" ] && ! grep -Fxq "$SHORTCUT" "$BASHRC" 2>/dev/null; then
     echo "[*] 已将快捷键 'p' 添加到 ~/.bashrc"
 fi
 
-# --- 获取仓库文件列表（排除目录） ---
+# --- 获取仓库文件列表（只保留 .sh 和 .py 文件，去重） ---
 FILES=($(curl -s "$REPO_URL" \
     | grep -o 'title="[^"]*"' \
     | awk -F'"' '{print $2}' \
-    | grep -v '/$'))
+    | grep -E '\.(sh|py)$' \
+    | sort -u))
 
 if [ ${#FILES[@]} -eq 0 ]; then
     echo "未获取到文件，请检查仓库 URL 或网络"
