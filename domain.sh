@@ -74,13 +74,14 @@ function add_domain() {
     read -p "请输入后端地址 : " BACKEND
 
     read -p "后端是否为 HTTPS 服务？ [y/N]: " USE_HTTPS_BACKEND
-[[ "$USE_HTTPS_BACKEND" == "y" || "$USE_HTTPS_BACKEND" == "Y" ]] && BACKEND_SCHEME="https" || BACKEND_SCHEME="http"
-
+    [[ "$USE_HTTPS_BACKEND" == "y" || "$USE_HTTPS_BACKEND" == "Y" ]] && BACKEND_SCHEME="https" || BACKEND_SCHEME="http"
 
     if [[ ! "$BACKEND" =~ ^[a-zA-Z0-9.-]+:[0-9]+$ ]]; then
         echo "❌ 格式不正确，应为 域名或IP:端口，例如 example.com:8080 或 127.0.0.1:8080"
         return 1
     fi
+
+    read -p "是否为 Emby 站点，需要启用视频流优化？ [y/N]: " EMBY_OPT
 
     read -p "是否启用 Cloudflare CDN？[y/N]: " PROXY_CHOICE
     [[ "$PROXY_CHOICE" == "y" || "$PROXY_CHOICE" == "Y" ]] && PROXIED=true || PROXIED=false
@@ -90,14 +91,12 @@ function add_domain() {
     IP=$(echo "$BACKEND" | cut -d':' -f1)
     PORT=$(echo "$BACKEND" | cut -d':' -f2)
 
-    # 仅当后端IP是127.0.0.1时，创建本地静态服务配置
+    # 本地静态服务
     if [[ "$IP" == "127.0.0.1" ]]; then
-        LOCAL_STATIC_CONF="/etc/nginx/sites-available/local_static_${PORT}.conf"
+        LOCAL_STATIC_CONF="${AVAILABLE_DIR}/local_static_${PORT}.conf"
         if [[ ! -f "$LOCAL_STATIC_CONF" ]]; then
             echo "🔧 正在创建本地静态目录服务（监听 127.0.0.1:${PORT}）..."
-
             mkdir -p /srv
-
             cat > "$LOCAL_STATIC_CONF" <<EOF
 server {
     listen 127.0.0.1:${PORT};
@@ -110,8 +109,7 @@ server {
     }
 }
 EOF
-
-            ln -sf "$LOCAL_STATIC_CONF" "/etc/nginx/sites-enabled/local_static_${PORT}.conf"
+            ln -sf "$LOCAL_STATIC_CONF" "${ENABLED_DIR}/local_static_${PORT}.conf"
             echo "✅ 已启用本地静态目录服务 (127.0.0.1:${PORT})"
         else
             echo "ℹ️ 本地静态服务 (127.0.0.1:${PORT}) 已存在，跳过创建"
@@ -121,10 +119,26 @@ EOF
     CONF_PATH="${AVAILABLE_DIR}/${SUBDOMAIN}.conf"
 
     EXTRA_PROXY_SSL=""
-    if [[ "$BACKEND_SCHEME" == "https" ]]; then
-    EXTRA_PROXY_SSL="        proxy_ssl_verify off;"
+    [[ "$BACKEND_SCHEME" == "https" ]] && EXTRA_PROXY_SSL="        proxy_ssl_verify off;"
+
+    EXTRA_PROXY_OPT=""
+    if [[ "$EMBY_OPT" == "y" || "$EMBY_OPT" == "Y" ]]; then
+        EXTRA_PROXY_OPT=$(cat <<'EOT'
+        # Emby 优化参数
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+
+        proxy_buffering off;
+        proxy_request_buffering off;
+        proxy_cache off;
+
+        proxy_read_timeout 3600s;
+        proxy_send_timeout 3600s;
+EOT
+)
     fi
-    
+
     cat > "$CONF_PATH" <<EOF
 server {
     listen 443 ssl http2;
@@ -154,11 +168,11 @@ server {
         proxy_set_header X-Real-IP \$remote_addr;
         proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto \$scheme;
-        $EXTRA_PROXY_SSL 
+        $EXTRA_PROXY_SSL
+        $EXTRA_PROXY_OPT
     }
 }
 EOF
-    
 
     cat > "${AVAILABLE_DIR}/${SUBDOMAIN}_redirect.conf" <<EOF
 server {
@@ -169,11 +183,11 @@ server {
 }
 EOF
 
-    echo "✅ 已生成配置文件：${AVAILABLE_DIR}/${SUBDOMAIN}.conf"
+    echo "✅ 已生成配置文件：${CONF_PATH}"
 
     read -p "是否现在启用该域名？[y/N]: " ENABLE_CHOICE
     if [[ "$ENABLE_CHOICE" == "y" || "$ENABLE_CHOICE" == "Y" ]]; then
-        ln -sf "${AVAILABLE_DIR}/${SUBDOMAIN}.conf" "${ENABLED_DIR}/${SUBDOMAIN}.conf"
+        ln -sf "$CONF_PATH" "${ENABLED_DIR}/${SUBDOMAIN}.conf"
         ln -sf "${AVAILABLE_DIR}/${SUBDOMAIN}_redirect.conf" "${ENABLED_DIR}/${SUBDOMAIN}_redirect.conf"
         nginx -t && systemctl reload nginx && echo "✅ 已启用：${SUBDOMAIN}"
     else
