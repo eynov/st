@@ -66,7 +66,15 @@ while true; do
     echo "正在下载并执行: $FILE ..."
     curl -s "$RAW_URL" -o "$TMP_FILE"
     chmod +x "$TMP_FILE"
-    "$TMP_FILE"
+    # 判断文件后缀执行方式
+EXT="${FILE##*.}"
+if [[ "$EXT" == "sh" ]]; then
+    bash "$TMP_FILE"
+elif [[ "$EXT" == "py" ]]; then
+    python3 "$TMP_FILE"
+else
+    echo "[!] 不支持的文件类型: $EXT"
+fi
 
     echo "======================================"
     read -rp "按回车返回菜单..." _
