@@ -12,7 +12,7 @@ from datetime import datetime, timedelta
 import sqlite3
 import json
 import random
-import time # <-- 新增：用于处理时间锁
+import time 
 
 # ---------------------------
 # 配置
@@ -273,7 +273,7 @@ async def forward_to_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # 如果未验证且不在 pending 中 (即没有先执行 /start)
     if user_id_str not in verified_users:
-        await update.message.reply_text("/start 。")
+        await update.message.reply_text("/start")
         return
         
     # 广告检测
