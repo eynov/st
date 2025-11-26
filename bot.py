@@ -107,7 +107,7 @@ def is_ad(msg):
 # Bot 命令
 # ---------------------------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Hello! 欢迎使用 Bot。")
+    await update.message.reply_text("Hello!")
 
 async def show_last_seven_days(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.message.from_user.id == ADMIN_ID:
@@ -145,10 +145,10 @@ async def forward_to_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 save_json(VERIFIED_FILE, verified_users)
                 pending_verification.pop(user_id)
                 save_json(PENDING_FILE, pending_verification)
-                await update.message.reply_text("✅ 验证成功！现在你可以正常聊天了。")
+                await update.message.reply_text("✅ 验证成功!")
                 return
             else:
-                await update.message.reply_text("❌ 验证失败，请输入正确答案。")
+                await update.message.reply_text("❌ 验证失败!")
                 return
         else:
             # 生成数学题
@@ -156,7 +156,7 @@ async def forward_to_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
             b = random.randint(5, 20)
             pending_verification[user_id] = {"answer": a + b}
             save_json(PENDING_FILE, pending_verification)
-            await update.message.reply_text(f"为了防止广告，请先完成验证：\n请回答： {a} + {b} = ?")
+            await update.message.reply_text(f"请先完成验证：\n {a} + {b} = ?")
             return
 
     # -------------------------
