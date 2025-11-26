@@ -12,6 +12,7 @@ from datetime import datetime, timedelta
 import sqlite3
 import json
 import random
+import time # <-- 新增：用于处理时间锁
 
 # ---------------------------
 # 配置
@@ -67,24 +68,7 @@ def get_last_seven_days_messages():
 # ---------------------------
 # 用户验证文件
 # ---------------------------
-# ---------------------------
-# 新增：验证失败与封禁管理
-# ---------------------------
 FAIL_FILE = "verify_fail.json"
-
-def load_fail():
-    if not os.path.exists(FAIL_FILE):
-        return {}
-    with open(FAIL_FILE, "r") as f:
-        return json.load(f)
-
-def save_fail(data):
-    with open(FAIL_FILE, "w") as f:
-        json.dump(data, f)
-
-verify_fail = load_fail()  # user_id : {"fails": int, "locked_until": timestamp, "banned": bool}
-
-
 VERIFIED_FILE = "verified_users.json"
 PENDING_FILE = "pending_verification.json"
 
@@ -92,19 +76,35 @@ def load_json(path):
     if not os.path.exists(path):
         return {}
     with open(path, "r") as f:
-        return json.load(f)
+        # 使用 str() 确保 key 是字符串，方便与 user_id 比较
+        data = json.load(f)
+        return {str(k): v for k, v in data.items()}
 
 def save_json(path, data):
     with open(path, "w") as f:
         json.dump(data, f)
 
+def load_fail():
+    if not os.path.exists(FAIL_FILE):
+        return {}
+    with open(FAIL_FILE, "r") as f:
+        data = json.load(f)
+        return {str(k): v for k, v in data.items()}
+
+def save_fail(data):
+    with open(FAIL_FILE, "w") as f:
+        json.dump(data, f)
+
+# 初始化加载数据
+verify_fail = load_fail()
 verified_users = load_json(VERIFIED_FILE)
 pending_verification = load_json(PENDING_FILE)
+
 
 # ---------------------------
 # 广告检测
 # ---------------------------
-SENSITIVE_KEYWORDS = ["博彩", "赌博", "现金", "充值"]
+SENSITIVE_KEYWORDS = ["博彩", "赌博", "现金", "充值"] # 目前未使用，但保留
 def is_ad(msg):
     if getattr(msg, "business_connection_id", None):
         return True
@@ -115,17 +115,55 @@ def is_ad(msg):
             for btn in row:
                 if btn.url:
                     return True
-#    if msg.text:
-#        t = msg.text.lower()
-#        if any(x in t for x in ["http://", "https://", ".com", ".ru", ".top"]):
-#            return True
+    if msg.text:
+        t = msg.text.lower()
+        if any(keyword in t for keyword in SENSITIVE_KEYWORDS):
+            return True
+    # 如果要启用链接检测，可以解除注释以下代码
+    # if msg.text:
+    #     t = msg.text.lower()
+    #     if any(x in t for x in ["http://", "https://", ".com", ".ru", ".top"]):
+    #         return True
     return False
 
 # ---------------------------
 # Bot 命令
 # ---------------------------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Hello!")
+    user = update.message.from_user
+    user_id_str = str(user.id)
+    
+    # 1. 读取失败状态
+    fail = verify_fail.get(user_id_str, {"fails": 0, "locked_until": 0, "banned": False})
+
+    # 2. 永久封禁检查
+    if fail.get("banned"):
+        await update.message.reply_text("⚠️ 你已被永久禁止。")
+        return
+
+    # 3. 锁定检查
+    if fail.get("locked_until", 0) > time.time():
+        remain_seconds = int(fail["locked_until"] - time.time())
+        # 向上取整到小时，至少显示1小时
+        remain_hours = int(remain_seconds / 3600) + 1 if remain_seconds > 0 else 1
+        await update.message.reply_text(f"⛔ 请 {remain_hours} 小时后再试。")
+        return
+
+    # 4. 验证检查
+    if user_id_str not in verified_users:
+        
+        # 首次或重新生成数学题
+        a = random.randint(5, 20)
+        b = random.randint(5, 20)
+        pending_verification[user_id_str] = {"answer": a + b}
+        save_json(PENDING_FILE, pending_verification)
+        
+        # 提示用户进行验证
+        await update.message.reply_text(f"🤖 请先通过验证：\n\n {a} + {b} = ?\n\n请直接发送答案。")
+    
+    else:
+        # 已验证用户
+        await update.message.reply_text("Hello!")
 
 async def show_last_seven_days(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.message.from_user.id == ADMIN_ID:
@@ -142,44 +180,45 @@ async def show_last_seven_days(update: Update, context: ContextTypes.DEFAULT_TYP
 
 
 # ---------------------------
-# 核心：转发用户消息到管理员 + 首次数学验证 + 广告拦截
+# 核心：转发用户消息到管理员 + 数学验证回答检查 + 广告拦截
 # ---------------------------
 message_context_map = {}
 
 async def forward_to_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.message.from_user
     user_id = str(user.id)
-
-    # -------------------------
-     # -------------------------
-    # 1. 首次验证（强化版）
-    # -------------------------
     user_id_str = user_id
 
     # 读取失败状态
     fail = verify_fail.get(user_id_str, {"fails": 0, "locked_until": 0, "banned": False})
 
+    # -------------------------
+    # 1. 验证回答检查
+    # -------------------------
+
     # 永久封禁
     if fail.get("banned"):
-        await update.message.reply_text("⚠️ 你已被永久禁止使用此 Bot。")
+        await update.message.reply_text("⚠️ 你已被永久禁止。")
         return
 
-    # 判断是否锁定中
+    # 锁定中
     if fail.get("locked_until", 0) > time.time():
-        remain = int((fail["locked_until"] - time.time()) / 3600)
-        await update.message.reply_text(f"⛔ 错误次数过多，请 {remain} 小时后再试。")
+        remain_seconds = int(fail["locked_until"] - time.time())
+        remain_hours = int(remain_seconds / 3600) + 1 if remain_seconds > 0 else 1
+        await update.message.reply_text(f"⛔ 请 {remain_hours} 小时后再试。")
         return
 
-    # 未验证
-    if user_id_str not in verified_users:
+    # 未验证且处于等待回答状态 (处理用户发送的回答)
+    if user_id_str not in verified_users and user_id_str in pending_verification:
+        
+        correct_answer = pending_verification[user_id_str]["answer"]
 
-        # 已存在数学题 → 检查用户回答
-        if user_id_str in pending_verification:
-
-            correct_answer = pending_verification[user_id_str]["answer"]
+        # 检查用户回答是否为纯数字
+        if update.message.text and update.message.text.strip().isdigit():
+            user_answer = int(update.message.text.strip())
 
             # 用户答对
-            if update.message.text and update.message.text.strip().isdigit() and int(update.message.text.strip()) == correct_answer:
+            if user_answer == correct_answer:
                 verified_users[user_id_str] = True
                 save_json(VERIFIED_FILE, verified_users)
                 pending_verification.pop(user_id_str)
@@ -191,7 +230,7 @@ async def forward_to_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
                 await update.message.reply_text("✅ 验证成功！")
                 return
-
+            
             # ❌ 答错 → 记录
             fail["fails"] += 1
 
@@ -220,30 +259,34 @@ async def forward_to_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
             pending_verification[user_id_str] = {"answer": a + b}
             save_json(PENDING_FILE, pending_verification)
 
-            await update.message.reply_text(f"❌ 验证错误！请回答新的问题：\n\n {a} + {b} = ?")
+            await update.message.reply_text(f"❌ 验证错误：\n\n {a} + {b} = ?")
+            return
+        
+        else:
+            # 用户发送了非数字消息，但仍在验证中
+            await update.message.reply_text("请直接发送您的答案（纯数字）。")
             return
 
-        # 未产生数学题 → 第一次验证
-        else:
-            a = random.randint(5, 20)
-            b = random.randint(5, 20)
-            pending_verification[user_id_str] = {"answer": a + b}
-            save_json(PENDING_FILE, pending_verification)
-            await update.message.reply_text(f"🤖 为了防止广告，请先通过验证：\n\n {a} + {b} = ?")
-            return
     # -------------------------
-    # 2. 广告检测
+    # 2. 已验证用户或未开始验证的用户
     # -------------------------
+
+    # 如果未验证且不在 pending 中 (即没有先执行 /start)
+    if user_id_str not in verified_users:
+        await update.message.reply_text("/start 。")
+        return
+        
+    # 广告检测
     if is_ad(update.message):
         await update.message.reply_text("⛔ 检测到广告消息，已被拦截。")
         return
 
-    # -------------------------
-    # 3. 转发消息到管理员
-    # -------------------------
-    admin_message = f"@{user.username or user.first_name} (ID: {user_id}) 发送的消息:\n"
+    # 转发消息到管理员
+    user_name_display = user.username or user.first_name
+    admin_message = f"@{user_name_display} (ID: {user_id}) 发送的消息:\n"
 
     try:
+        # 转发逻辑（保持不变）
         if update.message.text:
             admin_message += update.message.text
             sent_message = await context.bot.send_message(chat_id=ADMIN_ID, text=admin_message)
@@ -334,7 +377,7 @@ async def forward_to_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # ---------------------------
-# 管理员回复处理
+# 管理员回复处理 (保持不变)
 # ---------------------------
 async def handle_admin_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.message.reply_to_message:
@@ -384,12 +427,23 @@ def main():
 
     app = ApplicationBuilder().token(BOT_TOKEN).build()
 
+    # 1. /start 命令: 负责首次触发验证
     app.add_handler(CommandHandler("start", start))
+    # 2. /history 命令
     app.add_handler(CommandHandler("history", show_last_seven_days))
 
-    # 用户消息
-    app.add_handler(MessageHandler(filters.ALL & ~filters.Chat(ADMIN_ID), forward_to_admin))
-    # 管理员回复
+    # 3. 用户消息 (核心处理): 
+    #    - 负责验证回答
+    #    - 负责已验证用户的消息转发
+    #    - 排除所有命令 (filters.COMMAND)，因为 /start 已有专职处理
+    app.add_handler(
+        MessageHandler(
+            (filters.ALL & ~filters.COMMAND) & ~filters.Chat(ADMIN_ID), 
+            forward_to_admin
+        )
+    )
+    
+    # 4. 管理员回复
     app.add_handler(MessageHandler(filters.ALL & filters.Chat(ADMIN_ID), handle_admin_reply))
 
     app.run_polling()
