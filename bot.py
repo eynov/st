@@ -67,6 +67,24 @@ def get_last_seven_days_messages():
 # ---------------------------
 # 用户验证文件
 # ---------------------------
+# ---------------------------
+# 新增：验证失败与封禁管理
+# ---------------------------
+FAIL_FILE = "verify_fail.json"
+
+def load_fail():
+    if not os.path.exists(FAIL_FILE):
+        return {}
+    with open(FAIL_FILE, "r") as f:
+        return json.load(f)
+
+def save_fail(data):
+    with open(FAIL_FILE, "w") as f:
+        json.dump(data, f)
+
+verify_fail = load_fail()  # user_id : {"fails": int, "locked_until": timestamp, "banned": bool}
+
+
 VERIFIED_FILE = "verified_users.json"
 PENDING_FILE = "pending_verification.json"
 
@@ -133,32 +151,86 @@ async def forward_to_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = str(user.id)
 
     # -------------------------
-    # 1. 首次验证
+     # -------------------------
+    # 1. 首次验证（强化版）
     # -------------------------
-    if user_id not in verified_users:
-        # 已经生成数学题
-        if user_id in pending_verification:
-            correct_answer = pending_verification[user_id]["answer"]
+    user_id_str = user_id
+
+    # 读取失败状态
+    fail = verify_fail.get(user_id_str, {"fails": 0, "locked_until": 0, "banned": False})
+
+    # 永久封禁
+    if fail.get("banned"):
+        await update.message.reply_text("⚠️ 你已被永久禁止使用此 Bot。")
+        return
+
+    # 判断是否锁定中
+    if fail.get("locked_until", 0) > time.time():
+        remain = int((fail["locked_until"] - time.time()) / 3600)
+        await update.message.reply_text(f"⛔ 错误次数过多，请 {remain} 小时后再试。")
+        return
+
+    # 未验证
+    if user_id_str not in verified_users:
+
+        # 已存在数学题 → 检查用户回答
+        if user_id_str in pending_verification:
+
+            correct_answer = pending_verification[user_id_str]["answer"]
+
+            # 用户答对
             if update.message.text and update.message.text.strip().isdigit() and int(update.message.text.strip()) == correct_answer:
-                # 验证成功
-                verified_users[user_id] = True
+                verified_users[user_id_str] = True
                 save_json(VERIFIED_FILE, verified_users)
-                pending_verification.pop(user_id)
+                pending_verification.pop(user_id_str)
                 save_json(PENDING_FILE, pending_verification)
-                await update.message.reply_text("✅ 验证成功!")
+
+                # 成功清零失败记录
+                verify_fail[user_id_str] = {"fails": 0, "locked_until": 0, "banned": False}
+                save_fail(verify_fail)
+
+                await update.message.reply_text("✅ 验证成功！")
                 return
-            else:
-                await update.message.reply_text("❌ 验证失败!")
+
+            # ❌ 答错 → 记录
+            fail["fails"] += 1
+
+            # 10 次 → 永久封禁
+            if fail["fails"] >= 10:
+                fail["banned"] = True
+                verify_fail[user_id_str] = fail
+                save_fail(verify_fail)
+                await update.message.reply_text("❌ 你已错误 10 次，被永久禁止使用。")
                 return
-        else:
-            # 生成数学题
+
+            # 每 3 次 → 锁定 24 小时
+            if fail["fails"] % 3 == 0:
+                fail["locked_until"] = time.time() + 24 * 3600
+                verify_fail[user_id_str] = fail
+                save_fail(verify_fail)
+                await update.message.reply_text("⛔ 错误 3 次，已被锁定 24 小时。")
+                return
+
+            # 普通错误 → 重新生成新题
+            verify_fail[user_id_str] = fail
+            save_fail(verify_fail)
+
             a = random.randint(5, 20)
             b = random.randint(5, 20)
-            pending_verification[user_id] = {"answer": a + b}
+            pending_verification[user_id_str] = {"answer": a + b}
             save_json(PENDING_FILE, pending_verification)
-            await update.message.reply_text(f"请先完成验证：\n {a} + {b} = ?")
+
+            await update.message.reply_text(f"❌ 验证错误！请回答新的问题：\n\n {a} + {b} = ?")
             return
 
+        # 未产生数学题 → 第一次验证
+        else:
+            a = random.randint(5, 20)
+            b = random.randint(5, 20)
+            pending_verification[user_id_str] = {"answer": a + b}
+            save_json(PENDING_FILE, pending_verification)
+            await update.message.reply_text(f"🤖 为了防止广告，请先通过验证：\n\n {a} + {b} = ?")
+            return
     # -------------------------
     # 2. 广告检测
     # -------------------------
