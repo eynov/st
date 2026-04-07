@@ -1,5 +1,22 @@
 #!/bin/bash
 
+echo "=============================="
+echo " Shadowsocks 管理模式"
+echo "=============================="
+echo "1) 批量新增（原脚本）"
+echo "2) 删除节点"
+echo "3) 查看节点"
+echo "0) 退出"
+echo "=============================="
+read -p "请选择: " MODE
+
+case $MODE in
+  2) DELETE_MODE=1 ;;
+  3) LIST_MODE=1 ;;
+  0) exit 0 ;;
+  *) ;;
+esac
+
 # ========== 安装 Shadowsocks-Rust ==========
 SS_DIR="/etc/shadowsocks"
 SS_EXEC="/usr/local/bin/ss-server"
@@ -23,6 +40,48 @@ fi
 if ! command -v qrencode >/dev/null 2>&1; then
   echo ">> 安装 qrencode..."
   sudo apt update && sudo apt install -y qrencode
+fi
+
+if [ "$DELETE_MODE" = "1" ]; then
+  read -p "输入要删除的端口（空格分隔）: " PORTS
+
+  for PORT in $PORTS; do
+    systemctl stop ss${PORT} 2>/dev/null
+    systemctl disable ss${PORT} 2>/dev/null
+
+    rm -f /etc/systemd/system/ss${PORT}.service
+    rm -f /etc/shadowsocks/config${PORT}.json
+
+    echo "🗑 已删除端口 ${PORT}"
+  done
+
+  systemctl daemon-reload
+  exit 0
+fi
+
+if [ "$LIST_MODE" = "1" ]; then
+  echo "当前节点列表："
+  echo "--------------------------------"
+
+  for file in /etc/shadowsocks/config*.json; do
+    [ -f "$file" ] || continue
+
+    PORT=$(grep server_port $file | grep -o '[0-9]\+')
+    PASSWORD=$(grep password $file | head -1 | cut -d '"' -f4)
+    METHOD=$(grep method $file | cut -d '"' -f4)
+
+    if systemctl is-active --quiet ss${PORT}; then
+      STATUS="运行中"
+    else
+      STATUS="已停止"
+    fi
+
+    echo "端口: $PORT | 加密: $METHOD | 状态: $STATUS"
+    echo "密码: $PASSWORD"
+    echo "--------------------------------"
+  done
+
+  exit 0
 fi
 
 # 获取公网 IP 或输入域名
@@ -157,6 +216,7 @@ EOL
   qrencode -t UTF8 "$LINK"
 
 done
+
 
 echo ">> 所有 Surge 节点已保存到：$SURGE_FILE"
 echo ">> 所有二维码 PNG 文件已保存到：$QR_DIR"
