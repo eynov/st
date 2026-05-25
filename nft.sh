@@ -47,31 +47,47 @@ echo "🔓 开启内核转发..."
 sysctl -w net.ipv4.ip_forward=1 > /dev/null
 echo "net.ipv4.ip_forward=1" > /etc/sysctl.d/99-forward.conf
 
-# 4. 生成 nftables 配置文件
-cat > "$NFT_CONF" << EOF
+# 4. 初始化 nftables 基础结构（如果文件不存在或为空）
+if [ ! -s "$NFT_CONF" ]; then
+    cat > "$NFT_CONF" << EOF
 flush ruleset
 
 table ip nat {
     chain prerouting {
         type nat hook prerouting priority dstnat; policy accept;
-        tcp dport $PORT_RANGE dnat to $DST_IP
-        udp dport $PORT_RANGE dnat to $DST_IP
     }
 
     chain postrouting {
         type nat hook postrouting priority srcnat; policy accept;
-        ip daddr $DST_IP tcp dport $PORT_RANGE snat to $SRC_IP
-        ip daddr $DST_IP udp dport $PORT_RANGE snat to $SRC_IP
     }
 }
 EOF
+    # 先加载一次基础结构
+    $NFT_BIN -f "$NFT_CONF"
+fi
 
-# 5. 应用并设置自启
-$NFT_BIN -f "$NFT_CONF"
-systemctl enable nftables
+# 5. 检查端口是否已经配置过，防止重复添加导致冲突
+if $NFT_BIN list ruleset | grep -q "dport $PORT_RANGE"; then
+    echo "⚠️  警告: 端口范围 $PORT_RANGE 似乎已经存在转发规则，跳过添加。"
+else
+    echo "➕ 正在追加转发规则..."
+    # 动态向内核中实时追加规则
+    $NFT_BIN add rule ip nat prerouting tcp dport "$PORT_RANGE" dnat to "$DST_IP"
+    $NFT_BIN add rule ip nat prerouting udp dport "$PORT_RANGE" dnat to "$DST_IP"
+    $NFT_BIN add rule ip nat postrouting ip daddr "$DST_IP" tcp dport "$PORT_RANGE" snat to "$SRC_IP"
+    $NFT_BIN add rule ip nat postrouting ip daddr "$DST_IP" udp dport "$PORT_RANGE" snat to "$SRC_IP"
+
+    # 6. 将当前运行中的完整规则导出保存到配置文件，确保重启不丢失
+    echo "💾 正在保存规则到配置文件..."
+    echo "flush ruleset" > "$NFT_CONF"
+    $NFT_BIN list ruleset >> "$NFT_CONF"
+fi
+
+# 7. 应用并设置自启
+systemctl enable nftables > /dev/null 2>&1
 systemctl restart nftables
 
 echo "---"
-echo "✅ 转发配置成功！"
+echo "✅ 转发配置成功并已追加！"
 echo "📍 本机 ($SRC_IP) : $PORT_RANGE -> 目标 ($DST_IP) : $PORT_RANGE"
-echo "📄 配置文件已保存至: $NFT_CONF"
+echo "📄 配置文件已更新: $NFT_CONF"
