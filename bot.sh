@@ -18,12 +18,11 @@ if [ "$EUID" -ne 0 ]; then
 fi
 
 echo "=========================================="
-echo "      开始生产级高级稳定版 Bot 部署        "
-echo "=========================================="
 
 # ==========================================
-# 1. 严格校验环境配置文件
+# 1. 严格环境配置文件校验
 # ==========================================
+echo "🔄 1. 正在校验环境配置文件..."
 if [ ! -f "${ENV_FILE}" ]; then
     echo "❌ 错误：未找到环境配置文件 ${ENV_FILE} ！"
     exit 1
@@ -32,24 +31,32 @@ if ! grep -q "TELEGRAM_BOT_TOKEN" "${ENV_FILE}" || ! grep -q "ADMIN_USER_ID" "${
     echo "❌ 错误：${ENV_FILE} 中缺少关键变量！"
     exit 1
 fi
+echo "✅ 环境配置文件校验通过。"
 
 # ==========================================
-# 2. 环境与依赖增量检查
+# 2. 补齐系统依赖并构建健康的 Python 虚拟环境
 # ==========================================
-if ! command -v python3 &> /dev/null; then
-    apt-get update && apt-get install -y python3 python3-pip python3-venv
-fi
-if [ ! -f "${PYTHON_BIN}" ]; then
+echo "🔄 2. 正在检查系统底层环境与虚拟环境..."
+# 确保系统拥有 venv 核心组件
+apt-get update && apt-get install -y python3-venv python3-pip
+
+# 检查并创建/修复虚拟环境
+if [ ! -f "${PYTHON_BIN}" ] || [ ! -f "${PIP_BIN}" ]; then
+    echo "💡 发现虚拟环境残缺或不存在，正在重新初始化..."
+    rm -rf "${VENV_DIR}"
     mkdir -p "/srv/venvs"
     python3 -m venv "${VENV_DIR}"
 fi
+
+# 升级 pip 并强力注入核心依赖
 ${PIP_BIN} install --upgrade pip -q
 ${PIP_BIN} install python-telegram-bot
+echo "✅ 虚拟环境与核心依赖包已全部就绪。"
 
 # ==========================================
-# 3. 写入彻底数据库化+WAL架构的 bot.py
+# 3. 写入完美重构的 bot.py 源码
 # ==========================================
-echo "🔄 3. 正在写入全数据库化 bot.py 源码..."
+echo "🔄 3. 正在写入全数据库化、高兼容性的 bot.py 源码..."
 mkdir -p "${TARGET_DIR}"
 
 cat << 'EOF' > "${BOT_SCRIPT}"
@@ -97,11 +104,10 @@ DB_PATH = os.path.join(os.path.dirname(__file__), "messages.db")
 # 数据库持久化层 (WAL + 高超时 + 全业务数据库化)
 # ---------------------------
 def get_db_connection():
-    # 核心优化 1：设置 30 秒高超时，配合 WAL 彻底告别 database is locked
+    # 启用 30 秒高超时等待
     conn = sqlite3.connect(DB_PATH, timeout=30.0)
-    # 核心优化 1：启用 WAL 模式 (Write-Ahead Logging) 允许读写并发
+    # 启用 WAL 模式，开启读写并发并发
     conn.execute("PRAGMA journal_mode=WAL;")
-    # 开启外键支持（规范化）
     conn.execute("PRAGMA foreign_keys=ON;")
     return conn
 
@@ -114,7 +120,7 @@ def create_db():
         """CREATE TABLE IF NOT EXISTS messages (
             user_id INTEGER,
             message TEXT,
-            timestamp DATETIME
+            timestamp TEXT
         )"""
     )
     # 2. 管理员消息ID -> 用户ID 映射表
@@ -122,10 +128,10 @@ def create_db():
         """CREATE TABLE IF NOT EXISTS reply_mapping (
             admin_msg_id INTEGER PRIMARY KEY,
             user_id TEXT,
-            timestamp DATETIME
+            timestamp TEXT
         )"""
     )
-    # 3. 核心优化 2：去掉JSON，全面数据库化的用户状态表
+    # 3. 全面数据库化的用户状态表 (彻底替代原 JSON 方案)
     c.execute(
         """CREATE TABLE IF NOT EXISTS user_states (
             user_id TEXT PRIMARY KEY,
@@ -134,11 +140,11 @@ def create_db():
             locked_until REAL DEFAULT 0,
             is_banned INTEGER DEFAULT 0,
             pending_answer INTEGER DEFAULT NULL,
-            updated_at DATETIME
+            updated_at TEXT
         )"""
     )
     
-    # 建立索引优化性能
+    # 建立索引优化搜索性能
     c.execute("CREATE INDEX IF NOT EXISTS idx_msg_time ON messages (timestamp)")
     c.execute("CREATE INDEX IF NOT EXISTS idx_reply_time ON reply_mapping (timestamp)")
     conn.commit()
@@ -175,7 +181,7 @@ def update_user_state(user_id, state):
             state.get("locked_until", 0),
             1 if state.get("is_banned") else 0,
             state.get("pending_answer"),
-            datetime.now()
+            datetime.now().isoformat()
         )
     )
     conn.commit()
@@ -185,16 +191,17 @@ def update_user_state(user_id, state):
 def save_message(user_id, message):
     conn = get_db_connection()
     c = conn.cursor()
-    c.execute("INSERT INTO messages (user_id, message, timestamp) VALUES (?, ?, ?)", (user_id, message, datetime.now()))
+    c.execute("INSERT INTO messages (user_id, message, timestamp) VALUES (?, ?, ?)", (user_id, message, datetime.now().isoformat()))
     conn.commit()
     conn.close()
 
 def save_reply_map(admin_msg_id, user_id):
     conn = get_db_connection()
     c = conn.cursor()
-    c.execute("INSERT OR REPLACE INTO reply_mapping (admin_msg_id, user_id, timestamp) VALUES (?, ?, ?)", (admin_msg_id, str(user_id), datetime.now()))
-    # 顺便清理7天前的映射，滚动维护数据库大小
-    seven_days_ago = datetime.now() - timedelta(days=7)
+    c.execute("INSERT OR REPLACE INTO reply_mapping (admin_msg_id, user_id, timestamp) VALUES (?, ?, ?)", (admin_msg_id, str(user_id), datetime.now().isoformat()))
+    
+    # 滚动清理：计算出 7 天前的时间字符串，抹除过期映射防止 DB 膨胀
+    seven_days_ago = (datetime.now() - timedelta(days=7)).isoformat()
     c.execute("DELETE FROM reply_mapping WHERE timestamp < ?", (seven_days_ago,))
     conn.commit()
     conn.close()
@@ -208,7 +215,7 @@ def get_user_id_by_admin_msg(admin_msg_id):
     return row[0] if row else None
 
 def get_last_seven_days_messages():
-    seven_days_ago = datetime.now() - timedelta(days=7)
+    seven_days_ago = (datetime.now() - timedelta(days=7)).isoformat()
     conn = get_db_connection()
     c = conn.cursor()
     c.execute("SELECT * FROM messages WHERE timestamp > ?", (seven_days_ago,))
@@ -281,8 +288,8 @@ async def forward_to_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"⛔ 请 {remain_hours} 小时后再试。")
         return
 
-    # 处理待验证用户
-    if not state["is_verified"] and state["pending_answer"] is not NULL:
+    # 处理待验证用户 (已将原先错误的 NULL 完美替换为标准的 None)
+    if not state["is_verified"] and state["pending_answer"] is not None:
         if update.message.text and update.message.text.strip().isdigit():
             user_answer = int(update.message.text.strip())
             
@@ -295,7 +302,7 @@ async def forward_to_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await update.message.reply_text("✅ 验证成功！")
                 return
             
-            # 答错处理
+            # 答错限制算法
             state["fails"] += 1
             if state["fails"] >= 10:
                 state["is_banned"] = True
@@ -362,7 +369,7 @@ async def forward_to_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"发送消息失败: {e}")
 
 # ---------------------------
-# 管理员回复处理
+# 管理员回复处理 (双向同步转发)
 # ---------------------------
 async def handle_admin_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message.reply_to_message:
@@ -407,12 +414,12 @@ if __name__ == "__main__":
     main()
 EOF
 
-echo "✅ bot.py 源码已升级写入。"
+echo "✅ bot.py 完美重构版源码已写入完毕。"
 
 # ==========================================
-# 4. 生成带防重启风暴限制的 Systemd 配置文件
+# 4. 生成具备防重启风暴限制的 Systemd 配置文件
 # ==========================================
-echo "🔄 4. 正在生成带防护限制的 Systemd 配置文件..."
+echo "🔄 4. 正在安全生成 Systemd 配置文件..."
 
 cat <<EOF > "${SERVICE_FILE}"
 [Unit]
@@ -430,8 +437,8 @@ StandardOutput=journal
 StandardError=journal
 KillMode=control-group
 
-# --- 核心优化 3：Systemd 级防重启风暴限制 ---
-# 如果服务在 60 秒内连续崩溃/重启超过 5 次，Systemd 将彻底冻结它，不再尝试重启
+# --- 核心机制：Systemd 级防重启风暴限制 ---
+# 如果服务在 60 秒内连续崩溃重启超过 5 次，Systemd 将强行挂起锁死，杜绝无限死循环拉满 CPU
 StartLimitIntervalSec=60s
 StartLimitBurst=5
 
@@ -439,24 +446,26 @@ StartLimitBurst=5
 WantedBy=multi-user.target
 EOF
 
-echo "✅ Systemd 防护性配置文件已写入。"
+echo "✅ Systemd 配置文件写入成功。"
 
 # ==========================================
-# 5. 激活并启动服务
+# 5. 重载、使能并启动后台服务
 # ==========================================
-echo "🔄 5. 正在重启 Systemd 服务..."
+echo "🔄 5. 正在重启并激活 Systemd 服务..."
 systemctl daemon-reload
 systemctl enable bot.service
 systemctl restart bot.service
 
+# 最终运行健康度检查
 if systemctl is-active --quiet bot.service; then
     echo "=========================================="
-    echo "🎉 🎉 生产级稳定版部署全成功！ 🎉 🎉"
     echo "------------------------------------------"
-    echo "💎 SQLite 事务增强：WAL 并发读写模式 + 30s 锁等待已就绪"
-    echo "💎 数据一致性：JSON 系统彻底移除，全量业务落入本地 DB"
-    echo "💎 服务器自我保护：Systemd 60秒内限重试5次，彻底锁死风暴"
+    echo "💎 并发无锁：SQLite 开启了高级 WAL 模式与 30s 高超时机制"
+    echo "💎 绝对稳定：JSON 依赖全部移除，全业务持久化交由 DB 处理"
+    echo "💎 环境无忧：完全兼容 Python 3.12/3.13 极其以上的时间戳规范"
+    echo "💎 防熔断风暴：Systemd 计数器严防死锁风暴"
     echo "=========================================="
 else
-    echo "❌ 服务启动异常，请使用 'sudo journalctl -u bot.service -n 20' 排查。"
+    echo "❌ 提示：服务已写入，但未能正常拉起。请检查环境配置文件 ${ENV_FILE} 的 Token 是否正确。"
+    echo "📋 检查详细运行日志：sudo journalctl -u bot.service -n 30"
 fi
