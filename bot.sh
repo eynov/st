@@ -37,10 +37,8 @@ echo "✅ 环境配置文件校验通过。"
 # 2. 补齐系统依赖并构建健康的 Python 虚拟环境
 # ==========================================
 echo "🔄 2. 正在检查系统底层环境与虚拟环境..."
-# 确保系统拥有 venv 核心组件
 apt-get update && apt-get install -y python3-venv python3-pip
 
-# 检查并创建/修复虚拟环境
 if [ ! -f "${PYTHON_BIN}" ] || [ ! -f "${PIP_BIN}" ]; then
     echo "💡 发现虚拟环境残缺或不存在，正在重新初始化..."
     rm -rf "${VENV_DIR}"
@@ -48,7 +46,6 @@ if [ ! -f "${PYTHON_BIN}" ] || [ ! -f "${PIP_BIN}" ]; then
     python3 -m venv "${VENV_DIR}"
 fi
 
-# 升级 pip 并强力注入核心依赖
 ${PIP_BIN} install --upgrade pip -q
 ${PIP_BIN} install python-telegram-bot
 echo "✅ 虚拟环境与核心依赖包已全部就绪。"
@@ -104,9 +101,7 @@ DB_PATH = os.path.join(os.path.dirname(__file__), "messages.db")
 # 数据库持久化层 (WAL + 高超时 + 全业务数据库化)
 # ---------------------------
 def get_db_connection():
-    # 启用 30 秒高超时等待
     conn = sqlite3.connect(DB_PATH, timeout=30.0)
-    # 启用 WAL 模式，开启读写并发并发
     conn.execute("PRAGMA journal_mode=WAL;")
     conn.execute("PRAGMA foreign_keys=ON;")
     return conn
@@ -131,7 +126,7 @@ def create_db():
             timestamp TEXT
         )"""
     )
-    # 3. 全面数据库化的用户状态表 (彻底替代原 JSON 方案)
+    # 3. 全面数据库化的用户状态表
     c.execute(
         """CREATE TABLE IF NOT EXISTS user_states (
             user_id TEXT PRIMARY KEY,
@@ -144,7 +139,6 @@ def create_db():
         )"""
     )
     
-    # 建立索引优化搜索性能
     c.execute("CREATE INDEX IF NOT EXISTS idx_msg_time ON messages (timestamp)")
     c.execute("CREATE INDEX IF NOT EXISTS idx_reply_time ON reply_mapping (timestamp)")
     conn.commit()
@@ -200,7 +194,7 @@ def save_reply_map(admin_msg_id, user_id):
     c = conn.cursor()
     c.execute("INSERT OR REPLACE INTO reply_mapping (admin_msg_id, user_id, timestamp) VALUES (?, ?, ?)", (admin_msg_id, str(user_id), datetime.now().isoformat()))
     
-    # 滚动清理：计算出 7 天前的时间字符串，抹除过期映射防止 DB 膨胀
+    # 滚动清理逻辑：先算日期对象，再整体转 iso 字符串，完美修复 TypeError 错误
     seven_days_ago = (datetime.now() - timedelta(days=7)).isoformat()
     c.execute("DELETE FROM reply_mapping WHERE timestamp < ?", (seven_days_ago,))
     conn.commit()
@@ -288,7 +282,6 @@ async def forward_to_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"⛔ 请 {remain_hours} 小时后再试。")
         return
 
-    # 处理待验证用户 (已将原先错误的 NULL 完美替换为标准的 None)
     if not state["is_verified"] and state["pending_answer"] is not None:
         if update.message.text and update.message.text.strip().isdigit():
             user_answer = int(update.message.text.strip())
@@ -302,7 +295,6 @@ async def forward_to_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await update.message.reply_text("✅ 验证成功！")
                 return
             
-            # 答错限制算法
             state["fails"] += 1
             if state["fails"] >= 10:
                 state["is_banned"] = True
@@ -414,17 +406,20 @@ if __name__ == "__main__":
     main()
 EOF
 
-echo "✅ bot.py 完美重构版源码已写入完毕。"
+echo "✅ bot.py 源码已写入完毕。"
 
 # ==========================================
-# 4. 生成具备防重启风暴限制的 Systemd 配置文件
+# 4. 生成规范化 Systemd 配置文件 (将限制移入 [Unit])
 # ==========================================
-echo "🔄 4. 正在安全生成 Systemd 配置文件..."
+echo "🔄 4. 正在安全生成符合现代规范的 Systemd 配置文件..."
 
 cat <<EOF > "${SERVICE_FILE}"
 [Unit]
 Description=bot Service
 After=network.target
+# --- 💎 核心升级：防重启风暴限制移至 [Unit] 区块，完美兼容现代 Systemd ---
+StartLimitIntervalSec=60s
+StartLimitBurst=5
 
 [Service]
 User=root
@@ -436,11 +431,6 @@ EnvironmentFile=${ENV_FILE}
 StandardOutput=journal
 StandardError=journal
 KillMode=control-group
-
-# --- 核心机制：Systemd 级防重启风暴限制 ---
-# 如果服务在 60 秒内连续崩溃重启超过 5 次，Systemd 将强行挂起锁死，杜绝无限死循环拉满 CPU
-StartLimitIntervalSec=60s
-StartLimitBurst=5
 
 [Install]
 WantedBy=multi-user.target
@@ -456,16 +446,14 @@ systemctl daemon-reload
 systemctl enable bot.service
 systemctl restart bot.service
 
-# 最终运行健康度检查
 if systemctl is-active --quiet bot.service; then
     echo "=========================================="
     echo "------------------------------------------"
-    echo "💎 并发无锁：SQLite 开启了高级 WAL 模式与 30s 高超时机制"
-    echo "💎 绝对稳定：JSON 依赖全部移除，全业务持久化交由 DB 处理"
-    echo "💎 环境无忧：完全兼容 Python 3.12/3.13 极其以上的时间戳规范"
-    echo "💎 防熔断风暴：Systemd 计数器严防死锁风暴"
+    echo "💎 并发增强：SQLite WAL 读写分离无锁架构"
+    echo "💎 绝对稳定：全量数据业务去 JSON 化，落入 DB"
+    echo "💎 代码合规：完美契合 Python 3.12+ / 3.13 时间戳类型"
+    echo "💎 防控规范：Systemd 频率限制位置纠正，警告彻底清除"
     echo "=========================================="
 else
-    echo "❌ 提示：服务已写入，但未能正常拉起。请检查环境配置文件 ${ENV_FILE} 的 Token 是否正确。"
-    echo "📋 检查详细运行日志：sudo journalctl -u bot.service -n 30"
+    echo "❌ 提示：服务启动异常，请检查 Token。日志查询：sudo journalctl -u bot.service -n 30"
 fi
