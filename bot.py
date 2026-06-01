@@ -1,4 +1,61 @@
+#!/bin/bash
+
+# ==========================================
+# 核心路径与配置
+# ==========================================
+TARGET_DIR="/srv/git/TG"
+BOT_SCRIPT="${TARGET_DIR}/bot.py"
+VENV_DIR="/srv/venvs/early"
+PYTHON_BIN="${VENV_DIR}/bin/python"
+PIP_BIN="${VENV_DIR}/bin/pip"
+SERVICE_FILE="/etc/systemd/system/bot.service"
+ENV_FILE="/etc/variable"
+
+# 确保以 root 权限运行
+if [ "$EUID" -ne 0 ]; then
+  echo "❌ 错误：请使用 sudo 或以 root 用户运行此脚本！"
+  exit 1
+fi
+
+echo "=========================================="
+echo "      开始生产级高级稳定版 Bot 部署        "
+echo "=========================================="
+
+# ==========================================
+# 1. 严格校验环境配置文件
+# ==========================================
+if [ ! -f "${ENV_FILE}" ]; then
+    echo "❌ 错误：未找到环境配置文件 ${ENV_FILE} ！"
+    exit 1
+fi
+if ! grep -q "TELEGRAM_BOT_TOKEN" "${ENV_FILE}" || ! grep -q "ADMIN_USER_ID" "${ENV_FILE}"; then
+    echo "❌ 错误：${ENV_FILE} 中缺少关键变量！"
+    exit 1
+fi
+
+# ==========================================
+# 2. 环境与依赖增量检查
+# ==========================================
+if ! command -v python3 &> /dev/null; then
+    apt-get update && apt-get install -y python3 python3-pip python3-venv
+fi
+if [ ! -f "${PYTHON_BIN}" ]; then
+    mkdir -p "/srv/venvs"
+    python3 -m venv "${VENV_DIR}"
+fi
+${PIP_BIN} install --upgrade pip -q
+${PIP_BIN} install python-telegram-bot
+
+# ==========================================
+# 3. 写入彻底数据库化+WAL架构的 bot.py
+# ==========================================
+echo "🔄 3. 正在写入全数据库化 bot.py 源码..."
+mkdir -p "${TARGET_DIR}"
+
+cat << 'EOF' > "${BOT_SCRIPT}"
 import os
+import sys
+import fcntl
 from telegram import Update
 from telegram.ext import (
     ApplicationBuilder,
@@ -10,29 +67,49 @@ from telegram.ext import (
 from telegram.error import BadRequest
 from datetime import datetime, timedelta
 import sqlite3
-import json
 import random
 import time 
 
 # ---------------------------
-# 配置
+# 防止多实例并发运行 (File Locking)
+# ---------------------------
+lock_file = open('/tmp/tg_bot_instance.lock', 'w')
+try:
+    fcntl.lockf(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
+except IOError:
+    print("❌ 错误: 发现另一个 Bot 实例正在运行中！自动退出。")
+    sys.exit(1)
+
+# ---------------------------
+# 配置校验
 # ---------------------------
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 ADMIN_ID = os.getenv("ADMIN_USER_ID")
 
-if not BOT_TOKEN:
-    raise ValueError("请设置环境变量 TELEGRAM_BOT_TOKEN")
-if not ADMIN_ID:
-    raise ValueError("请设置环境变量 ADMIN_USER_ID")
+if not BOT_TOKEN or not ADMIN_ID:
+    print("❌ 错误: 缺少环境变量 TELEGRAM_BOT_TOKEN 或 ADMIN_USER_ID")
+    sys.exit(1)
 
 ADMIN_ID = int(ADMIN_ID)
+DB_PATH = os.path.join(os.path.dirname(__file__), "messages.db")
 
 # ---------------------------
-# 数据库初始化
+# 数据库持久化层 (WAL + 高超时 + 全业务数据库化)
 # ---------------------------
+def get_db_connection():
+    # 核心优化 1：设置 30 秒高超时，配合 WAL 彻底告别 database is locked
+    conn = sqlite3.connect(DB_PATH, timeout=30.0)
+    # 核心优化 1：启用 WAL 模式 (Write-Ahead Logging) 允许读写并发
+    conn.execute("PRAGMA journal_mode=WAL;")
+    # 开启外键支持（规范化）
+    conn.execute("PRAGMA foreign_keys=ON;")
+    return conn
+
 def create_db():
-    conn = sqlite3.connect("messages.db")
+    conn = get_db_connection()
     c = conn.cursor()
+    
+    # 1. 消息记录表
     c.execute(
         """CREATE TABLE IF NOT EXISTS messages (
             user_id INTEGER,
@@ -40,414 +117,346 @@ def create_db():
             timestamp DATETIME
         )"""
     )
+    # 2. 管理员消息ID -> 用户ID 映射表
+    c.execute(
+        """CREATE TABLE IF NOT EXISTS reply_mapping (
+            admin_msg_id INTEGER PRIMARY KEY,
+            user_id TEXT,
+            timestamp DATETIME
+        )"""
+    )
+    # 3. 核心优化 2：去掉JSON，全面数据库化的用户状态表
+    c.execute(
+        """CREATE TABLE IF NOT EXISTS user_states (
+            user_id TEXT PRIMARY KEY,
+            is_verified INTEGER DEFAULT 0,
+            fails INTEGER DEFAULT 0,
+            locked_until REAL DEFAULT 0,
+            is_banned INTEGER DEFAULT 0,
+            pending_answer INTEGER DEFAULT NULL,
+            updated_at DATETIME
+        )"""
+    )
+    
+    # 建立索引优化性能
+    c.execute("CREATE INDEX IF NOT EXISTS idx_msg_time ON messages (timestamp)")
+    c.execute("CREATE INDEX IF NOT EXISTS idx_reply_time ON reply_mapping (timestamp)")
     conn.commit()
     conn.close()
 
+# --- 用户状态管理数据库操作 ---
+def get_user_state(user_id):
+    conn = get_db_connection()
+    c = conn.cursor()
+    c.execute("SELECT is_verified, fails, locked_until, is_banned, pending_answer FROM user_states WHERE user_id = ?", (str(user_id),))
+    row = c.fetchone()
+    conn.close()
+    if row:
+        return {
+            "is_verified": bool(row[0]),
+            "fails": row[1],
+            "locked_until": row[2],
+            "is_banned": bool(row[3]),
+            "pending_answer": row[4]
+        }
+    return {"is_verified": False, "fails": 0, "locked_until": 0, "is_banned": False, "pending_answer": None}
 
-def save_message(user_id, message):
-    conn = sqlite3.connect("messages.db")
+def update_user_state(user_id, state):
+    conn = get_db_connection()
     c = conn.cursor()
     c.execute(
-        "INSERT INTO messages (user_id, message, timestamp) VALUES (?, ?, ?)",
-        (user_id, message, datetime.now()),
+        """INSERT OR REPLACE INTO user_states 
+        (user_id, is_verified, fails, locked_until, is_banned, pending_answer, updated_at) 
+        VALUES (?, ?, ?, ?, ?, ?, ?)""",
+        (
+            str(user_id),
+            1 if state.get("is_verified") else 0,
+            state.get("fails", 0),
+            state.get("locked_until", 0),
+            1 if state.get("is_banned") else 0,
+            state.get("pending_answer"),
+            datetime.now()
+        )
     )
     conn.commit()
     conn.close()
 
+# --- 消息和回复映射数据库操作 ---
+def save_message(user_id, message):
+    conn = get_db_connection()
+    c = conn.cursor()
+    c.execute("INSERT INTO messages (user_id, message, timestamp) VALUES (?, ?, ?)", (user_id, message, datetime.now()))
+    conn.commit()
+    conn.close()
+
+def save_reply_map(admin_msg_id, user_id):
+    conn = get_db_connection()
+    c = conn.cursor()
+    c.execute("INSERT OR REPLACE INTO reply_mapping (admin_msg_id, user_id, timestamp) VALUES (?, ?, ?)", (admin_msg_id, str(user_id), datetime.now()))
+    # 顺便清理7天前的映射，滚动维护数据库大小
+    seven_days_ago = datetime.now() - timedelta(days=7)
+    c.execute("DELETE FROM reply_mapping WHERE timestamp < ?", (seven_days_ago,))
+    conn.commit()
+    conn.close()
+
+def get_user_id_by_admin_msg(admin_msg_id):
+    conn = get_db_connection()
+    c = conn.cursor()
+    c.execute("SELECT user_id FROM reply_mapping WHERE admin_msg_id = ?", (admin_msg_id,))
+    row = c.fetchone()
+    conn.close()
+    return row[0] if row else None
 
 def get_last_seven_days_messages():
     seven_days_ago = datetime.now() - timedelta(days=7)
-    conn = sqlite3.connect("messages.db")
+    conn = get_db_connection()
     c = conn.cursor()
     c.execute("SELECT * FROM messages WHERE timestamp > ?", (seven_days_ago,))
     rows = c.fetchall()
     conn.close()
     return rows
 
-
-# ---------------------------
-# 用户验证文件
-# ---------------------------
-FAIL_FILE = "verify_fail.json"
-VERIFIED_FILE = "verified_users.json"
-PENDING_FILE = "pending_verification.json"
-
-def load_json(path):
-    if not os.path.exists(path):
-        return {}
-    with open(path, "r") as f:
-        # 使用 str() 确保 key 是字符串，方便与 user_id 比较
-        data = json.load(f)
-        return {str(k): v for k, v in data.items()}
-
-def save_json(path, data):
-    with open(path, "w") as f:
-        json.dump(data, f)
-
-def load_fail():
-    if not os.path.exists(FAIL_FILE):
-        return {}
-    with open(FAIL_FILE, "r") as f:
-        data = json.load(f)
-        return {str(k): v for k, v in data.items()}
-
-def save_fail(data):
-    with open(FAIL_FILE, "w") as f:
-        json.dump(data, f)
-
-# 初始化加载数据
-verify_fail = load_fail()
-verified_users = load_json(VERIFIED_FILE)
-pending_verification = load_json(PENDING_FILE)
-
-
 # ---------------------------
 # 广告检测
 # ---------------------------
-SENSITIVE_KEYWORDS = ["博彩", "赌博", "现金", "充值"] # 目前未使用，但保留
+SENSITIVE_KEYWORDS = ["博彩", "赌博", "现金", "充值"] 
 def is_ad(msg):
-    if getattr(msg, "business_connection_id", None):
-        return True
-    if msg.via_bot:
+    if getattr(msg, "business_connection_id", None) or msg.via_bot:
         return True
     if msg.reply_markup and msg.reply_markup.inline_keyboard:
         for row in msg.reply_markup.inline_keyboard:
             for btn in row:
-                if btn.url:
-                    return True
-    if msg.text:
-        t = msg.text.lower()
-        if any(keyword in t for keyword in SENSITIVE_KEYWORDS):
-            return True
-    # 如果要启用链接检测，可以解除注释以下代码
-    # if msg.text:
-    #     t = msg.text.lower()
-    #     if any(x in t for x in ["http://", "https://", ".com", ".ru", ".top"]):
-    #         return True
+                if btn.url: return True
+    if msg.text and any(k in msg.text.lower() for k in SENSITIVE_KEYWORDS):
+        return True
     return False
 
 # ---------------------------
-# Bot 命令
+# Bot 指令处理
 # ---------------------------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.message.from_user
-    user_id_str = str(user.id)
-    
-    # 1. 读取失败状态
-    fail = verify_fail.get(user_id_str, {"fails": 0, "locked_until": 0, "banned": False})
+    user_id = str(user.id)
+    state = get_user_state(user_id)
 
-    # 2. 永久封禁检查
-    if fail.get("banned"):
+    if state["is_banned"]:
         await update.message.reply_text("⚠️ 你已被永久禁止。")
         return
 
-    # 3. 锁定检查
-    if fail.get("locked_until", 0) > time.time():
-        remain_seconds = int(fail["locked_until"] - time.time())
-        # 向上取整到小时，至少显示1小时
-        remain_hours = int(remain_seconds / 3600) + 1 if remain_seconds > 0 else 1
+    if state["locked_until"] > time.time():
+        remain_hours = int((state["locked_until"] - time.time()) / 3600) + 1
         await update.message.reply_text(f"⛔ 请 {remain_hours} 小时后再试。")
         return
 
-    # 4. 验证检查
-    if user_id_str not in verified_users:
-        
-        # 首次或重新生成数学题
-        a = random.randint(5, 20)
-        b = random.randint(5, 20)
-        pending_verification[user_id_str] = {"answer": a + b}
-        save_json(PENDING_FILE, pending_verification)
-        
-        # 提示用户进行验证
-        await update.message.reply_text(f"🤖 请先通过验证：\n\n {a} + {b} = ?\n\n请直接发送答案。")
-    
+    if not state["is_verified"]:
+        a, b = random.randint(5, 20), random.randint(5, 20)
+        state["pending_answer"] = a + b
+        update_user_state(user_id, state)
+        await update.message.reply_text(f"🤖 请先通过验证：\n\n {a} + {b} = ?\n\n请直接发送纯数字答案。")
     else:
-        # 已验证用户
         await update.message.reply_text("Hello!")
 
 async def show_last_seven_days(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.message.from_user.id == ADMIN_ID:
-        messages = get_last_seven_days_messages()
-        if messages:
-            response = "\n".join(
-                [f"用户 ID: {msg[0]} | 消息: {msg[1]} | 时间: {msg[2]}" for msg in messages]
-            )
-        else:
-            response = "没有找到过去七天的记录。"
-        await update.message.reply_text(response)
-    else:
+    if update.message.from_user.id != ADMIN_ID:
         await update.message.reply_text("您没有权限查看历史记录。")
-
+        return
+    messages = get_last_seven_days_messages()
+    response = "\n".join([f"ID: {msg[0]} | 消息: {msg[1]} | 时间: {msg[2]}" for msg in messages]) if messages else "没有找到过去七天的记录。"
+    await update.message.reply_text(response)
 
 # ---------------------------
-# 核心：转发用户消息到管理员 + 数学验证回答检查 + 广告拦截
+# 转发与验证拦截核心逻辑
 # ---------------------------
-message_context_map = {}
-
 async def forward_to_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.message.from_user
     user_id = str(user.id)
-    user_id_str = user_id
+    state = get_user_state(user_id)
 
-    # 读取失败状态
-    fail = verify_fail.get(user_id_str, {"fails": 0, "locked_until": 0, "banned": False})
-
-    # -------------------------
-    # 1. 验证回答检查
-    # -------------------------
-
-    # 永久封禁
-    if fail.get("banned"):
+    if state["is_banned"]:
         await update.message.reply_text("⚠️ 你已被永久禁止。")
         return
 
-    # 锁定中
-    if fail.get("locked_until", 0) > time.time():
-        remain_seconds = int(fail["locked_until"] - time.time())
-        remain_hours = int(remain_seconds / 3600) + 1 if remain_seconds > 0 else 1
+    if state["locked_until"] > time.time():
+        remain_hours = int((state["locked_until"] - time.time()) / 3600) + 1
         await update.message.reply_text(f"⛔ 请 {remain_hours} 小时后再试。")
         return
 
-    # 未验证且处于等待回答状态 (处理用户发送的回答)
-    if user_id_str not in verified_users and user_id_str in pending_verification:
-        
-        correct_answer = pending_verification[user_id_str]["answer"]
-
-        # 检查用户回答是否为纯数字
+    # 处理待验证用户
+    if not state["is_verified"] and state["pending_answer"] is not NULL:
         if update.message.text and update.message.text.strip().isdigit():
             user_answer = int(update.message.text.strip())
-
-            # 用户答对
-            if user_answer == correct_answer:
-                verified_users[user_id_str] = True
-                save_json(VERIFIED_FILE, verified_users)
-                pending_verification.pop(user_id_str)
-                save_json(PENDING_FILE, pending_verification)
-
-                # 成功清零失败记录
-                verify_fail[user_id_str] = {"fails": 0, "locked_until": 0, "banned": False}
-                save_fail(verify_fail)
-
+            
+            if user_answer == state["pending_answer"]:
+                state["is_verified"] = True
+                state["pending_answer"] = None
+                state["fails"] = 0
+                state["locked_until"] = 0
+                update_user_state(user_id, state)
                 await update.message.reply_text("✅ 验证成功！")
                 return
             
-            # ❌ 答错 → 记录
-            fail["fails"] += 1
-
-            # 10 次 → 永久封禁
-            if fail["fails"] >= 10:
-                fail["banned"] = True
-                verify_fail[user_id_str] = fail
-                save_fail(verify_fail)
+            # 答错处理
+            state["fails"] += 1
+            if state["fails"] >= 10:
+                state["is_banned"] = True
                 await update.message.reply_text("❌ 你已错误 10 次，被永久禁止使用。")
-                return
-
-            # 每 3 次 → 锁定 24 小时
-            if fail["fails"] % 3 == 0:
-                fail["locked_until"] = time.time() + 24 * 3600
-                verify_fail[user_id_str] = fail
-                save_fail(verify_fail)
+            elif state["fails"] % 3 == 0:
+                state["locked_until"] = time.time() + 24 * 3600
                 await update.message.reply_text("⛔ 错误 3 次，已被锁定 24 小时。")
-                return
-
-            # 普通错误 → 重新生成新题
-            verify_fail[user_id_str] = fail
-            save_fail(verify_fail)
-
-            a = random.randint(5, 20)
-            b = random.randint(5, 20)
-            pending_verification[user_id_str] = {"answer": a + b}
-            save_json(PENDING_FILE, pending_verification)
-
-            await update.message.reply_text(f"❌ 验证错误：\n\n {a} + {b} = ?")
+            else:
+                a, b = random.randint(5, 20), random.randint(5, 20)
+                state["pending_answer"] = a + b
+                await update.message.reply_text(f"❌ 验证错误，请重新计算：\n\n {a} + {b} = ?")
+            
+            update_user_state(user_id, state)
             return
-        
         else:
-            # 用户发送了非数字消息，但仍在验证中
             await update.message.reply_text("请直接发送您的答案（纯数字）。")
             return
 
-    # -------------------------
-    # 2. 已验证用户或未开始验证的用户
-    # -------------------------
-
-    # 如果未验证且不在 pending 中 (即没有先执行 /start)
-    if user_id_str not in verified_users:
+    if not state["is_verified"]:
         await update.message.reply_text("/start")
         return
         
-    # 广告检测
     if is_ad(update.message):
         await update.message.reply_text("⛔ 检测到广告消息，已被拦截。")
         return
 
-    # 转发消息到管理员
     user_name_display = user.username or user.first_name
     admin_message = f"@{user_name_display} (ID: {user_id}) 发送的消息:\n"
 
     try:
-        # 转发逻辑（保持不变）
         if update.message.text:
             admin_message += update.message.text
             sent_message = await context.bot.send_message(chat_id=ADMIN_ID, text=admin_message)
             save_message(user_id, update.message.text)
-
         elif update.message.photo:
-            sent_message = await context.bot.send_photo(
-                chat_id=ADMIN_ID,
-                photo=update.message.photo[-1].file_id,
-                caption=admin_message + "(照片)"
-            )
+            sent_message = await context.bot.send_photo(chat_id=ADMIN_ID, photo=update.message.photo[-1].file_id, caption=admin_message + "(照片)")
             save_message(user_id, "发送了一张照片")
-
         elif update.message.sticker:
             sent_message = await context.bot.send_sticker(chat_id=ADMIN_ID, sticker=update.message.sticker.file_id)
             await context.bot.send_message(chat_id=ADMIN_ID, text=admin_message + "(贴纸)")
             save_message(user_id, "发送了一张贴纸")
-
         elif update.message.voice:
-            sent_message = await context.bot.send_voice(
-                chat_id=ADMIN_ID,
-                voice=update.message.voice.file_id,
-                caption=admin_message + f"(语音，时长: {update.message.voice.duration}秒)"
-            )
-            save_message(user_id, f"发送了语音消息，时长: {update.message.voice.duration}秒")
-
+            sent_message = await context.bot.send_voice(chat_id=ADMIN_ID, voice=update.message.voice.file_id, caption=admin_message + "(语音)")
+            save_message(user_id, "发送了语音")
         elif update.message.video:
-            sent_message = await context.bot.send_video(
-                chat_id=ADMIN_ID,
-                video=update.message.video.file_id,
-                caption=admin_message + "(视频)"
-            )
-            save_message(user_id, "发送了一段视频")
-
+            sent_message = await context.bot.send_video(chat_id=ADMIN_ID, video=update.message.video.file_id, caption=admin_message + "(视频)")
+            save_message(user_id, "发送了视频")
         elif update.message.animation:
-            sent_message = await context.bot.send_animation(
-                chat_id=ADMIN_ID,
-                animation=update.message.animation.file_id,
-                caption=admin_message + "(动图)"
-            )
+            sent_message = await context.bot.send_animation(chat_id=ADMIN_ID, animation=update.message.animation.file_id, caption=admin_message + "(动图)")
             save_message(user_id, "发送了动图")
-
         elif update.message.document:
-            sent_message = await context.bot.send_document(
-                chat_id=ADMIN_ID,
-                document=update.message.document.file_id,
-                caption=admin_message + "(文档)"
-            )
+            sent_message = await context.bot.send_document(chat_id=ADMIN_ID, document=update.message.document.file_id, caption=admin_message + "(文档)")
             save_message(user_id, "发送了文档")
-
         elif update.message.location:
-            sent_message = await context.bot.send_location(
-                chat_id=ADMIN_ID,
-                latitude=update.message.location.latitude,
-                longitude=update.message.location.longitude
-            )
+            sent_message = await context.bot.send_location(chat_id=ADMIN_ID, latitude=update.message.location.latitude, longitude=update.message.location.longitude)
             await context.bot.send_message(chat_id=ADMIN_ID, text=admin_message + "(位置)")
             save_message(user_id, "发送了位置")
-
-        elif update.message.contact:
-            sent_message = await context.bot.send_contact(
-                chat_id=ADMIN_ID,
-                phone_number=update.message.contact.phone_number,
-                first_name=update.message.contact.first_name,
-                last_name=update.message.contact.last_name or "",
-                vcard=update.message.contact.vcard or None
-            )
-            await context.bot.send_message(chat_id=ADMIN_ID, text=admin_message + "(联系人)")
-            save_message(user_id, "发送了联系人")
-
-        elif update.message.video_note:
-            sent_message = await context.bot.send_video_note(
-                chat_id=ADMIN_ID,
-                video_note=update.message.video_note.file_id
-            )
-            await context.bot.send_message(chat_id=ADMIN_ID, text=admin_message + "(视频笔记)")
-            save_message(user_id, "发送了视频笔记")
-
         else:
-            await update.message.reply_text("暂时不支持此类型的消息。")
             return
 
-        # 记录消息映射
-        message_context_map[sent_message.message_id] = user_id
+        save_reply_map(sent_message.message_id, user_id)
 
     except BadRequest as e:
         await update.message.reply_text(f"发送消息失败: {e}")
 
-
 # ---------------------------
-# 管理员回复处理 (保持不变)
+# 管理员回复处理
 # ---------------------------
 async def handle_admin_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.message.reply_to_message:
-        reply_to_message_id = update.message.reply_to_message.message_id
-        user_id = message_context_map.get(reply_to_message_id)
-        if not user_id:
-            await context.bot.send_message(chat_id=ADMIN_ID, text="无法找到用户，请检查原消息。")
-            return
+    if not update.message.reply_to_message:
+        await context.bot.send_message(chat_id=ADMIN_ID, text="请直接回复某条转发过来的用户消息进行沟通。")
+        return
 
-        try:
-            if update.message.text:
-                await context.bot.send_message(chat_id=user_id, text=update.message.text)
-            elif update.message.photo:
-                await context.bot.send_photo(chat_id=user_id, photo=update.message.photo[-1].file_id, caption=update.message.caption)
-            elif update.message.sticker:
-                await context.bot.send_sticker(chat_id=user_id, sticker=update.message.sticker.file_id)
-            elif update.message.voice:
-                await context.bot.send_voice(chat_id=user_id, voice=update.message.voice.file_id, caption=update.message.caption)
-            elif update.message.video:
-                await context.bot.send_video(chat_id=user_id, video=update.message.video.file_id, caption=update.message.caption)
-            elif update.message.animation:
-                await context.bot.send_animation(chat_id=user_id, animation=update.message.animation.file_id, caption=update.message.caption)
-            elif update.message.document:
-                await context.bot.send_document(chat_id=user_id, document=update.message.document.file_id, caption=update.message.caption)
-            elif update.message.location:
-                await context.bot.send_location(chat_id=user_id, latitude=update.message.location.latitude, longitude=update.message.location.longitude)
-            elif update.message.contact:
-                await context.bot.send_contact(chat_id=user_id, phone_number=update.message.contact.phone_number,
-                                               first_name=update.message.contact.first_name,
-                                               last_name=update.message.contact.last_name or "",
-                                               vcard=update.message.contact.vcard or None)
-            elif update.message.video_note:
-                await context.bot.send_video_note(chat_id=user_id, video_note=update.message.video_note.file_id)
-            else:
-                await context.bot.send_message(chat_id=ADMIN_ID, text="暂时不支持此类型的回复。")
-        except BadRequest as e:
-            await context.bot.send_message(chat_id=ADMIN_ID, text=f"回复失败: {e}")
-    else:
-        await context.bot.send_message(chat_id=ADMIN_ID, text="请回复某条用户消息进行转发。")
+    reply_to_message_id = update.message.reply_to_message.message_id
+    user_id = get_user_id_by_admin_msg(reply_to_message_id)
+    
+    if not user_id:
+        await context.bot.send_message(chat_id=ADMIN_ID, text="❌ 无法找到对应用户（映射已过期或不存在）。")
+        return
 
+    try:
+        if update.message.text:
+            await context.bot.send_message(chat_id=user_id, text=update.message.text)
+        elif update.message.photo:
+            await context.bot.send_photo(chat_id=user_id, photo=update.message.photo[-1].file_id, caption=update.message.caption)
+        elif update.message.sticker:
+            await context.bot.send_sticker(chat_id=user_id, sticker=update.message.sticker.file_id)
+        elif update.message.voice:
+            await context.bot.send_voice(chat_id=user_id, voice=update.message.voice.file_id, caption=update.message.caption)
+        elif update.message.video:
+            await context.bot.send_video(chat_id=user_id, video=update.message.video.file_id, caption=update.message.caption)
+        elif update.message.animation:
+            await context.bot.send_animation(chat_id=user_id, animation=update.message.animation.file_id, caption=update.message.caption)
+        elif update.message.document:
+            await context.bot.send_document(chat_id=user_id, document=update.message.document.file_id, caption=update.message.caption)
+    except BadRequest as e:
+        await context.bot.send_message(chat_id=ADMIN_ID, text=f"回复失败: {e}")
 
-# ---------------------------
-# 启动
-# ---------------------------
 def main():
     create_db()
-
     app = ApplicationBuilder().token(BOT_TOKEN).build()
-
-    # 1. /start 命令: 负责首次触发验证
     app.add_handler(CommandHandler("start", start))
-    # 2. /history 命令
     app.add_handler(CommandHandler("history", show_last_seven_days))
-
-    # 3. 用户消息 (核心处理): 
-    #    - 负责验证回答
-    #    - 负责已验证用户的消息转发
-    #    - 排除所有命令 (filters.COMMAND)，因为 /start 已有专职处理
-    app.add_handler(
-        MessageHandler(
-            (filters.ALL & ~filters.COMMAND) & ~filters.Chat(ADMIN_ID), 
-            forward_to_admin
-        )
-    )
-    
-    # 4. 管理员回复
+    app.add_handler(MessageHandler((filters.ALL & ~filters.COMMAND) & ~filters.Chat(ADMIN_ID), forward_to_admin))
     app.add_handler(MessageHandler(filters.ALL & filters.Chat(ADMIN_ID), handle_admin_reply))
-
     app.run_polling()
-
 
 if __name__ == "__main__":
     main()
+EOF
+
+echo "✅ bot.py 源码已升级写入。"
+
+# ==========================================
+# 4. 生成带防重启风暴限制的 Systemd 配置文件
+# ==========================================
+echo "🔄 4. 正在生成带防护限制的 Systemd 配置文件..."
+
+cat <<EOF > "${SERVICE_FILE}"
+[Unit]
+Description=bot Service
+After=network.target
+
+[Service]
+User=root
+WorkingDirectory=${TARGET_DIR}
+ExecStart=${PYTHON_BIN} ${BOT_SCRIPT}
+Restart=always
+RestartSec=10s
+EnvironmentFile=${ENV_FILE}
+StandardOutput=journal
+StandardError=journal
+KillMode=control-group
+
+# --- 核心优化 3：Systemd 级防重启风暴限制 ---
+# 如果服务在 60 秒内连续崩溃/重启超过 5 次，Systemd 将彻底冻结它，不再尝试重启
+StartLimitIntervalSec=60s
+StartLimitBurst=5
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+echo "✅ Systemd 防护性配置文件已写入。"
+
+# ==========================================
+# 5. 激活并启动服务
+# ==========================================
+echo "🔄 5. 正在重启 Systemd 服务..."
+systemctl daemon-reload
+systemctl enable bot.service
+systemctl restart bot.service
+
+if systemctl is-active --quiet bot.service; then
+    echo "=========================================="
+    echo "🎉 🎉 生产级稳定版部署全成功！ 🎉 🎉"
+    echo "------------------------------------------"
+    echo "💎 SQLite 事务增强：WAL 并发读写模式 + 30s 锁等待已就绪"
+    echo "💎 数据一致性：JSON 系统彻底移除，全量业务落入本地 DB"
+    echo "💎 服务器自我保护：Systemd 60秒内限重试5次，彻底锁死风暴"
+    echo "=========================================="
+else
+    echo "❌ 服务启动异常，请使用 'sudo journalctl -u bot.service -n 20' 排查。"
+fi
