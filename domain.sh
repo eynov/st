@@ -365,10 +365,10 @@ function list_domains() {
 
 # ========== 主菜单 ==========
 while true; do
-    echo -e "\n====== Nginx 子域名  ======"
-    echo "1. 添加域名 ”
-    echo "2. 批量添加子域名到 Cloudflare”
-    echo "3. 删除域名 "
+    echo -e "\n====== Nginx 子域名管理 ======"
+    echo "1. 添加域名"
+    echo "2. 批量添加子域名到"
+    echo "3. 删除域名"
     echo "4. 启用已配置但未启用的域名"
     echo "5. 禁用正在启用的域名"
     echo "6. 列出已启用域名"
