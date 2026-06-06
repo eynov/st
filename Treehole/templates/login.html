@@ -1,0 +1,121 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Login</title>
+  <style>
+    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600&display=swap');
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      background: #0a0a0a;
+      font-family: 'Inter', sans-serif;
+      color: #f5f5f5;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      min-height: 100vh;
+      padding: 1.5rem;
+    }
+
+    .login-box {
+      background: rgba(24, 24, 24, 0.85);
+      backdrop-filter: blur(10px);
+      border: 1px solid rgba(255, 255, 255, 0.05);
+      border-radius: 16px;
+      padding: 2.5rem 2rem;
+      width: 100%;
+      max-width: 400px;
+      box-shadow: 0 0 30px rgba(255, 77, 166, 0.12);
+    }
+
+    .login-box h2 {
+      text-align: center;
+      font-size: 1.6rem;
+      font-weight: 600;
+      margin-bottom: 2rem;
+      background: linear-gradient(90deg, #ff4da6, #c471ed);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+    }
+
+    input[type="text"],
+    input[type="password"] {
+      width: 100%;
+      padding: 0.75rem 1rem;
+      margin-bottom: 1.2rem;
+      background: #121212;
+      border: 1px solid #333;
+      border-radius: 8px;
+      font-size: 1rem;
+      color: #eee;
+      transition: border 0.3s ease, box-shadow 0.3s ease;
+      caret-color: #ff4da6;
+    }
+
+    input:focus {
+      outline: none;
+      border-color: #ff4da6;
+      box-shadow: 0 0 6px #ff4da655;
+    }
+
+    button {
+      width: 100%;
+      padding: 0.9rem 0;
+      background: linear-gradient(135deg, #ff4da6, #9b2c6a);
+      border: none;
+      border-radius: 8px;
+      color: white;
+      font-weight: 600;
+      font-size: 1.05rem;
+      cursor: pointer;
+      transition: background 0.3s ease;
+      user-select: none;
+    }
+
+    button:hover {
+      background: linear-gradient(135deg, #e04398, #801d54);
+    }
+
+    .alert {
+      background: rgba(255, 77, 166, 0.1);
+      color: #ff4da6;
+      padding: 0.75rem 1rem;
+      border-radius: 8px;
+      font-size: 0.95rem;
+      margin-bottom: 1.5rem;
+      text-align: center;
+    }
+
+    @media (max-width: 480px) {
+      .login-box {
+        padding: 2rem 1.5rem;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div class="login-box">
+    <h2>Admin Login</h2>
+    {% with messages = get_flashed_messages() %}
+      {% if messages %}
+        {% for message in messages %}
+          {% if message != "Please log in to access this page." %}
+            <div class="alert">{{ message }}</div>
+          {% endif %}
+        {% endfor %}
+      {% endif %}
+    {% endwith %}
+    <form method="POST">
+      <input type="text" name="username" placeholder="Username" required />
+      <input type="password" name="password" placeholder="Password" required />
+      <button type="submit">Login</button>
+    </form>
+  </div>
+</body>
+</html>

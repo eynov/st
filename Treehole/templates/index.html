@@ -1,0 +1,358 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Anonymous Treehole</title>
+  <style>
+    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600&display=swap');
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      padding: 1rem;
+      background: #0a0a0a;
+      font-family: 'Inter', sans-serif;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      min-height: 100vh;
+      color: #f5f5f5;
+    }
+
+    .container {
+      background: rgba(20, 20, 20, 0.85);
+      backdrop-filter: blur(10px);
+      border: 1px solid rgba(255, 255, 255, 0.05);
+      border-radius: 16px;
+      padding: 2.5rem 2rem;
+      max-width: 480px;
+      width: 100%;
+      display: flex;
+      flex-direction: column;
+      gap: 1rem;
+      box-shadow: 0 0 30px rgba(255, 77, 166, 0.15);
+    }
+
+    .title {
+      text-align: center;
+      font-size: 1.8rem;
+      font-weight: 600;
+      background: linear-gradient(90deg, #ff4da6, #c471ed);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      margin: 0 0 1.5rem;
+      letter-spacing: 1px;
+    }
+
+    label {
+      font-weight: 500;
+      margin-bottom: 0.4rem;
+      display: block;
+      color: #f0a0c0;
+      font-size: 0.95rem;
+    }
+
+    textarea,
+    input[type="text"],
+    input[type="email"],
+    input[type="file"] {
+      width: 100%;
+      padding: 0.75rem 1rem;
+      background: #121212;
+      border: 1px solid #333;
+      border-radius: 8px;
+      font-size: 1rem;
+      color: #eee;
+      resize: vertical;
+      transition: border-color 0.3s ease, box-shadow 0.3s ease;
+      caret-color: #ff4da6;
+    }
+
+    textarea:focus,
+    input[type="text"]:focus,
+    input[type="email"]:focus,
+    input[type="file"]:focus {
+      outline: none;
+      border-color: #ff4da6;
+      box-shadow: 0 0 6px #ff4da655;
+    }
+
+    button {
+      background: linear-gradient(135deg, #ff4da6, #9b2c6a);
+      border: none;
+      border-radius: 8px;
+      padding: 0.9rem 0;
+      color: white;
+      font-weight: 600;
+      font-size: 1.1rem;
+      cursor: pointer;
+      transition: background 0.3s ease;
+      margin-top: 1rem;
+      user-select: none;
+    }
+
+    button:hover:not(:disabled) {
+      background: linear-gradient(135deg, #e04398, #801d54);
+    }
+
+    button:disabled {
+      background: #555 !important;
+      cursor: not-allowed;
+      color: #ccc;
+    }
+
+    .optional-note {
+      font-size: 0.8rem;
+      color: #999;
+      margin-top: -0.6rem;
+      margin-bottom: 1rem;
+    }
+
+    ::placeholder {
+      color: #666;
+    }
+
+    #charCounter {
+      font-size: 0.85rem;
+      color: #ff4da6;
+      text-align: right;
+      margin-top: -0.8rem;
+      margin-bottom: 0.8rem;
+    }
+
+    #previewContainer {
+      display: flex;
+      flex-wrap: nowrap;
+      gap: 0.6rem;
+      overflow-x: auto;
+      padding-bottom: 0.5rem;
+      margin-bottom: 0.5rem;
+      scrollbar-width: thin;
+    }
+
+    #previewContainer img {
+      height: 80px;
+      border-radius: 6px;
+      flex-shrink: 0;
+      object-fit: cover;
+      box-shadow: 0 0 4px rgba(255, 255, 255, 0.1);
+    }
+
+    #toast {
+      position: fixed;
+      top: 50%;
+      left: 50%;
+      transform: translate(-50%, -50%) scale(0.95);
+      background: rgba(40, 40, 40, 0.95);
+      color: #fff;
+      padding: 1rem 1.5rem;
+      border-radius: 12px;
+      box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+      font-weight: 500;
+      font-size: 1rem;
+      z-index: 1000;
+      opacity: 0;
+      pointer-events: none;
+      transition: opacity 0.4s ease, transform 0.4s ease;
+      white-space: pre-line;
+      max-width: 80%;
+      text-align: center;
+    }
+
+    #toast.show {
+      opacity: 1;
+      transform: translate(-50%, -50%) scale(1);
+      pointer-events: auto;
+    }
+
+    #previewContainer div {
+      position: relative;
+    }
+  </style>
+</head>
+<body>
+
+  <script>const POW_SALT = "{{ pow_salt }}";</script>
+
+  <form class="container" method="POST" enctype="multipart/form-data" id="treeholeForm" novalidate>
+    <div class="title">Anonymous</div>
+
+    <div style="display:none !important;">
+      <input type="text" name="username_fake" autocomplete="off" tabIndex="-1">
+    </div>
+
+    <input type="hidden" id="pow_nonce" name="pow_nonce">
+
+    <label for="message">Your Message <span style="color:#ff4da6">*</span></label>
+    <textarea id="message" name="message" rows="6" placeholder="Write your thoughts here..."></textarea>
+    <div id="charCounter">0 / 500 characters</div>
+
+    <label for="file">Attach files <span class="optional-note">(optional, multiple allowed)</span></label>
+    <input type="file" id="file" name="file[]" accept="image/*,audio/*,video/*" multiple />
+
+    <div id="previewContainer"></div>
+
+    <button type="submit" id="submitBtn" disabled>Send Anonymously</button>
+  </form>
+
+  <div id="toast"></div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/crypto-js/4.1.1/crypto-js.min.js"></script>
+<script>
+document.addEventListener('DOMContentLoaded', () => {
+  const form = document.getElementById('treeholeForm');
+  const message = document.getElementById('message');
+  const submitBtn = document.getElementById('submitBtn');
+  const charCounter = document.getElementById('charCounter');
+  const fileInput = document.getElementById('file');
+  const previewContainer = document.getElementById('previewContainer');
+  const maxChars = 500;
+
+  message.focus();
+
+  // 更新字符计数和提交按钮状态
+  function updateStatus() {
+    const msgLen = message.value.trim().length;
+    charCounter.textContent = `${msgLen} / ${maxChars} characters`;
+
+    const hasText = msgLen > 0 && msgLen <= maxChars;
+    const hasFiles = fileInput.files.length > 0;
+
+    if ((hasText || hasFiles) && msgLen <= maxChars) {
+      submitBtn.disabled = false;
+      submitBtn.style.cursor = 'pointer';
+    } else {
+      submitBtn.disabled = true;
+      submitBtn.style.cursor = 'not-allowed';
+    }
+
+    charCounter.style.color = msgLen > maxChars ? '#e53e3e' : '#ff4da6';
+  }
+
+  // 文件预览
+  function updatePreview() {
+    previewContainer.innerHTML = '';
+    const files = Array.from(fileInput.files);
+    if (files.length === 0) return;
+
+    files.forEach((file, index) => {
+      if (file.type.startsWith('image/')) {
+        const wrapper = document.createElement('div');
+        const img = document.createElement('img');
+        const delBtn = document.createElement('button');
+
+        const reader = new FileReader();
+        reader.onload = e => img.src = e.target.result;
+        reader.readAsDataURL(file);
+
+        img.alt = 'preview';
+        wrapper.style.position = 'relative';
+
+        delBtn.textContent = '×';
+        delBtn.style.cssText = `
+          position: absolute; top: -6px; right: -6px;
+          background: rgba(0,0,0,0.6); border: none;
+          color: #fff; border-radius: 50%;
+          width: 20px; height: 20px; cursor: pointer;
+          font-weight: bold; font-size: 14px; line-height: 16px; padding: 0;
+        `;
+
+        delBtn.onclick = () => {
+          const dt = new DataTransfer();
+          files.forEach((f, i) => {
+            if (i !== index) dt.items.add(f);
+          });
+          fileInput.files = dt.files;
+          updatePreview();
+          updateStatus();
+        };
+
+        wrapper.appendChild(img);
+        wrapper.appendChild(delBtn);
+        previewContainer.appendChild(wrapper);
+      }
+    });
+  }
+
+  // 提示消息
+  function showToast(message, duration = 3000) {
+    const toast = document.getElementById('toast');
+    toast.textContent = message;
+    toast.classList.add('show');
+    setTimeout(() => {
+      toast.classList.remove('show');
+    }, duration);
+  }
+
+  // 监听输入和文件变化
+  message.addEventListener('input', updateStatus);
+  message.addEventListener('change', updateStatus);
+  message.addEventListener('paste', updateStatus);
+  fileInput.addEventListener('change', () => {
+    updatePreview();
+    updateStatus();
+  });
+
+  // 表单无感安全计算并提交
+  form.addEventListener('submit', async (e) => {
+    e.preventDefault();
+
+    submitBtn.disabled = true;
+    submitBtn.textContent = '🔒 Checking security...';
+    submitBtn.style.cursor = 'not-allowed';
+
+    // ⚡ 核心逻辑：利用浏览器后台在 0.1 秒内暴力碰撞哈希，生成人机防刷凭证
+    let nonce = 0;
+    while (true) {
+      let hash = CryptoJS.MD5(POW_SALT + nonce).toString();
+      if (hash.startsWith('000')) { // 与后端验证规则对齐
+        break;
+      }
+      nonce++;
+    }
+
+    // 将计算出的正确 nonce 写入隐藏域
+    document.getElementById('pow_nonce').value = nonce;
+    submitBtn.textContent = 'Sending...';
+
+    const formData = new FormData(form);
+
+    try {
+      const resp = await fetch('/', {
+        method: 'POST',
+        body: formData,
+      });
+      const result = await resp.json();
+
+      if (result.success) {
+        showToast(result.message || 'Message sent successfully!');
+        form.reset();
+        previewContainer.innerHTML = '';
+        updateStatus();
+        // 1.5秒后自动刷新，重新拉取后端生成的新安全盐（Salt）
+        setTimeout(() => {
+          window.location.reload();
+        }, 1500);
+      } else {
+        showToast('❌ ' + (result.message || 'Verification failed. Please try again.'));
+        setTimeout(() => { window.location.reload(); }, 1500);
+      }
+    } catch (err) {
+      showToast('❌ Failed to connect to server.');
+      submitBtn.textContent = 'Send Anonymously';
+      submitBtn.disabled = false;
+      submitBtn.style.cursor = 'pointer';
+    }
+  });
+
+  // 初始化状态
+  updateStatus();
+});
+</script>
+</body>
+</html>
+

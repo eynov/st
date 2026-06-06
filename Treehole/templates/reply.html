@@ -1,0 +1,37 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Reply Message</title>
+  <style>
+    body { font-family: sans-serif; padding: 2rem; background: #f5f7fa; }
+    .box { background: white; padding: 2rem; max-width: 600px; margin: auto; box-shadow: 0 0 5px rgba(0,0,0,0.1); border-radius: 6px; }
+    textarea, button {
+      width: 100%; margin-top: 1rem; padding: 1rem;
+      font-size: 1rem; border-radius: 6px;
+    }
+    textarea { height: 150px; border: 1px solid #ccc; resize: vertical; }
+    button {
+      background: #2563eb; color: white; border: none;
+      cursor: pointer; font-weight: bold;
+    }
+    button:hover { background: #1e40af; }
+    .info { font-size: 0.9rem; color: #444; line-height: 1.5; }
+  </style>
+</head>
+<body>
+  <div class="box">
+    <h2>📨 Reply to Message #{{ message.id }}</h2>
+    <div class="info">
+      <p><strong>Original message:</strong></p>
+      <p>{{ message.message }}</p>
+      <p>Email: {{ message.email or "N/A" }}</p>
+      <p>Telegram: {{ message.telegram_id or "N/A" }}</p>
+    </div>
+    <form method="POST">
+      <textarea name="reply" placeholder="Write your reply here..." required></textarea>
+      <button type="submit">Send Reply</button>
+    </form>
+  </div>
+</body>
+</html>

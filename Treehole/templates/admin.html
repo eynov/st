@@ -1,0 +1,62 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Admin - Messages</title>
+  <style>
+    body { background:#121212; color:#eee; font-family: Arial, sans-serif; }
+    table { width: 100%; border-collapse: collapse; }
+    th, td { padding: 8px; border: 1px solid #444; }
+    th { background: #222; }
+    a { color: #ff4da6; text-decoration: none; }
+    a:hover { text-decoration: underline; }
+    .attachments img { height: 60px; margin-right: 6px; border-radius: 6px; }
+    form { display: inline; }
+    button { background: #e53e3e; border: none; color: white; padding: 4px 8px; border-radius: 4px; cursor: pointer; }
+    button:hover { background: #c53030; }
+  </style>
+</head>
+<body>
+  <h1 style="float: left;">Admin - Messages</h1>
+  <a href="{{ url_for('logout') }}" style="float: right; margin-top: 25px; color: #ff4da6; text-decoration: none; font-weight: bold;">Logout</a>
+  <div style="clear: both;"></div>
+
+  <table>
+    <thead>
+      <tr>
+        <th>ID</th><th>Message</th><th>Attachments</th><th>Reply</th><th>Created At</th><th>Actions</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for msg in messages %}
+      <tr>
+        <td>{{ msg.id }}</td>
+        <td style="white-space: pre-wrap;">{{ msg.message }}</td>
+        <td class="attachments">
+          {% for att in msg.attachments %}
+            {% set ext = att.filename.rsplit('.', 1)[1].lower() %}
+            {% if ext in ['png','jpg','jpeg','gif'] %}
+              <a href="{{ url_for('uploaded_file', filename=att.filename) }}" target="_blank">
+                <img src="{{ url_for('uploaded_file', filename=att.filename) }}" alt="img"/>
+              </a>
+            {% else %}
+              <a href="{{ url_for('uploaded_file', filename=att.filename) }}" target="_blank">{{ att.filename }}</a><br/>
+            {% endif %}
+          {% else %}
+            None
+          {% endfor %}
+        </td>
+        <td>{{ msg.reply or '' }}</td>
+        <td>{{ msg.created_at.strftime('%Y-%m-%d %H:%M:%S') }}</td>
+        <td>
+          <a href="{{ url_for('reply', msg_id=msg.id) }}">Reply</a> |
+          <form method="POST" action="{{ url_for('admin_delete', msg_id=msg.id) }}" onsubmit="return confirm('Delete this message?');" style="display:inline;">
+            <button type="submit">Delete</button>
+          </form>
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</body>
+</html>

@@ -1,0 +1,14 @@
+[Unit]
+Description=Treehole Anonymous Message Service
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/bin/bash /mnt/data/treehole/run.sh
+Restart=always
+User=root
+EnvironmentFile=-/etc/variable
+WorkingDirectory=/mnt/data/treehole
+
+[Install]
+WantedBy=multi-user.target
