@@ -4,9 +4,8 @@
 REPO_USER="eynov"
 REPO_NAME="st"
 BRANCH="main"
-REPO_URL="https://github.com/$REPO_USER/$REPO_NAME/tree/$BRANCH"
-RAW_BASE="https://raw.githubusercontent.com/$REPO_USER/$REPO_NAME/$BRANCH"
-
+REPO_URL="https://github.com/$REPO_USER/$REPO_NAME/tree/$BRANCH/box"
+RAW_BASE="https://raw.githubusercontent.com/$REPO_USER/$REPO_NAME/$BRANCH/box"
 # --- 添加快捷键 p ---
 ZSHRC="$HOME/.zshrc"
 BASHRC="$HOME/.bashrc"
