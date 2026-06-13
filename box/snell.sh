@@ -139,7 +139,8 @@ print_proxy_config() {
     echo "PSK    : ${psk}"
     echo ""
     echo "[Proxy]"
-    echo "HK = snell,${ip},${port},psk=${psk},version=6"
+    echo "node = snell,${ip},${port},psk=${psk},version=6,reuse=true"
+
     echo "------------------------------------------------"
 }
 
