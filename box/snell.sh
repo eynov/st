@@ -201,7 +201,6 @@ psk = ${psk}
 version = 6
 dns-ip-preference = prefer-ipv4
 mtu = 1350
-obfs = disabled
 tcp_keepalive = true
 ipv6 = ${ipv6_flag}
 udp-relay = true
