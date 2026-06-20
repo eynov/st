@@ -128,8 +128,7 @@ add_hy2() {
 
     mkdir -p $(dirname $CONFIG_FILE)
     
-    # 采用新版官方标准的 masquerade_url 字符串字段
-    cat << EOF > $CONFIG_FILE
+  cat << EOF > $CONFIG_FILE
 {
   "log": {
     "level": "info",
@@ -151,8 +150,7 @@ add_hy2() {
         "server_name": "$SNI_DOMAIN",
         "certificate_path": "$CERT_DIR/self_signed.crt",
         "key_path": "$CERT_DIR/self_signed.key"
-      },
-      "masquerade_url": "https://$PROXY_DOMAIN"
+      }
     }
   ],
   "outbounds": [
