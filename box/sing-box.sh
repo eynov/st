@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # ==============================================================================
-# sing-box Multi-Instance Control Panel v3 (Dynamic Architecture)
+# sing-box Multi-Instance Control Panel v3 (Final Stable Architecture with Surge Support)
 # ==============================================================================
 
 set -e
@@ -27,7 +27,7 @@ ok(){ echo -e "🟢 $*"; }
 err(){ echo -e "❌ $*"; }
 warn(){ echo -e "⚠️ $*"; }
 
-# 1. 严格无缝端口占用校验 (基于 awk 精确锚定行尾端口，彻底规避 443 模糊匹配 4433 缺陷)
+# 1. 严格无缝端口占用校验
 port_used(){
     ss -lntu | awk '{print $5}' | grep -qE ":$1$"
 }
@@ -36,7 +36,6 @@ port_used(){
 get_ip() {
     local ip=$(curl -4 -s --max-time 3 ifconfig.me || curl -4 -s --max-time 3 api.ipify.org)
     if [ -z "$ip" ]; then
-        # 兜底查询本地默认网关物理路由出口
         ip=$(ip route get 1.1.1.1 2>/dev/null | awk '{print $7}' | head -1)
     fi
     echo "${ip:-127.0.0.1}"
@@ -60,7 +59,6 @@ check_and_install_core() {
     echo "🔄 正在核验 sing-box 核心资产与依赖链..."
     apt-get update && apt-get install -y curl jq tar gzip openssl wget qrencode >/dev/null 2>&1
     
-    # 异步GitHub安全流捕获
     local http_code=$(curl -s -o /tmp/sb.json -w "%{http_code}" https://api.github.com/repos/SagerNet/sing-box/releases/latest)
     local latest_ver="1.11.0"
     if [ "$http_code" == "200" ] && jq -e .tag_name /tmp/sb.json >/dev/null 2>&1; then
@@ -125,11 +123,9 @@ build_ss() {
     local port=$1
     local pwd=$(openssl rand -hex 16)
     
-    # 注入双栈监听运行配置 (::)
     cat > "${INST_DIR}/${port}/config.json" <<EOF
 { "inbounds": [{ "type": "shadowsocks", "listen": "::", "listen_port": $port, "method": "aes-256-gcm", "password": "$pwd" }] }
 EOF
-    # 隔离写入轻量元数据库
     cat > "${INST_DIR}/${port}/meta.json" <<EOF
 {
   "port": $port,
@@ -143,7 +139,7 @@ EOF
 # 2. Shadowsocks 2022 工厂
 build_ss2022() {
     local port=$1
-    local pwd=$(openssl rand -base64 24)
+    local pwd=$(openssl rand -base64 32)
     
     cat > "${INST_DIR}/${port}/config.json" <<EOF
 { "inbounds": [{ "type": "shadowsocks", "listen": "::", "listen_port": $port, "method": "2022-blake3-aes-256-gcm", "password": "$pwd" }] }
@@ -171,10 +167,8 @@ build_hy2() {
     local cert="${CERT_DIR}/cert_${port}.crt"
     local key="${CERT_DIR}/private_${port}.key"
     
-    # 构建高容错长效期假证书流
     openssl req -x509 -nodes -days 3650 -newkey rsa:2048 -keyout "$key" -out "$cert" -subj "/CN=${sni}" >/dev/null 2>&1
 
-    # 完美修正：将 masquerade_url 替换为标准的 masquerade 对象，指定 type 为 proxy
     cat > "${INST_DIR}/${port}/config.json" <<EOF
 {
   "log": { "level": "info", "timestamp": true },
@@ -209,12 +203,12 @@ EOF
 EOF
 }
 
-
 # ==========================================================
-# 算力收拢引擎：统一多协议动态网络层 URI 生成器
+# 算力收拢引擎：统一多协议动态网络层 URI / Surge 格式生成器
 # ==========================================================
 generate_dynamic_uri() {
     local target_dir="$1"
+    local mode="$2"  # "uri" 或 "surge"
     local meta_file="${target_dir}/meta.json"
     
     if [ ! -f "$meta_file" ]; then return; fi
@@ -224,20 +218,34 @@ generate_dynamic_uri() {
     local port=$(jq -r '.port' "$meta_file")
     local pwd=$(jq -r '.password' "$meta_file")
     
-    case "$proto" in
-        "SS")
-            local b64=$(echo -n "aes-256-gcm:${pwd}" | base64 | tr -d '\n')
-            echo "ss://${b64}@${current_ip}:${port}#SS_${port}"
-            ;;
-        "SS2022")
-            local b64=$(echo -n "2022-blake3-aes-256-gcm:${pwd}" | base64 | tr -d '\n')
-            echo "ss://${b64}@${current_ip}:${port}#SS2022_${port}"
-            ;;
-        "HY2")
-            local sni=$(jq -r '.sni' "$meta_file")
-            echo "hysteria2://${pwd}@${current_ip}:${port}?sni=${sni}&insecure=1#HY2_${port}"
-            ;;
-    esac
+    if [ "$mode" == "uri" ]; then
+        case "$proto" in
+            "SS")
+                local b64=$(echo -n "aes-256-gcm:${pwd}" | base64 | tr -d '\n')
+                echo "ss://${b64}@${current_ip}:${port}#SS_${port}"
+                ;;
+            "SS2022")
+                echo "ss://2022-blake3-aes-256-gcm:${pwd}@${current_ip}:${port}#SS2022_${port}"
+                ;;
+            "HY2")
+                local sni=$(jq -r '.sni' "$meta_file")
+                echo "hysteria2://${pwd}@${current_ip}:${port}?sni=${sni}&insecure=1#HY2_${port}"
+                ;;
+        esac
+    elif [ "$mode" == "surge" ]; then
+        case "$proto" in
+            "SS")
+                echo "🟢 SS_${port} = ss, ${current_ip}, ${port}, encrypt-method=aes-256-gcm, password=${pwd}"
+                ;;
+            "SS2022")
+                echo "🟢 SS2022_${port} = ss, ${current_ip}, ${port}, encrypt-method=2022-blake3-aes-256-gcm, password=${pwd}"
+                ;;
+            "HY2")
+                local sni=$(jq -r '.sni' "$meta_file")
+                echo "🔵 HY2_${port} = hysteria2, ${current_ip}, ${port}, password=${pwd}, sni=${sni}, skip-cert-verify=true"
+                ;;
+        esac
+    fi
 }
 
 # =========================
@@ -283,13 +291,20 @@ add_instance(){
     sleep 1.2
     if systemctl is-active --quiet sb-${port}; then
         ok "实例 [${port}] 部署挂载上线成功！"
-        # 实时通过动态引擎合成 URI
-        local dynamic_uri=$(generate_dynamic_uri "${INST_DIR}/${port}")
-        echo -e "\n📋 当前最新动态节点订阅凭证:"
+        
+        # 实时提取
+        local dynamic_uri=$(generate_dynamic_uri "${INST_DIR}/${port}" "uri")
+        local surge_format=$(generate_dynamic_uri "${INST_DIR}/${port}" "surge")
+        
+        echo -e "\n📋 【标准通用链接】:"
         echo -e "\033[36m${dynamic_uri}\033[0m"
+        
+        echo -e "\n📋 【Surge 托管配置格式】 (直接复制到 [Proxy] 下):"
+        echo -e "\033[32m${surge_format}\033[0m"
+        
         show_qr "$dynamic_uri"
     else
-        err "内核进程调配失败！实时错误流追溯："
+        err "内核进程调配失败！"
         journalctl -u sb-${port} -n 15 --no-pager
     fi
 }
@@ -310,7 +325,7 @@ delete_instance(){
     
     systemctl daemon-reload
     systemctl reset-failed sb-${port} 2>/dev/null || true
-    ok "端口 [${port}] 所有的进程单元、伪装证书、元数据资产已被强力抹除清洁。"
+    ok "端口 [${port}] 抹除清洁完毕。"
 }
 
 # 3. 统一全局状态树与凭证查看入口
@@ -352,21 +367,21 @@ show_instance_detail(){
     echo -e "\n=================================================="
     echo "       sing-box 端口 [${sel_port}] 动态运行期资产明细"
     echo "=================================================="
-    # 调用收拢引擎实时计算 IP
-    local active_uri=$(generate_dynamic_uri "$target_dir")
+    local active_uri=$(generate_dynamic_uri "$target_dir" "uri")
+    local surge_format=$(generate_dynamic_uri "$target_dir" "surge")
     
     echo -e "📌 协议家族: $(jq -r '.protocol' "${target_dir}/meta.json")"
-    echo -e "📌 资产创建期: $(jq -r '.created_at' "${target_dir}/meta.json")"
     echo -e "📌 底层核心密匙: $(jq -r '.password' "${target_dir}/meta.json")"
     if [ "$(jq -r '.protocol' "${target_dir}/meta.json")" == "HY2" ]; then
         echo -e "📌 握手 SNI 伪装: $(jq -r '.sni' "${target_dir}/meta.json")"
     fi
-    echo -e "📌 算力引擎动态组装 URI: \033[36m${active_uri}\033[0m"
+    echo -e "📌 标准通用 URI: \033[36m${active_uri}\033[0m"
+    echo -e "📌 Surge 代理格式: \033[32m${surge_format}\033[0m"
     
     show_qr "$active_uri"
 
     echo -e "\n⚙️ 套接字硬件网络监听映射树:"
-    ss -tulnp | grep -E ":${sel_port}\s" || warn "警告：内核当前未对该端口开放任何有效的物理套接字监听！"
+    ss -tulnp | grep -E ":${sel_port}\s" || warn "警告：内核当前未对该端口开放任何监听！"
     echo "=================================================="
 }
 
@@ -378,14 +393,13 @@ restart_all(){
         [ -d "$d" ] || continue
         local p=$(basename "$d")
         
-        # 严格控制流：只有当系统真实注册了单元文件时才进行拉起，防错断
         if [ -f "/etc/systemd/system/sb-${p}.service" ]; then
             has_any=true
             systemctl restart sb-${p}
-            echo "🔄 实例 [${p}] 的套接字及守护进程已被重新强制构建"
+            echo "🔄 实例 [${p}] 已重新热重载"
         fi
     done
-    $has_any && ok "所有的运行期活跃实例已平滑热重载。" || warn "任务终止：未检索到有效的物理调度实体。"
+    $has_any && ok "所有的运行期活跃实例已平滑热重载。" || warn "任务终止：未检索到调度实体。"
 }
 
 # =========================
@@ -409,7 +423,7 @@ while true; do
       2) delete_instance ;;
       3) show_instance_detail ;;
       4) restart_all ;;
-      0) echo "服务安全挂起，安全退出。"; exit 0 ;;
-      *) echo "❌ 非法输入，请在限定指令域内输入" ;;
+      0) echo "服务安全退出。"; exit 0 ;;
+      *) echo "❌ 非法输入" ;;
     esac
 done
