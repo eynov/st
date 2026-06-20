@@ -53,11 +53,13 @@ install_sing_box_core() {
     URL="https://github.com/SagerNet/sing-box/releases/download/v${LATEST_VER}/sing-box-${LATEST_VER}-${ARCH}.tar.gz"
     echo "正在下载 v${LATEST_VER}..."
     
+    # 优化解压逻辑，规避文件夹命名规则不一致的潜在 Bug
     wget -O /tmp/sing-box.tar.gz "$URL"
-    tar -zxvf /tmp/sing-box.tar.gz -C /tmp/
-    mv /tmp/sing-box-${LATEST_VER}-${ARCH}/sing-box $BINARY_PATH
+    mkdir -p /tmp/sb_extracted
+    tar -zxvf /tmp/sing-box.tar.gz -C /tmp/sb_extracted --strip-components=1
+    mv /tmp/sb_extracted/sing-box $BINARY_PATH
     chmod +x $BINARY_PATH
-    rm -rf /tmp/sing-box*
+    rm -rf /tmp/sing-box* /tmp/sb_extracted
 
     # 写入完美兼容的 systemd 配置文件
     cat << EOF > $SYSTEMD_PATH
@@ -117,6 +119,8 @@ add_hy2() {
       -subj "/CN=$SNI_DOMAIN"
 
     mkdir -p $(dirname $CONFIG_FILE)
+    
+    # 修复此处：使用符合 sing-box Hysteria2 标准的 masquerade_url 字段
     cat << EOF > $CONFIG_FILE
 {
   "log": {
@@ -140,10 +144,7 @@ add_hy2() {
         "certificate_path": "$CERT_DIR/self_signed.crt",
         "key_path": "$CERT_DIR/self_signed.key"
       },
-      "masquerade": {
-        "type": "http",
-        "url": "https://$PROXY_DOMAIN"
-      }
+      "masquerade_url": "https://$PROXY_DOMAIN"
     }
   ],
   "outbounds": [
@@ -188,10 +189,18 @@ view_hy2() {
         return
     fi
 
+    # 增加对 jq 解析配置文件的健壮性校验
+    if ! jq . $CONFIG_FILE >/dev/null 2>&1; then
+        echo "❌ 配置文件 JSON 格式损坏，无法解析！"
+        return
+    fi
+
     get_ip
     HY2_PASSWORD=$(jq -r '.inbounds[0].users[0].password' $CONFIG_FILE)
     SNI_DOMAIN=$(jq -r '.inbounds[0].tls.server_name' $CONFIG_FILE)
-    PROXY_DOMAIN=$(jq -r '.inbounds[0].masquerade.url' $CONFIG_FILE | sed 's|https\?://||')
+    PROXY_DOMAIN=$(jq -r '.inbounds[0].masquerade_url' $CONFIG_FILE | sed 's|https\?://||')
+
+    SHARE_LINK="hysteria2://$HY2_PASSWORD@$SERVER_IP:443?sni=$SNI_DOMAIN&insecure=1#AWS_Hy2_iCloud"
 
     echo "--- 服务器当前状态 ---"
     echo "本机识别 IP:  $SERVER_IP"
@@ -202,7 +211,7 @@ view_hy2() {
     echo "🔍 运行状态排查："
     
     if command -v ss &> /dev/null; then
-        echo "【443 端口占用状况】"
+        echo "【443 端口占用状况 (Hy2 走 UDP)】"
         ss -tulnp | grep :443 || echo "⚠️ 未检测到 443 端口被监听，请检查服务状态。"
     fi
     
@@ -211,10 +220,13 @@ view_hy2() {
     
     echo "----------------------------------------"
     echo "📱 Shadowrocket (小火箭) 文本配置 (直接复制):"
-    echo "hysteria2://$HY2_PASSWORD@$SERVER_IP:443?sni=$SNI_DOMAIN&insecure=1#AWS_Hy2_iCloud"
+    echo "$SHARE_LINK"
     echo ""
     echo "🍏 Surge 文本配置 (复制到 [Proxy] 段落):"
     echo "AWS_Hy2_iCloud = hysteria2, $SERVER_IP, 443, password=$HY2_PASSWORD, sni=$SNI_DOMAIN, skip-cert-verify=true"
+    echo "----------------------------------------"
+    echo "📷 节点二维码 (支持小火箭扫码):"
+    curl -s "https://qrenco.de/$SHARE_LINK" || echo "⚠️ 二维码加载失败，请直接复制上方文本链接。"
     echo "========================================="
 }
 
@@ -230,7 +242,6 @@ delete_hy2() {
     
     if [ "$confirm_code" == "YES" ]; then
         echo "正在全面清理系统环境..."
-        # 【遵循指定删除序列】
         systemctl stop sing-box 2>/dev/null
         systemctl disable sing-box 2>/dev/null
         rm -f $SYSTEMD_PATH
@@ -238,6 +249,7 @@ delete_hy2() {
         rm -f $BINARY_PATH
         rm -rf $CONFIG_FILE
         rm -rf $CERT_DIR
+        rm -f /tmp/sing-box*
         echo "🗑️ 核心程序、Systemd 守护进程、自签证书、JSON 配置已全数卸载擦除！"
     else
         echo "❌ 验证未通过，取消删除。"
