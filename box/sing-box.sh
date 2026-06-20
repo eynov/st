@@ -174,6 +174,7 @@ build_hy2() {
     # 构建高容错长效期假证书流
     openssl req -x509 -nodes -days 3650 -newkey rsa:2048 -keyout "$key" -out "$cert" -subj "/CN=${sni}" >/dev/null 2>&1
 
+    # 完美修正：将 masquerade_url 替换为标准的 masquerade 对象，指定 type 为 proxy
     cat > "${INST_DIR}/${port}/config.json" <<EOF
 {
   "log": { "level": "info", "timestamp": true },
@@ -182,8 +183,16 @@ build_hy2() {
     "listen": "::",
     "listen_port": $port,
     "users": [{"password": "$pwd"}],
-    "masquerade_url": "$masq",
-    "tls": { "enabled": true, "server_name": "$sni", "certificate_path": "$cert", "key_path": "$key" }
+    "masquerade": {
+      "type": "proxy",
+      "url": "$masq"
+    },
+    "tls": { 
+      "enabled": true, 
+      "server_name": "$sni", 
+      "certificate_path": "$cert", 
+      "key_path": "$key" 
+    }
   }],
   "outbounds": [{"type": "direct"}]
 }
@@ -199,6 +208,7 @@ EOF
 }
 EOF
 }
+
 
 # ==========================================================
 # 算力收拢引擎：统一多协议动态网络层 URI 生成器
