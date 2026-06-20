@@ -46,42 +46,45 @@ get_public_ip() {
     echo "$ip"
 }
 
-# 优化：引入基于状态预检与自动弹性降级的官方最新版本获取函数
 get_latest_version() {
-    local fallback_version="6.0.0b2"
-    local fallback_zip="snell-server-v6.0.0b2-linux-amd64.zip"
+    local fallback_version="6.0.0b3"
+    local fallback_zip="snell-server-v6.0.0b3-linux-amd64.zip"
 
-    local http_code
-    http_code=$(curl -sL -m 5 -o /dev/null -w "%{http_code}" https://dl.nssurge.com/snell/)
+    local url="https://kb.nssurge.com/surge-knowledge-base/release-notes/snell"
 
-    if [ "$http_code" != "200" ]; then
-        # 修正：所有提示文本均重定向至标准错误，防止污染父进程的管道变量流
-        echo ">> 官方版本目录不可访问 (HTTP ${http_code})" >&2
-        echo ">> 自动切换到内置稳定版本 ${fallback_version}" >&2
+    local page
+    page=$(curl -fsSL -m 10 \
+        -A "Mozilla/5.0 (Windows NT 10.0; Win64; x64)" \
+        "$url")
+
+    if [ -z "$page" ]; then
+        echo ">> KB不可访问" >&2
         echo "${fallback_version}|${fallback_zip}"
         return
     fi
 
     local latest_zip
     latest_zip=$(
-        curl -sL -m 5 https://dl.nssurge.com/snell/ | \
-        grep -o 'snell-server-v[0-9]\+\.[0-9]\+\.[0-9]\+[^"<>]*-linux-amd64\.zip' | \
-        sort -V | \
+        echo "$page" | \
+        grep -oE 'snell-server-v[0-9]+\.[0-9]+\.[0-9]+[a-z0-9.-]*-linux-amd64\.zip' | \
+        sort -Vu | \
         tail -n 1
     )
 
     if [ -z "$latest_zip" ]; then
-        echo ">> 无法解析官方版本列表" >&2
-        echo ">> 自动切换到内置稳定版本 ${fallback_version}" >&2
+        echo ">> 解析失败" >&2
         echo "${fallback_version}|${fallback_zip}"
         return
     fi
 
+    # 使用你写的高性能原生 Shell 字符串切片
     local version
-    version=$(echo "$latest_zip" | sed -E 's/snell-server-v(.*)-linux-amd64\.zip/\1/')
+    version=${latest_zip#snell-server-v}
+    version=${version%-linux-amd64.zip}
 
     echo "${version}|${latest_zip}"
 }
+
 
 # 部署或更新主程序二进制
 install_or_upgrade_binary() {
