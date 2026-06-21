@@ -20,9 +20,7 @@ echo "🚀 安装文件..."
 
 mkdir -p "$INSTALL_DIR"
 
-rsync -a \
-  "$TMP_DIR/st-main/sing-box/" \
-  "$INSTALL_DIR/"
+cp -a "$TMP_DIR/st-main/sing-box/." "$INSTALL_DIR/"
 
 echo "🔧 设置权限..."
 
