@@ -1,6 +1,6 @@
 #!/bin/bash
 # ==============================================================================
-# sing-box 模块化容器多实例微服务集群管理面板
+# sing-box 模块化容器多实例微服务集群管理面板 (全动态路径自适应版)
 # ==============================================================================
 set -e
 
@@ -9,18 +9,21 @@ if [ "$EUID" -ne 0 ]; then
   exit 1
 fi
 
-# 引入基础核心组件群
-source /etc/sing-box/core/common.sh
-source /etc/sing-box/core/install.sh
-source /etc/sing-box/core/service.sh
-source /etc/sing-box/core/runtime.sh
+# 🔥 核心：动态获取当前脚本所在绝对路径
+BASE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-# 动态按需引入协议解耦工厂
-source /etc/sing-box/protocols/ss.sh
-source /etc/sing-box/protocols/ss2022.sh
-source /etc/sing-box/protocols/hysteria2.sh
+# 动态引入核心底座
+source "$BASE_DIR/core/common.sh"
+source "$BASE_DIR/core/install.sh"
+source "$BASE_DIR/core/service.sh"
+source "$BASE_DIR/core/runtime.sh"
 
-# 初始化核心目录拓扑
+# 🔥 核心：动态循环遍历导入所有协议插件 (解耦，以后加协议免改主脚本)
+for f in "$BASE_DIR/protocols"/*.sh; do
+    if [ -f "$f" ]; then source "$f"; fi
+done
+
+# 初始化运行时资产树
 mkdir -p "$INST_DIR" "$CERT_DIR"
 
 add_instance(){
@@ -46,7 +49,6 @@ add_instance(){
       *) err "非法输入"; rm -rf "${INST_DIR}/${port}"; return ;;
     esac
 
-    # 核心资产配置语法动态核验断言
     if ! $SB_BIN check -c "${INST_DIR}/${port}/config.json"; then
         err "内核检测到新生成的 JSON 配置文件存在合规性语法错误！"
         rm -rf "${INST_DIR}/${port}"
@@ -145,16 +147,15 @@ show_instance_detail(){
     echo "=================================================="
 }
 
-# 循环主菜单面板
 while true; do
     echo ""
     echo "========================================="
     echo "   sing-box 容器化多实例智能管理面板 v3"
     echo "========================================="
-    echo " 1. 新增 端口协议实例 (分流解耦工厂)"
-    echo " 2. 删除 指定端口实例 (彻底解绑擦除)"
-    echo " 3. 查看 实例全局状态及凭证详情 (资产审计)"
-    echo " 4. 重启 全部运行中的端口实例 (运行时调度)"
+    echo " 1. 新增 端口协议实例"
+    echo " 2. 删除 指定端口实例"
+    echo " 3. 查看 实例全局状态及凭证详情"
+    echo " 4. 重启 全部运行中的端口实例"
     echo " 0. 退出管理面板"
     echo "========================================="
     read -p "请输入调度指令 >> " opt
