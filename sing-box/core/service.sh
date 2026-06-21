@@ -1,7 +1,9 @@
 #!/bin/bash
-# 标准化 Systemd 多实例模版生成器 (解耦环境空间)
+# 标准化 Systemd 多实例模版生成器 (动态绑定当前 instances 物理地址)
 
-source /etc/sing-box/core/common.sh
+# 🔥 核心：确保引入正确的 common 基座
+BASE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+source "$BASE_DIR/core/common.sh"
 
 gen_service() {
     local port=$1
