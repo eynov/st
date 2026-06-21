@@ -1,0 +1,1 @@
+{ "inbounds": [{ "type": "shadowsocks", "listen": "::", "listen_port": 8470, "method": "2022-blake3-aes-128-gcm", "password": "wO/pzSQWzR8X3OFsk60uAQ==" }] }

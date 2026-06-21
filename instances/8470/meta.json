@@ -1,0 +1,7 @@
+{
+  "port": 8470,
+  "protocol": "SS2022",
+  "method": "2022-blake3-aes-128-gcm",
+  "created_at": "2026-06-21 15:45:38",
+  "password": "wO/pzSQWzR8X3OFsk60uAQ=="
+}
