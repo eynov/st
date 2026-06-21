@@ -138,20 +138,75 @@ EOF
 
 # 2. Shadowsocks 2022 工厂
 build_ss2022() {
+    # 确保传入了端口参数
+    if [ -z "$1" ]; then
+        echo "错误：未指定端口号！"
+        return 1
+    fi
+
     local port=$1
-    local pwd=$(openssl rand -base64 32)
-    
+    local cipher method pwd
+
+    echo
+    echo "选择加密方式："
+    echo "1) 2022-blake3-aes-128-gcm (默认)"
+    echo "2) 2022-blake3-aes-256-gcm"
+    echo "3) 2022-blake3-chacha20-poly1305"
+
+    read -rp "请输入 [1-3] (默认1): " cipher
+    cipher=${cipher:-1}
+
+    # 根据选择生成标准且无换行符的 SS2022 密钥
+    case "$cipher" in
+        2)
+            method="2022-blake3-aes-256-gcm"
+            pwd=$(openssl rand -base64 32 | tr -d '\n')
+            ;;
+        3)
+            method="2022-blake3-chacha20-poly1305"
+            pwd=$(openssl rand -base64 32 | tr -d '\n')
+            ;;
+        1|*)
+            [[ "$cipher" != "1" ]] && echo "无效选项，使用默认 AES-128"
+            method="2022-blake3-aes-128-gcm"
+            pwd=$(openssl rand -base64 16 | tr -d '\n')
+            ;;
+    esac
+
+    # 创建配置目录（防止目录不存在导致写入失败）
+    mkdir -p "${INST_DIR}/${port}"
+
+    # 写入配置文件 (config.json)
     cat > "${INST_DIR}/${port}/config.json" <<EOF
-{ "inbounds": [{ "type": "shadowsocks", "listen": "::", "listen_port": $port, "method": "2022-blake3-aes-256-gcm", "password": "$pwd" }] }
+{
+  "inbounds": [{
+    "type": "shadowsocks",
+    "listen": "::",
+    "listen_port": $port,
+    "method": "$method",
+    "password": "$pwd"
+  }]
+}
 EOF
+
+    # 写入元数据 (meta.json)
     cat > "${INST_DIR}/${port}/meta.json" <<EOF
 {
   "port": $port,
   "protocol": "SS2022",
+  "method": "$method",
   "created_at": "$(date '+%Y-%m-%d %H:%M:%S')",
   "password": "$pwd"
 }
 EOF
+
+    echo "----------------------------------------"
+    echo " Shadowsocks 2022 配置生成成功！"
+    echo " 端口: $port"
+    echo " 加密: $method"
+    echo " 密码: $pwd"
+    echo " 配置文件: ${INST_DIR}/${port}/config.json"
+    echo "----------------------------------------"
 }
 
 # 3. Hysteria2 工厂 (网页原生反代伪装回落版)
@@ -258,9 +313,9 @@ add_instance(){
 
     echo "=========================="
     echo " 🚀 选择服务协议"
-    echo " 1) Shadowsocks (AES-256-GCM)"
+    echo " 1) Shadowsocks "
     echo " 2) Shadowsocks 2022 (Blake3)"
-    echo " 3) Hysteria2 (方案B: 完美反代伪装版)"
+    echo " 3) Hysteria2 "
     echo "=========================="
     read -p ">> " proto_choice
 
