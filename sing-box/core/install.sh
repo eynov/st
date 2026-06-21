@@ -1,7 +1,8 @@
 #!/bin/bash
 # sing-box 核心资产与系统依赖编译维护环境
 
-source /etc/sing-box/core/common.sh
+BASE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+source "$BASE_DIR/core/common.sh"
 
 check_and_install_core() {
     echo "🔄 正在核验 sing-box 核心资产与依赖链..."
