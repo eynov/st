@@ -202,7 +202,7 @@ add_ports() {
 listen = ${listen_ip}
 psk = ${psk}
 version = 6
-dns-ip-preference = prefer-ipv4
+dns-ip-preference = auto
 ipv6 = ${ipv6_flag}
 udp-relay = true
 max_conn = ${max_conn}
