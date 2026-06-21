@@ -9,8 +9,8 @@ if [ "$EUID" -ne 0 ]; then
   exit 1
 fi
 
-# 🔥 核心：动态获取当前脚本所在绝对路径
-BASE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# 🔥 核心：动态获取当前脚本的真实物理绝对路径（自动追踪软链接）
+BASE_DIR="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")"
 
 # 动态引入核心底座
 source "$BASE_DIR/core/common.sh"
