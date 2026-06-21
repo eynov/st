@@ -1,5 +1,7 @@
 #!/bin/bash
-source /etc/sing-box/core/common.sh
+# 🔥 核心：独立运行时也能动态反向溯源引入 common 基座
+BASE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+source "$BASE_DIR/core/common.sh"
 
 build_ss() {
     local port=$1
