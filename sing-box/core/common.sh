@@ -1,22 +1,21 @@
 #!/bin/bash
-# 核心公共底座：变量定义、状态监控、网络拓扑嗅探与格式化输出
+# 核心公共底座：基于当前执行文件的相对路径动态延伸资产空间
 
-SB_DIR="/etc/sing-box"
-INST_DIR="${SB_DIR}/instances"
+# 动态反查出当前 core/ 目录的上一级，即项目根目录
+BASE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+INST_DIR="${BASE_DIR}/instances"
+CERT_DIR="${BASE_DIR}/certs"
 SB_BIN="/usr/local/bin/sing-box"
-CERT_DIR="${SB_DIR}/certs"
 
-# 统一输出格式
 ok() { echo -e "🟢 $*"; }
 err() { echo -e "❌ $*"; }
 warn() { echo -e "⚠️ $*"; }
 
-# 端口占用严格校验
 port_used() {
     ss -lntu | awk '{print $5}' | grep -qE ":$1$"
 }
 
-# 动态双栈公网 IP 嗅探
 get_ip() {
     local ip=$(curl -4 -s --max-time 3 ifconfig.me || curl -4 -s --max-time 3 api.ipify.org)
     if [ -z "$ip" ]; then
@@ -25,7 +24,6 @@ get_ip() {
     echo "${ip:-127.0.0.1}"
 }
 
-# 统一本地离线安全二维码渲染
 show_qr() {
     local data="$1"
     if command -v qrencode >/dev/null 2>&1; then
