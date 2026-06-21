@@ -8,7 +8,7 @@ trap 'rm -rf "$TMP_DIR"' EXIT
 
 echo "📦 下载 sing-box 脚本..."
 
-curl -fsSL \
+curl -fSL --retry 3 --retry-delay 2 \
   https://github.com/eynov/st/archive/refs/heads/main.tar.gz \
   -o "$TMP_DIR/st.tar.gz"
 
@@ -18,14 +18,15 @@ tar -xzf "$TMP_DIR/st.tar.gz" -C "$TMP_DIR"
 
 echo "🚀 安装文件..."
 
-mkdir -p "$INSTALL_DIR"
+SRC_DIR="$(find "$TMP_DIR" -maxdepth 1 -type d -name "st-*")"
 
-cp -a "$TMP_DIR/st-main/sing-box/." "$INSTALL_DIR/"
+mkdir -p "$INSTALL_DIR"
+cp -a "$SRC_DIR/sing-box/." "$INSTALL_DIR/"
 
 echo "🔧 设置权限..."
 
-find "$INSTALL_DIR" -type f -name "*.sh" -exec chmod +x {} \;
 chmod +x "$INSTALL_DIR/sb"
+find "$INSTALL_DIR" -type f -name "*.sh" -exec chmod +x {} \;
 
 echo "🔗 创建软链接..."
 
