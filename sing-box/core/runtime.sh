@@ -1,7 +1,8 @@
 #!/bin/bash
 # 启动、停止、重启、生成分享链接等运行时状态引擎
 
-source /etc/sing-box/core/common.sh
+BASE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+source "$BASE_DIR/core/common.sh"
 
 generate_dynamic_uri() {
     local target_dir="$1"
