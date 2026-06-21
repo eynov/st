@@ -130,6 +130,7 @@ EOF
 {
   "port": $port,
   "protocol": "SS",
+  "method": "aes-256-gcm",
   "created_at": "$(date '+%Y-%m-%d %H:%M:%S')",
   "password": "$pwd"
 }
@@ -138,9 +139,8 @@ EOF
 
 # 2. Shadowsocks 2022 工厂
 build_ss2022() {
-    # 确保传入了端口参数
     if [ -z "$1" ]; then
-        echo "错误：未指定端口号！"
+        err "错误：未指定端口号！"
         return 1
     fi
 
@@ -156,7 +156,6 @@ build_ss2022() {
     read -rp "请输入 [1-3] (默认1): " cipher
     cipher=${cipher:-1}
 
-    # 根据选择生成标准且无换行符的 SS2022 密钥
     case "$cipher" in
         2)
             method="2022-blake3-aes-256-gcm"
@@ -173,10 +172,8 @@ build_ss2022() {
             ;;
     esac
 
-    # 创建配置目录（防止目录不存在导致写入失败）
     mkdir -p "${INST_DIR}/${port}"
 
-    # 写入配置文件 (config.json)
     cat > "${INST_DIR}/${port}/config.json" <<EOF
 {
   "inbounds": [{
@@ -189,7 +186,6 @@ build_ss2022() {
 }
 EOF
 
-    # 写入元数据 (meta.json)
     cat > "${INST_DIR}/${port}/meta.json" <<EOF
 {
   "port": $port,
@@ -272,15 +268,18 @@ generate_dynamic_uri() {
     local proto=$(jq -r '.protocol' "$meta_file")
     local port=$(jq -r '.port' "$meta_file")
     local pwd=$(jq -r '.password' "$meta_file")
+    # 【修复1】动态从 meta.json 中提取 method，支持 SS2022 多元加密方案
+    local method=$(jq -r '.method // "2022-blake3-aes-256-gcm"' "$meta_file")
     
     if [ "$mode" == "uri" ]; then
         case "$proto" in
             "SS")
-                local b64=$(echo -n "aes-256-gcm:${pwd}" | base64 | tr -d '\n')
+                local b64=$(echo -n "${method}:${pwd}" | base64 | tr -d '\n')
                 echo "ss://${b64}@${current_ip}:${port}#SS_${port}"
                 ;;
             "SS2022")
-                echo "ss://2022-blake3-aes-256-gcm:${pwd}@${current_ip}:${port}#SS2022_${port}"
+                # 【修复2】根据官方标准，SS2022 链接中 method 和 password 需要直接用冒号拼接，不能进行二次 Base64 编码
+                echo "ss://${method}:${pwd}@${current_ip}:${port}#SS2022_${port}"
                 ;;
             "HY2")
                 local sni=$(jq -r '.sni' "$meta_file")
@@ -290,10 +289,10 @@ generate_dynamic_uri() {
     elif [ "$mode" == "surge" ]; then
         case "$proto" in
             "SS")
-                echo "🟢 SS_${port} = ss, ${current_ip}, ${port}, encrypt-method=aes-256-gcm, password=${pwd}"
+                echo "🟢 SS_${port} = ss, ${current_ip}, ${port}, encrypt-method=${method}, password=${pwd}"
                 ;;
             "SS2022")
-                echo "🟢 SS2022_${port} = ss, ${current_ip}, ${port}, encrypt-method=2022-blake3-aes-256-gcm, password=${pwd}"
+                echo "🟢 SS2022_${port} = ss, ${current_ip}, ${port}, encrypt-method=${method}, password=${pwd}"
                 ;;
             "HY2")
                 local sni=$(jq -r '.sni' "$meta_file")
@@ -426,6 +425,7 @@ show_instance_detail(){
     local surge_format=$(generate_dynamic_uri "$target_dir" "surge")
     
     echo -e "📌 协议家族: $(jq -r '.protocol' "${target_dir}/meta.json")"
+    echo -e "📌 加密方式: $(jq -r '.method // "未记录"' "${target_dir}/meta.json")"
     echo -e "📌 底层核心密匙: $(jq -r '.password' "${target_dir}/meta.json")"
     if [ "$(jq -r '.protocol' "${target_dir}/meta.json")" == "HY2" ]; then
         echo -e "📌 握手 SNI 伪装: $(jq -r '.sni' "${target_dir}/meta.json")"
