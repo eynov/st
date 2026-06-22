@@ -6,8 +6,10 @@ TMP_DIR="$(mktemp -d)"
 trap 'rm -rf "$TMP_DIR"' EXIT
 
 read -rp "请输入项目名称: " PROJECT
+read -rp "请输入命令名称: " MAIN_BIN
 
 INSTALL_DIR="/opt/$PROJECT"
+BIN_LINK="/usr/local/bin/$MAIN_BIN"
 
 echo "📦 下载脚本..."
 curl -fSL --retry 3 --retry-delay 2 \
@@ -32,16 +34,12 @@ cp -a "$SRC_DIR/$PROJECT/." "$INSTALL_DIR/"
 echo "🔧 设置权限..."
 find "$INSTALL_DIR" -type f -name "*.sh" -exec chmod +x {} \;
 
-echo "🔍 检测可执行文件..."
-MAIN_BIN=$(find "$INSTALL_DIR" -maxdepth 1 -type f ! -name "*.sh" ! -name ".*" | head -n 1 | xargs basename 2>/dev/null)
-
-if [[ -z "$MAIN_BIN" ]]; then
-    echo "❌ 未找到可执行文件"
+if [[ ! -f "$INSTALL_DIR/$MAIN_BIN" ]]; then
+    echo "❌ 未找到文件：$MAIN_BIN"
     exit 1
 fi
 
 chmod +x "$INSTALL_DIR/$MAIN_BIN"
-BIN_LINK="/usr/local/bin/$MAIN_BIN"
 
 echo "🔗 创建软链接 $MAIN_BIN..."
 ln -sf "$INSTALL_DIR/$MAIN_BIN" "$BIN_LINK"
