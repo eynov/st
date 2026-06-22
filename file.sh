@@ -30,17 +30,17 @@ mkdir -p "$INSTALL_DIR"
 cp -a "$SRC_DIR/$PROJECT/." "$INSTALL_DIR/"
 
 echo "🔧 设置权限..."
-find "$INSTALL_DIR" -maxdepth 1 -type f -executable -exec chmod +x {} \;
 find "$INSTALL_DIR" -type f -name "*.sh" -exec chmod +x {} \;
 
 echo "🔍 检测可执行文件..."
-MAIN_BIN=$(find "$INSTALL_DIR" -maxdepth 1 -type f -executable ! -name "*.sh" | head -n 1 | xargs basename)
+MAIN_BIN=$(find "$INSTALL_DIR" -maxdepth 1 -type f ! -name "*.sh" ! -name ".*" | head -n 1 | xargs basename 2>/dev/null)
 
 if [[ -z "$MAIN_BIN" ]]; then
     echo "❌ 未找到可执行文件"
     exit 1
 fi
 
+chmod +x "$INSTALL_DIR/$MAIN_BIN"
 BIN_LINK="/usr/local/bin/$MAIN_BIN"
 
 echo "🔗 创建软链接 $MAIN_BIN..."
