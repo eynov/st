@@ -8,8 +8,6 @@ trap 'rm -rf "$TMP_DIR"' EXIT
 read -rp "请输入项目名称: " PROJECT
 
 INSTALL_DIR="/opt/$PROJECT"
-BIN_LINK="/usr/local/bin/$PROJECT"
-MAIN_BIN="$PROJECT"
 
 echo "📦 下载脚本..."
 curl -fSL --retry 3 --retry-delay 2 \
@@ -32,12 +30,4 @@ mkdir -p "$INSTALL_DIR"
 cp -a "$SRC_DIR/$PROJECT/." "$INSTALL_DIR/"
 
 echo "🔧 设置权限..."
-chmod +x "$INSTALL_DIR/$MAIN_BIN"
-find "$INSTALL_DIR" -type f -name "*.sh" -exec chmod +x {} \;
-
-echo "🔗 创建软链接..."
-ln -sf "$INSTALL_DIR/$MAIN_BIN" "$BIN_LINK"
-
-hash -r
-
-echo "🟢 $PROJECT 安装完成，命令：$MAIN_BIN"
+find "$INSTALL_DIR" -maxdepth 1 -type f -executable
