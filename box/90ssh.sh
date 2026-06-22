@@ -10,10 +10,22 @@ if [[ ! "$SSH_PORT" =~ ^[0-9]+$ ]] || [ "$SSH_PORT" -lt 1024 ] || [ "$SSH_PORT" 
     exit 1
 fi
 
-# 1. 禁用 systemd socket（防止 22 复活）
-echo "✔ 禁用 ssh.socket..."
+# 1. 让 ssh.service 脱离 socket 直接管理端口
+echo "✔ 解除 socket 依赖..."
+systemctl unmask ssh.socket sshd.socket 2>/dev/null || true
 systemctl disable --now ssh.socket sshd.socket 2>/dev/null || true
-systemctl mask ssh.socket sshd.socket 2>/dev/null || true
+
+mkdir -p /etc/systemd/system/ssh.service.d/
+cat > /etc/systemd/system/ssh.service.d/override.conf << 'EOF'
+[Unit]
+After=network.target
+Requires=
+[Service]
+ExecStart=
+ExecStart=/usr/sbin/sshd -D
+EOF
+
+systemctl daemon-reload
 
 # 2. 注释所有配置文件中的 Port 残留
 echo "✔ 注释残留 Port 指令..."
@@ -38,9 +50,9 @@ EOF
 echo "✔ 检查配置语法..."
 sshd -t
 
-# 6. Reload（不断当前连接）
-echo "⚠️  开始 reload，当前连接不受影响..."
-systemctl reload ssh 2>/dev/null || systemctl reload sshd
+# 6. 重启服务
+echo "⚠️  重启 SSH 服务，当前连接不受影响..."
+systemctl restart ssh 2>/dev/null || systemctl restart sshd
 
 echo ""
 echo "=============================="
@@ -55,17 +67,13 @@ read -rp "是否确认新端口可登录？(yes/no): " CONFIRM
 if [[ "$CONFIRM" != "yes" ]]; then
     echo "❌ 回滚配置..."
 
-    # 恢复主配置中的 Port 22
+    rm -f /etc/ssh/sshd_config.d/90-ss.conf
+    rm -f /etc/systemd/system/ssh.service.d/override.conf
     sed -i 's/^#Port .*$/Port 22/' /etc/ssh/sshd_config
 
-    # 删除 drop-in
-    rm -f /etc/ssh/sshd_config.d/90-ss.conf
-
-    # 恢复 socket
-    systemctl unmask ssh.socket sshd.socket 2>/dev/null || true
+    systemctl daemon-reload
     systemctl enable --now ssh.socket 2>/dev/null || true
-
-    systemctl reload ssh 2>/dev/null || systemctl reload sshd
+    systemctl restart ssh 2>/dev/null || systemctl restart sshd
 
     echo "✔ 已回滚到 22 端口"
     exit 1
