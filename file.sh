@@ -41,7 +41,8 @@ echo "------------------------"
 PROJECT="${1:-}"
 MAIN_BIN="${2:-}"
 
-[[ -n "$PROJECT" ]] || read -rp "👉 请输入项目名称: " PROJECT
+# 💡 核心修复：添加 </dev/tty 劫持标准输入，彻底解决 bash <(curl) 导致的交互卡死
+[[ -n "$PROJECT" ]] || read -rp "👉 请输入项目名称: " PROJECT </dev/tty
 [[ -z "$PROJECT" ]] && { echo "❌ 错误：项目名称不能为空"; exit 1; }
 
 if [[ ! -d "$SRC_DIR/$PROJECT" ]]; then
@@ -49,10 +50,12 @@ if [[ ! -d "$SRC_DIR/$PROJECT" ]]; then
     exit 1
 fi
 
-# ── 🌟 新增：提前精密赋予执行权限（为第 5 步策略 A 完美铺路） ──
+# ── 🌟 提前精密赋予执行权限（为第 5 步策略 A 完美铺路） ──
 echo "⚙️ 正在预设源码执行权限..."
-# 精确赋予执行权限，放过 .json, .tpl, .md 等纯文本，防止 state.json 篡位
-find "$SRC_DIR/$PROJECT" -type f \( -name "*.sh" -o -name "*.py" -o ! -name "*.*" \) -exec chmod +x {} \;
+# 🛡️ 熔断防御：确保路径不为空，双重保险
+if [[ -n "$SRC_DIR" && -n "$PROJECT" ]]; then
+    find "$SRC_DIR/$PROJECT" -type f \( -name "*.sh" -o -name "*.py" -o ! -name "*.*" \) -exec chmod +x {} \;
+fi
 
 # ── 5. ⚙️ 高精度自动检测主命令 ─────────────────────────────
 # 🌟 策略 A：优先在源码目录中寻找本身就具备可执行权限（-executable）的二进制或核心文件
@@ -102,10 +105,12 @@ fi
 
 if [[ -z "$MAIN_BIN" ]]; then
     if [[ -n "$AUTO_BIN" ]]; then
-        read -rp "👉 检测到可能的主程序 [$AUTO_BIN]，请输入快捷命令名称（直接回车则默认使用该主程序，输入 - 留空跳过）: " MAIN_BIN
+        # 💡 核心修复：添加 </dev/tty 劫持标准输入
+        read -rp "👉 检测到可能的主程序 [$AUTO_BIN]，请输入快捷命令名称（直接回车则默认使用该主程序，输入 - 留空跳过）: " MAIN_BIN </dev/tty
         [[ -z "$MAIN_BIN" ]] && MAIN_BIN="$AUTO_BIN"
     else
-        read -rp "👉 未检测到主命令，输入快捷命令名称；留空则不创建命令: " MAIN_BIN
+        # 💡 核心修复：添加 </dev/tty 劫持标准输入
+        read -rp "👉 未检测到主命令，输入快捷命令名称；留空则不创建命令: " MAIN_BIN </dev/tty
     fi
 fi
 
@@ -127,7 +132,6 @@ cp -a "$SRC_DIR/$PROJECT/." "$NEW_DIR/"
 
 # 如果指定了快捷命令，则验证主程序文件是否存在
 if [[ -n "$MAIN_BIN" && ! -e "$NEW_DIR/$MAIN_BIN" ]]; then
-    # 额外兼容：如果用户输入的快捷名没有写 .sh，但实际文件带 .sh，自动帮用户对齐
     if [[ ! "$MAIN_BIN" =~ \.sh$ && -e "$NEW_DIR/${MAIN_BIN}.sh" ]]; then
         MAIN_BIN="${MAIN_BIN}.sh"
     else
@@ -150,13 +154,12 @@ fi
 
 # ── 8. 创建软链接 ─────────────────────────────────────────
 if [[ -n "$MAIN_BIN" ]]; then
-    # 让建立的软链接名称更简洁漂亮（如用户期望建立快捷命令为 fw，而不是带后缀的 fw.sh）
     LINK_NAME="${MAIN_BIN%.*}"
     
     USER_CONFIRM_NAME=""
-    # ✅ 核心修复：只有在“交互模式”（没有传第二个参数）时，才弹出询问，全自动传参时直接跳过
+    # 💡 核心修复：只有非自动化部署，且处于交互模式时，才弹出询问，并劫持终端输入
     if [[ "$MAIN_BIN" == "$AUTO_BIN" && -z "${2:-}" ]]; then
-        read -rp "👉 推荐快捷命令为 [ $LINK_NAME ]，确认请输入新名字（直接回车默认使用 $LINK_NAME）: " USER_CONFIRM_NAME
+        read -rp "👉 推荐快捷命令为 [ $LINK_NAME ]，确认请输入新名字（直接回车默认使用 $LINK_NAME）: " USER_CONFIRM_NAME </dev/tty
     fi
     
     FINAL_NAME="${USER_CONFIRM_NAME:-$LINK_NAME}"
