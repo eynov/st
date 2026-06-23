@@ -2,7 +2,11 @@
 # ==============================================================================
 # State Store：instances.json 全局状态索引读写引擎
 # ==============================================================================
-# 依赖 common.sh 已被引入（STATE_FILE 变量）
+# 依赖 common.sh 已被引入：
+# - STATE_FILE
+# - INST_DIR
+# - err()
+# - warn()
 
 # ------------------------------------------------------------------------------
 # 初始化 state 文件（不存在则创建空结构）
@@ -102,6 +106,8 @@ state_list_enabled() {
 # ------------------------------------------------------------------------------
 state_disable() {
     local port="$1"
+    state_init
+
     local tmp
     tmp=$(mktemp)
     if jq --arg p "$port" '.instances[$p].enabled = false' \
@@ -120,6 +126,8 @@ state_disable() {
 # ------------------------------------------------------------------------------
 state_enable() {
     local port="$1"
+    state_init
+
     local tmp
     tmp=$(mktemp)
     if jq --arg p "$port" '.instances[$p].enabled = true' \
@@ -135,29 +143,48 @@ state_enable() {
 # ------------------------------------------------------------------------------
 # 从 instances/*/meta.json 自动同步到 State Store
 # 用于兼容旧版本目录实例，防止 instances.json 丢失后面板看不到实例
+#
+# 规则：
+# 1. instances.json 没有的实例：从 meta.json 导入
+# 2. instances.json 已有的实例：刷新字段，但保留原 enabled 状态
+# 3. meta.json 无 enabled 字段：默认 enabled=true
 # ------------------------------------------------------------------------------
 state_sync_from_instances() {
     state_init
 
-    local meta port payload
+    local meta port payload old_enabled
 
     for meta in "$INST_DIR"/*/meta.json; do
         [ -f "$meta" ] || continue
 
-        port=$(jq -r '.port // empty' "$meta" 2>/dev/null)
+        if ! port=$(jq -r '.port // empty' "$meta" 2>/dev/null); then
+            warn "跳过异常 meta 文件: $meta"
+            continue
+        fi
 
         if [ -z "$port" ] || [ "$port" = "null" ]; then
             port=$(basename "$(dirname "$meta")")
         fi
 
         if [ -z "$port" ]; then
+            warn "跳过无法识别端口的 meta 文件: $meta"
             continue
         fi
 
-        payload=$(jq '.enabled = (.enabled // true)' "$meta" 2>/dev/null)
-        if [ -z "$payload" ]; then
-            warn "跳过异常 meta 文件: $meta"
-            continue
+        # 如果 State Store 里已有 enabled 状态，则保留它，避免被 meta.json 覆盖
+        old_enabled=$(state_get_field "$port" "enabled")
+
+        if [ "$old_enabled" = "true" ] || [ "$old_enabled" = "false" ]; then
+            if ! payload=$(jq --argjson enabled "$old_enabled" \
+                '.enabled = $enabled' "$meta" 2>/dev/null); then
+                warn "跳过异常 meta 文件: $meta"
+                continue
+            fi
+        else
+            if ! payload=$(jq '.enabled = (.enabled // true)' "$meta" 2>/dev/null); then
+                warn "跳过异常 meta 文件: $meta"
+                continue
+            fi
         fi
 
         state_set "$port" "$payload"
