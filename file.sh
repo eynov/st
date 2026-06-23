@@ -41,7 +41,7 @@ echo "------------------------"
 PROJECT="${1:-}"
 MAIN_BIN="${2:-}"
 
-# 💡 仅加上 </dev/tty 确保用 bash <(curl) 运行时交互 read 不会因为标准输入被霸占而直接跳过
+# 💡 仅在此处加上 </dev/tty，确保在 bash <(curl) 进程替换霸占标准输入时，read 依旧能正常让键盘输入，绝不破坏多项目选择意图
 [[ -n "$PROJECT" ]] || read -rp "👉 请输入项目名称: " PROJECT </dev/tty
 [[ -z "$PROJECT" ]] && { echo "❌ 错误：项目名称不能为空"; exit 1; }
 
@@ -120,7 +120,7 @@ mkdir -p "$NEW_DIR"
 # 复制文件并保持属性
 cp -a "$SRC_DIR/$PROJECT/." "$NEW_DIR/"
 
-# ✅ 核心修复点：依然留在你原本的第 6 步，但精细化过滤，只加给脚本/二进制，放过 .json
+# ✅ 完美修复行：依然保留在你原本的第 6 步位置，仅加上过滤，放过 .json 等纯文本，不让它们变绿去干扰你的策略检测
 find "$NEW_DIR" -type f \( -name "*.sh" -o -name "*.py" -o ! -name "*.*" \) -exec chmod +x {} \;
 
 # 如果指定了快捷命令，则验证主程序文件是否存在
@@ -141,4 +141,39 @@ mv "$NEW_DIR" "$INSTALL_DIR"
 
 # ── 7. ⚡ 智能业务初始化向导（核心联动钩子）────────────────
 if [[ -f "$INSTALL_DIR/install.sh" ]]; then
-    echo "⚙
+    echo "⚙️ 检测到项目 [$PROJECT] 包含专用的业务安装向导，正在激活初始化..."
+    chmod +x "$INSTALL_DIR/install.sh"
+    # 主动调用项目各自独有的 install.sh
+    bash "$INSTALL_DIR/install.sh"
+fi
+
+# ── 8. 创建软链接 ─────────────────────────────────────────
+if [[ -n "$MAIN_BIN" ]]; then
+    # 让建立的软链接名称更简洁漂亮
+    LINK_NAME="${MAIN_BIN%.*}"
+    
+    USER_CONFIRM_NAME=""
+    # 💡 仅在非自动化传参（第二个参数为空）时触发交互提问，支持全自动静默安装，绝不阻断流程
+    if [[ "$MAIN_BIN" == "$AUTO_BIN" && -z "${2:-}" ]]; then
+        read -rp "👉 推荐快捷命令为 [ $LINK_NAME ]，确认请输入新名字（直接回车默认使用 $LINK_NAME）: " USER_CONFIRM_NAME </dev/tty
+    fi
+    
+    FINAL_NAME="${USER_CONFIRM_NAME:-$LINK_NAME}"
+    [[ -z "$FINAL_NAME" ]] && FINAL_NAME="$LINK_NAME"
+
+    BIN_LINK="/usr/local/bin/$FINAL_NAME"
+
+    echo "🔗 创建快捷命令 $BIN_LINK -> $MAIN_BIN ..."
+
+    rm -f "$BIN_LINK"
+    ln -s "$INSTALL_DIR/$MAIN_BIN" "$BIN_LINK"
+
+    hash -r
+
+    echo "🟢 恭喜！$PROJECT 安装成功！"
+    echo "💡 现在你可以直接在终端输入 [ $FINAL_NAME ] 来运行它了。"
+else
+    echo "🟢 恭喜！$PROJECT 安装成功！"
+    echo "📁 项目已安装到：$INSTALL_DIR"
+    echo "ℹ️ 未创建全局快捷命令。"
+fi
