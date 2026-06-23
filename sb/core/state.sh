@@ -131,3 +131,35 @@ state_enable() {
         return 1
     fi
 }
+
+# ------------------------------------------------------------------------------
+# 从 instances/*/meta.json 自动同步到 State Store
+# 用于兼容旧版本目录实例，防止 instances.json 丢失后面板看不到实例
+# ------------------------------------------------------------------------------
+state_sync_from_instances() {
+    state_init
+
+    local meta port payload
+
+    for meta in "$INST_DIR"/*/meta.json; do
+        [ -f "$meta" ] || continue
+
+        port=$(jq -r '.port // empty' "$meta" 2>/dev/null)
+
+        if [ -z "$port" ] || [ "$port" = "null" ]; then
+            port=$(basename "$(dirname "$meta")")
+        fi
+
+        if [ -z "$port" ]; then
+            continue
+        fi
+
+        payload=$(jq '.enabled = (.enabled // true)' "$meta" 2>/dev/null)
+        if [ -z "$payload" ]; then
+            warn "跳过异常 meta 文件: $meta"
+            continue
+        fi
+
+        state_set "$port" "$payload"
+    done
+}
