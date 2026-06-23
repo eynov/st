@@ -1,12 +1,13 @@
 #!/bin/bash
 # --- render.sh (绝对路径加固 + 锁与Schema防御完全体) ---
 
-# ── 1. 文件锁熔断机制（原汁原味吸纳你的代码） ──────────────────
-exec 200>/var/lock/render.lock
-flock -n 200 || {
+# ── 1. 更加健壮的文件锁熔断机制（防止子 Shell 嵌套锁死） ──────────────────
+LOCKFILE="/var/lock/sb_fw_render.lock"
+exec 200>"$LOCKFILE"
+if ! flock -n 200; then
     echo "❌ render 正在执行，跳过"
     exit 1
-}
+fi
 
 REAL_SCRIPT_PATH=$(readlink -f "${BASH_SOURCE[0]}")
 BASE_DIR="$(cd "$(dirname "$REAL_SCRIPT_PATH")" && pwd)"
@@ -22,14 +23,12 @@ if [[ $EUID -ne 0 ]]; then
    exit 1
 fi
 
-# ── 2. 状态文件合规性深度校验（整合你的三阶段校验） ─────────────
-# 校验 A: 基础语法解析
+# ── 2. 状态文件合规性深度校验 ─────────────────────────────
 jq empty "$STATE_FILE" 2> /tmp/render_jq_error.log || {
     echo "❌ state.json 已损坏，停止 render"
     exit 1
 }
 
-# 校验 B: 核心结构 Schema 字段强检验
 if ! jq -e '.forwards and .open_ports and .blacklist' "$STATE_FILE" >/dev/null 2>&1; then
     echo "❌ schema错误"
     exit 1
@@ -43,7 +42,12 @@ fi
 sysctl -w net.ipv4.ip_forward=1 > /dev/null
 echo "net.ipv4.ip_forward=1" > /etc/sysctl.d/99-forward.conf
 
-SRC_IP=$(curl -s4 -m 3 https://api.ip.sb/ip || curl -s4 -m 3 https://ifconfig.me)
+# 💡 优化点：增强 IP 获取成功率（多加 2 个备用 API，且将超时宽限到 5 秒）
+SRC_IP=$(curl -s4 -m 5 https://api.ip.sb/ip || \
+         curl -s4 -m 5 https://ifconfig.me || \
+         curl -s4 -m 5 https://api.ipify.org || \
+         curl -s4 -m 5 https://ip4.seeip.org)
+
 if [ -z "$SRC_IP" ]; then
     echo "❌ 无法获取本机公网 IP，中断编译。"
     exit 1
@@ -65,7 +69,6 @@ UDP_PORTS=$(jq -r '.open_ports.udp | join(", ")' "$STATE_FILE" 2>/dev/null)
 DNAT_RULES=""
 SNAT_RULES=""
 
-# 💡 加上后缀 ? 彻底防止单项遍历导致的底层异常中断
 while read -r row; do
     [ -z "$row" ] && continue
     sport=$(echo "$row" | jq -r '.sport')
@@ -83,6 +86,7 @@ done < <(jq -c '.forwards[]?' "$STATE_FILE" 2>/dev/null)
 # ── 4. 模版渲染与应用 ──────────────────────────────────────
 echo "flush ruleset" > "$BUILD_CONF"
 
+# 🛡️ 路径纠偏防御：确保模版读取时使用绝对路径，绝不迷路
 cat "$BASE_DIR/rules/filter.nft.tpl" >> "$BUILD_CONF"
 sed -i "s/#BLACKLIST#/$BLACKLIST/g" "$BUILD_CONF"
 sed -i "s/#TCP_PORTS#/$TCP_PORTS/g" "$BUILD_CONF"
