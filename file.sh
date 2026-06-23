@@ -49,7 +49,7 @@ if [[ ! -d "$SRC_DIR/$PROJECT" ]]; then
     exit 1
 fi
 
-# ── 5. 自动检测主命令 ────────────────────────────────────
+# ── 5. 自动检测主命令，可留空表示不创建快捷命令 ─────────────
 AUTO_BIN=$(find "$SRC_DIR/$PROJECT" \
     -maxdepth 1 \
     -type f \
@@ -65,12 +65,21 @@ AUTO_BIN=$(find "$SRC_DIR/$PROJECT" \
 
 AUTO_BIN="${AUTO_BIN##*/}"
 
-[[ -n "$MAIN_BIN" ]] || read -rp "👉 请输入快捷命令名称 (默认: ${AUTO_BIN:-$PROJECT}): " MAIN_BIN
-MAIN_BIN="${MAIN_BIN:-${AUTO_BIN:-$PROJECT}}"
+if [[ -z "$MAIN_BIN" ]]; then
+    if [[ -n "$AUTO_BIN" ]]; then
+        read -rp "👉 检测到可能的主程序 [$AUTO_BIN]，请输入快捷命令名称；留空则不创建命令: " MAIN_BIN
+    else
+        read -rp "👉 未检测到主命令，输入快捷命令名称；留空则不创建命令: " MAIN_BIN
+    fi
+fi
+
+# 输入 - 也表示不创建快捷命令
+if [[ "$MAIN_BIN" == "-" ]]; then
+    MAIN_BIN=""
+fi
 
 # ── 6. 安装（安全原子替换）───────────────────────────────
 INSTALL_DIR="/opt/$PROJECT"
-BIN_LINK="/usr/local/bin/$MAIN_BIN"
 NEW_DIR="${INSTALL_DIR}.new"
 
 echo "🚀 开始安装 $PROJECT 到 $INSTALL_DIR ..."
@@ -83,8 +92,8 @@ cp -a "$SRC_DIR/$PROJECT/." "$NEW_DIR/"
 # 确保常规文件具有执行权限
 find "$NEW_DIR" -type f -exec chmod +x {} \;
 
-# 验证关键文件是否存在
-if [[ ! -e "$NEW_DIR/$MAIN_BIN" ]]; then
+# 如果指定了快捷命令，则验证主程序文件是否存在
+if [[ -n "$MAIN_BIN" && ! -e "$NEW_DIR/$MAIN_BIN" ]]; then
     echo "❌ 错误：在安装目录中未找到主程序文件：$MAIN_BIN" >&2
     rm -rf "$NEW_DIR"
     exit 1
@@ -94,15 +103,23 @@ fi
 rm -rf "$INSTALL_DIR"
 mv "$NEW_DIR" "$INSTALL_DIR"
 
-# ── 7. 创建软链接 ────────────────────────────────────────
-echo "🔗 创建快捷命令 $BIN_LINK ..."
+# ── 7. 创建软链接，可跳过 ─────────────────────────────────
+if [[ -n "$MAIN_BIN" ]]; then
+    BIN_LINK="/usr/local/bin/$MAIN_BIN"
 
-# 防御性规避 ln -sf 遇到“历史遗留目录”的边缘坑：先 rm -rf 再 ln -s
-rm -rf "$BIN_LINK"
-ln -s "$INSTALL_DIR/$MAIN_BIN" "$BIN_LINK"
+    echo "🔗 创建快捷命令 $BIN_LINK ..."
 
-# 刷新 Bash 命令哈希表
-hash -r
+    # 防御性规避 ln -sf 遇到“历史遗留目录”的边缘坑：先 rm -rf 再 ln -s
+    rm -rf "$BIN_LINK"
+    ln -s "$INSTALL_DIR/$MAIN_BIN" "$BIN_LINK"
 
-echo "🟢 恭喜！$PROJECT 安装成功！"
-echo "💡 现在你可以直接在终端输入 [ $MAIN_BIN ] 来运行它了。"
+    # 刷新 Bash 命令哈希表
+    hash -r
+
+    echo "🟢 恭喜！$PROJECT 安装成功！"
+    echo "💡 现在你可以直接在终端输入 [ $MAIN_BIN ] 来运行它了。"
+else
+    echo "🟢 恭喜！$PROJECT 安装成功！"
+    echo "📁 项目已安装到：$INSTALL_DIR"
+    echo "ℹ️ 未创建快捷命令。"
+fi
