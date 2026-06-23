@@ -1,8 +1,9 @@
 #!/bin/bash
 # --- fw.sh ---
 
-# 🔹 动态获取脚本所在目录的绝对路径
-BASE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# 🔹 追踪软链接的真正物理源头路径，彻底杜绝路径错位
+REAL_SCRIPT_PATH=$(readlink -f "${BASH_SOURCE[0]}")
+BASE_DIR="$(cd "$(dirname "$REAL_SCRIPT_PATH")" && pwd)"
 
 STATE_FILE="$BASE_DIR/state.json"
 RENDER_BIN="$BASE_DIR/render.sh"
