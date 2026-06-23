@@ -1,5 +1,5 @@
 #!/bin/bash
-# --- fw.sh (原汁原味架构 + 语法强合规版) ---
+# --- fw.sh (原汁原味架构 + 纯净主菜单版) ---
 
 if [ -L "${BASH_SOURCE[0]}" ]; then
     REAL_SCRIPT_PATH=$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || echo "")
@@ -23,8 +23,7 @@ if [[ $EUID -ne 0 ]]; then
    exit 1
 fi
 
-# ── 🛡️ 状态文件完美防御（完美吸纳你的 jq 验证思路） ──
-# 只要文件不存在、大小为 0，或者通过不了你指定的 jq empty 语法检测，就立刻强制初始化
+# ── 🛡️ 状态文件合规性防御 ──
 if [ ! -f "$STATE_FILE" ] || [ ! -s "$STATE_FILE" ] || ! jq empty "$STATE_FILE" >/dev/null 2>&1; then
     echo '{"forwards":[],"open_ports":{"tcp":[],"udp":[]},"blacklist":[]}' > "$STATE_FILE"
     chmod 644 "$STATE_FILE"
@@ -113,7 +112,6 @@ del_port() {
 
 show_ports() {
     echo -e "\n=== 🔓 开放端口一览 ==="
-    # 💡 加上后缀 ? 兜底，防止意外
     echo "TCP 开放: $(jq -r '.open_ports.tcp? | join(", ")' "$STATE_FILE" 2>/dev/null)"
     echo "UDP 开放: $(jq -r '.open_ports.udp? | join(", ")' "$STATE_FILE" 2>/dev/null)"
     echo ""
@@ -137,11 +135,12 @@ show_blacklist() {
     echo ""
 }
 
+# ── 🔄 纯净循环控制台 ──────────────────────────────────────────
 while true; do
     echo "========================="
     echo "   SB Firewall Manager   "
     echo "========================="
-    show_ports
+    # ✅ 完美剔除：这里不再自动加载并运行 show_ports，保持纯洁的菜单面板
     echo "1. 添加端口转发    2. 删除端口转发    3. 查看端口转发"
     echo "-------------------------------------------------"
     echo "4. 放行端口        5. 删除放行端口    6. 查看放行端口"
@@ -160,7 +159,7 @@ while true; do
         3) show_forward ;;
         4) add_port ;;
         5) del_port ;;
-        6) show_ports ;;
+        6) show_ports ;;  # 👈 只有当手动选择 6 时才精准触发打印
         7) add_blacklist ;;
         8) del_blacklist ;;
         9) show_blacklist ;;
