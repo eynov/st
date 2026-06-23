@@ -1,0 +1,68 @@
+#!/bin/bash
+# ==============================================================================
+# Protocol Plugin: NEW Protocol
+# ==============================================================================
+
+proto_register "NEW" "New Protocol" "build_new" "uri_new" "surge_new"
+
+build_new() {
+    local port="$1"
+
+    local password
+    password=$(openssl rand -hex 16)
+
+    cat > "${INST_DIR}/${port}/config.json" <<JSONEOF
+{
+  "log": {
+    "level": "info",
+    "timestamp": true
+  },
+  "inbounds": [{
+    "type": "your-protocol-type",
+    "listen": "::",
+    "listen_port": ${port},
+    "password": "${password}"
+  }],
+  "outbounds": [{
+    "type": "direct"
+  }]
+}
+JSONEOF
+
+    cat > "${INST_DIR}/${port}/meta.json" <<JSONEOF
+{
+  "port": ${port},
+  "protocol": "NEW",
+  "password": "${password}",
+  "created_at": "$(date '+%Y-%m-%d %H:%M:%S')",
+  "enabled": true
+}
+JSONEOF
+
+    state_set "$port" "$(cat "${INST_DIR}/${port}/meta.json")"
+}
+
+uri_new() {
+    local meta_file="$1"
+    local current_ip="$2"
+
+    local port password tag
+
+    port=$(jq -r '.port' "$meta_file")
+    password=$(jq -r '.password' "$meta_file")
+    tag=$(urlencode "NEW_${port}")
+
+    echo "new://${password}@${current_ip}:${port}#${tag}"
+}
+
+surge_new() {
+    local meta_file="$1"
+    local current_ip="$2"
+
+    local port password
+
+    port=$(jq -r '.port' "$meta_file")
+    password=$(jq -r '.password' "$meta_file")
+
+    echo "NEW_${port} = new, ${current_ip}, ${port}, password=${password}"
+}
