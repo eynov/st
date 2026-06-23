@@ -1,9 +1,8 @@
 #!/bin/bash
-# --- fw.sh (自适应穿透与合规防御完全体) ---
+# --- fw.sh ---
 
-# 🔹 追踪软链接的真正物理源头路径，彻底杜绝路径错位
-REAL_SCRIPT_PATH=$(readlink -f "${BASH_SOURCE[0]}")
-BASE_DIR="$(cd "$(dirname "$REAL_SCRIPT_PATH")" && pwd)"
+# 🔹 动态获取脚本所在目录的绝对路径
+BASE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 STATE_FILE="$BASE_DIR/state.json"
 RENDER_BIN="$BASE_DIR/render.sh"
@@ -13,11 +12,9 @@ if [[ $EUID -ne 0 ]]; then
    exit 1
 fi
 
-# ── 🛡️ 状态文件合规性强行防御（完全保留你原本的初始化意图，并加固防御） ──
-# 核心修复点：如果文件不存在、大小为0，或者通过不了 jq 最基础的语法解析（例如只有一两个空格/换行符），则强行注入标准出厂骨架
-if [ ! -f "$STATE_FILE" ] || [ ! -s "$STATE_FILE" ] || ! jq '.' "$STATE_FILE" >/dev/null 2>&1; then
+# 确保状态文件结构完备
+if [ ! -f "$STATE_FILE" ] || [ ! -s "$STATE_FILE" ]; then
     echo '{"forwards":[],"open_ports":{"tcp":[],"udp":[]},"blacklist":[]}' > "$STATE_FILE"
-    chmod 644 "$STATE_FILE"
 fi
 
 trigger_render() {
