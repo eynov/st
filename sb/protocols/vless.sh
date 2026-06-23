@@ -1,38 +1,40 @@
 #!/bin/bash
 # ==============================================================================
-# Protocol Plugin: VLESS Reality (Smart Auto-Parsing Edition)
+# Protocol Plugin: VLESS Reality (Interactive Step-by-Step Edition)
 # ==============================================================================
 
 proto_register "VLESS" "VLESS Reality" "build_vless" "uri_vless" "surge_vless" "outbound_vless"
 
 build_vless() {
     # ==========================================================
-    # 🌟 核心修复：智能拆解带空格的输入
+    # 🌟 核心修复：改为分步回车交互输入
     # ==========================================================
-    local raw_input="$1"
-    local port server_name custom_tag uuid short_id
+    local port="$1"
+    local server_name custom_tag uuid short_id
 
-    # 如果检测到传入的参数 1 里面包含空格，说明是复合输入，自动拆分
-    if [[ "$raw_input" == *" "* ]]; then
-        read -r port server_name custom_tag <<< "$raw_input"
-    else
-        port="$raw_input"
-        server_name="$2"
-        custom_tag="$3"
+    # 1. 如果主脚本传进来的 $1 包含了空格，说明用户习惯性连着输了，我们帮其清理掉，只留第一个纯数字
+    if [[ "$port" == *" "* ]]; then
+        port=$(echo "$port" | awk '{print $1}')
     fi
 
-    # 设置默认值兜底
-    port=$(echo "$port" | tr -d '[:space:]')
+    # 如果清洗后的端口不是纯数字，或者为空，则提示重新输入
+    while [[ ! "$port" =~ ^[0-9]+$ ]]; do
+        read -p "请输入挂载端口 (纯数字): " port
+    done
+
+    # 2. 交互式输入域名
+    echo "--------------------------------------------------"
+    read -p "请输入伪装域名 [直接回车默认: www.microsoft.com]: " server_name
     server_name="${server_name:-www.microsoft.com}"
+
+    # 3. 交互式输入节点别名
+    read -p "请输入节点别名 [直接回车默认: VLESS_${port}]: " custom_tag
     custom_tag="${custom_tag:-VLESS_${port}}"
+    echo "--------------------------------------------------"
+
+    # 自动生成其余安全参数
     uuid="$(cat /proc/sys/kernel/random/uuid)"
     short_id="$(openssl rand -hex 8)"
-
-    # 验证提取出的端口是否为纯数字，防止主脚本传错位置
-    if [[ ! "$port" =~ ^[0-9]+$ ]]; then
-        echo "Error: Invalid port number extracted: '$port'" >&2
-        return 1
-    fi
 
     if ! command -v sing-box &> /dev/null; then
         echo "Error: sing-box is not installed or not in PATH." >&2
@@ -45,7 +47,7 @@ build_vless() {
     private_key="$(echo "$keypair" | sed -n 's/^PrivateKey:[[:space:]]*//p')"
     public_key="$(echo "$keypair" | sed -n 's/^PublicKey:[[:space:]]*//p')"
 
-    # 强行创建标准目录（去除所有空格干扰）
+    # 确保目录存在
     mkdir -p "${INST_DIR}/${port}"
 
     # 服务端配置
@@ -87,7 +89,7 @@ JSONEOF
 }
 JSONEOF
 
-    # 精准写入，只把纯数字端口传给主脚本的状态仓库
+    # 精准写入，此时的 $port 绝对是纯数字
     state_set "$port" "$(cat "${INST_DIR}/${port}/meta.json")"
 }
 
