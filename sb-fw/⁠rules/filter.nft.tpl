@@ -18,26 +18,31 @@ table ip sb_filter {
     }
 
     chain input {
-        type filter hook input priority filter; policy accept;
+        # 🚨 核心加固：默认策略改为 drop，未命中的流量全部直接丢弃
+        type filter hook input priority filter; policy drop;
 
+        # 1. 放行本地回环 (127.0.0.1) 通信
         iifname "lo" accept
+
+        # 2. 放行已建立和相关的连接 (确保服务器主动向外请求的回程流量不被掐断)
         ct state established,related accept
 
-        # 黑名单无条件拦截
+        # 3. 拦截黑名单
         ip saddr @blacklist drop
 
-        # DDOS 基础防护 (SYN 限流)
+        # 4. 基础抗 D 策略 (仅对放行的端口生效)
         tcp flags syn tcp dinitrate rate over 50/second drop
 
-        # SSH 防爆破 (1分钟内连接超过5次，拉黑10分钟)
-        tcp dport 22 ct state new meter ssh_meter { ip saddr timeout 10m limit rate over 5/minute } drop
+        # 5. 🛡️ 智能放行系统当前的 SSH 端口 (由编译器动态注入，防止失联)
+        tcp dport #SSH_PORT# accept
 
-        # 动态放行开放的本地端口
+        # 6. 动态放行通过 fw 面板手动开放的本地业务端口
         tcp dport @allowed_ports_tcp accept
         udp dport @allowed_ports_udp accept
     }
 
     chain forward {
+        # 💡 保持 accept：流量经 prerouting 链 DNAT 转换后走 forward 链，不受 input 默认 drop 的影响，转发依然百分百畅通
         type filter hook forward priority filter; policy accept;
     }
 }
