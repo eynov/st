@@ -1,172 +1,105 @@
 #!/bin/bash
-# --- fw.sh (原汁原味架构 + 语法强合规版) ---
+# --- render.sh (绝对路径加固 + 锁与Schema防御完全体) ---
 
-if [ -L "${BASH_SOURCE[0]}" ]; then
-    REAL_SCRIPT_PATH=$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || echo "")
-    if [ -z "$REAL_SCRIPT_PATH" ]; then
-        REAL_SCRIPT_PATH=$(ls -l "${BASH_SOURCE[0]}" | awk -F '-> ' '{print $2}')
-    fi
-else
-    REAL_SCRIPT_PATH="${BASH_SOURCE[0]}"
-fi
+# ── 1. 文件锁熔断机制（原汁原味吸纳你的代码） ──────────────────
+exec 200>/var/lock/render.lock
+flock -n 200 || {
+    echo "❌ render 正在执行，跳过"
+    exit 1
+}
 
-BASE_DIR="$(cd "$(dirname "$REAL_SCRIPT_PATH")" 2>/dev/null && pwd)"
-if [[ "$BASE_DIR" == "/usr/local/bin" || -z "$BASE_DIR" ]]; then
-    BASE_DIR="/opt/sb-fw"
-fi
+REAL_SCRIPT_PATH=$(readlink -f "${BASH_SOURCE[0]}")
+BASE_DIR="$(cd "$(dirname "$REAL_SCRIPT_PATH")" && pwd)"
 
 STATE_FILE="$BASE_DIR/state.json"
-RENDER_BIN="$BASE_DIR/render.sh"
+BUILD_DIR="$BASE_DIR/build"
+BUILD_CONF="$BUILD_DIR/nft.conf"
+SYSTEM_CONF="/etc/nftables.conf"
 
+mkdir -p "$BUILD_DIR"
 if [[ $EUID -ne 0 ]]; then
-   echo "❌ 请以 root 权限运行此脚本"
+   echo "❌ 编译器必须以 root 权限运行"
    exit 1
 fi
 
-# ── 🛡️ 状态文件完美防御（完美吸纳你的 jq 验证思路） ──
-# 只要文件不存在、大小为 0，或者通过不了你指定的 jq empty 语法检测，就立刻强制初始化
-if [ ! -f "$STATE_FILE" ] || [ ! -s "$STATE_FILE" ] || ! jq empty "$STATE_FILE" >/dev/null 2>&1; then
-    echo '{"forwards":[],"open_ports":{"tcp":[],"udp":[]},"blacklist":[]}' > "$STATE_FILE"
-    chmod 644 "$STATE_FILE"
+# ── 2. 状态文件合规性深度校验（整合你的三阶段校验） ─────────────
+# 校验 A: 基础语法解析
+jq empty "$STATE_FILE" 2> /tmp/render_jq_error.log || {
+    echo "❌ state.json 已损坏，停止 render"
+    exit 1
+}
+
+# 校验 B: 核心结构 Schema 字段强检验
+if ! jq -e '.forwards and .open_ports and .blacklist' "$STATE_FILE" >/dev/null 2>&1; then
+    echo "❌ schema错误"
+    exit 1
 fi
 
-trigger_render() {
-    echo "⚙️ 正在通过模板编译新规则..."
-    bash "$RENDER_BIN"
-    if [ $? -eq 0 ]; then
-        echo "✅ 编译成功，规则已实时应用！"
-    else
-        echo "❌ 编译失败，内核已安全回滚到上一次可用状态。"
-    fi
-}
+# ── 3. 系统环境与底层依赖 ──────────────────────────────────
+if ! command -v jq &> /dev/null || ! command -v dig &> /dev/null; then
+    apt-get update && apt-get install -y jq dnsutils curl nftables > /dev/null
+fi
 
-add_forward() {
-    read -p "🔹 请输入目标落地 IP 或域名: " dest_addr
-    if [[ ! "$dest_addr" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-        dip=$(dig +short "$dest_addr" | tail -n1)
-        if [ -z "$dip" ]; then echo "❌ 域名解析失败！"; return; fi
-    else
-        dip="$dest_addr"
-    fi
-    
-    read -p "🔹 请输入起始端口: " sport
-    read -p "🔹 请输入结束端口 (若单端口直接回车): " dport
-    [ -z "$dport" ] && dport="$sport"
-    read -p "🔹 请输入协议 (tcp/udp/both, 默认 both): " proto
-    [ -z "$proto" ] && proto="both"
+sysctl -w net.ipv4.ip_forward=1 > /dev/null
+echo "net.ipv4.ip_forward=1" > /etc/sysctl.d/99-forward.conf
 
-    protocols=("tcp" "udp")
-    [ "$proto" == "tcp" ] && protocols=("tcp")
-    [ "$proto" == "udp" ] && protocols=("udp")
+SRC_IP=$(curl -s4 -m 3 https://api.ip.sb/ip || curl -s4 -m 3 https://ifconfig.me)
+if [ -z "$SRC_IP" ]; then
+    echo "❌ 无法获取本机公网 IP，中断编译。"
+    exit 1
+fi
 
-    for p in "${protocols[@]}"; do
-        exists=$(jq --arg sport "$sport" --arg dport "$dport" --arg proto "$p" \
-            '.forwards[]? | select(.sport==$sport and .dport==$dport and .proto==$proto)' "$STATE_FILE" 2>/dev/null)
-        if [ -z "$exists" ]; then
-            jq --arg sport "$sport" --arg dport "$dport" --arg dip "$dip" --arg proto "$p" \
-               '.forwards += [{"sport":$sport, "dport":$dport, "dip":$dip, "proto":$proto}]' "$STATE_FILE" > "${STATE_FILE}.tmp" && mv "${STATE_FILE}.tmp" "$STATE_FILE"
-        fi
-    done
-    trigger_render
-}
+SSH_PORT=$(ss -tlnp | grep -E 'sshd|listen' | grep -oP '(?<=:)\d+(?=\s)' | head -n1)
+[ -z "$SSH_PORT" ] && SSH_PORT=$(awk '/^Port/ {print $2}' /etc/ssh/sshd_config | head -n1)
+[ -z "$SSH_PORT" ] && SSH_PORT="22" 
 
-del_forward() {
-    show_forward
-    read -p "❌ 请输入要删除的规则 Index: " idx
-    if [ -n "$idx" ]; then
-        jq "del(.forwards[$idx])" "$STATE_FILE" > "${STATE_FILE}.tmp" && mv "${STATE_FILE}.tmp" "$STATE_FILE"
-        trigger_render
-    fi
-}
+BLACKLIST=$(jq -r '.blacklist | join(", ")' "$STATE_FILE" 2>/dev/null)
+[ -z "$BLACKLIST" ] && BLACKLIST="127.0.0.2"
 
-show_forward() {
-    echo -e "\n=== 📍 当前端口转发规则列表 ==="
-    echo -e "Index\t协议\t本地端口\t目标映射"
-    echo -e "-----------------------------------------------"
-    jq -r '.forwards | to_entries[] | "\(.key)\t\(.value.proto)\t\(.value.sport)-\(.value.dport)\t-> \(.value.dip)"' "$STATE_FILE" 2>/dev/null
-    echo ""
-}
+TCP_PORTS=$(jq -r '.open_ports.tcp | join(", ")' "$STATE_FILE" 2>/dev/null)
+[ -z "$TCP_PORTS" ] && TCP_PORTS="65535"
 
-add_port() {
-    read -p "🔹 请输入放行端口或段 (例如 80 或 80-90): " port
-    read -p "🔹 协议类型 (tcp/udp/both): " proto
-    if [ "$proto" == "tcp" ] || [ "$proto" == "both" ]; then
-        jq --arg port "$port" '.open_ports.tcp += [$port] | .open_ports.tcp |= unique' "$STATE_FILE" > "${STATE_FILE}.tmp" && mv "${STATE_FILE}.tmp" "$STATE_FILE"
-    fi
-    if [ "$proto" == "udp" ] || [ "$proto" == "both" ]; then
-        jq --arg port "$port" '.open_ports.udp += [$port] | .open_ports.udp |= unique' "$STATE_FILE" > "${STATE_FILE}.tmp" && mv "${STATE_FILE}.tmp" "$STATE_FILE"
-    fi
-    trigger_render
-}
+UDP_PORTS=$(jq -r '.open_ports.udp | join(", ")' "$STATE_FILE" 2>/dev/null)
+[ -z "$UDP_PORTS" ] && UDP_PORTS="65535"
 
-del_port() {
-    read -p "❌ 请输入要取消放行的端口: " port
-    read -p "🔹 协议类型 (tcp/udp/both): " proto
-    if [ "$proto" == "tcp" ] || [ "$proto" == "both" ]; then
-        jq --arg port "$port" '.open_ports.tcp -= [$port]' "$STATE_FILE" > "${STATE_FILE}.tmp" && mv "${STATE_FILE}.tmp" "$STATE_FILE"
-    fi
-    if [ "$proto" == "udp" ] || [ "$proto" == "both" ]; then
-        jq --arg port "$port" '.open_ports.udp -= [$port]' "$STATE_FILE" > "${STATE_FILE}.tmp" && mv "${STATE_FILE}.tmp" "$STATE_FILE"
-    fi
-    trigger_render
-}
+DNAT_RULES=""
+SNAT_RULES=""
 
-show_ports() {
-    echo -e "\n=== 🔓 开放端口一览 ==="
-    # 💡 加上后缀 ? 兜底，防止意外
-    echo "TCP 开放: $(jq -r '.open_ports.tcp? | join(", ")' "$STATE_FILE" 2>/dev/null)"
-    echo "UDP 开放: $(jq -r '.open_ports.udp? | join(", ")' "$STATE_FILE" 2>/dev/null)"
-    echo ""
-}
+# 💡 加上后缀 ? 彻底防止单项遍历导致的底层异常中断
+while read -r row; do
+    [ -z "$row" ] && continue
+    sport=$(echo "$row" | jq -r '.sport')
+    dport=$(echo "$row" | jq -r '.dport')
+    dip=$(echo "$row" | jq -r '.dip')
+    proto=$(echo "$row" | jq -r '.proto')
 
-add_blacklist() {
-    read -p "🚫 请输入要封禁的 IP 或网段: " ip
-    jq --arg ip "$ip" '.blacklist += [$ip] | .blacklist |= unique' "$STATE_FILE" > "${STATE_FILE}.tmp" && mv "${STATE_FILE}.tmp" "$STATE_FILE"
-    trigger_render
-}
+    port_range="$sport"
+    [ "$sport" != "$dport" ] && port_range="$sport-$dport"
 
-del_blacklist() {
-    read -p "🟢 请输入要解封的 IP 或网段: " ip
-    jq --arg ip "$ip" '.blacklist -= [$ip]' "$STATE_FILE" > "${STATE_FILE}.tmp" && mv "${STATE_FILE}.tmp" "$STATE_FILE"
-    trigger_render
-}
+    DNAT_RULES="${DNAT_RULES}        $proto dport $port_range dnat to $dip\n"
+    SNAT_RULES="${SNAT_RULES}        ip daddr $dip $proto dport $port_range snat to $SRC_IP\n"
+done < <(jq -c '.forwards[]?' "$STATE_FILE" 2>/dev/null)
 
-show_blacklist() {
-    echo -e "\n=== 🚫 恶意 IP 黑名单 ==="
-    jq -r '.blacklist[]?' "$STATE_FILE" 2>/dev/null
-    echo ""
-}
+# ── 4. 模版渲染与应用 ──────────────────────────────────────
+echo "flush ruleset" > "$BUILD_CONF"
 
-while true; do
-    echo "========================="
-    echo "   SB Firewall Manager   "
-    echo "========================="
-    show_ports
-    echo "1. 添加端口转发    2. 删除端口转发    3. 查看端口转发"
-    echo "-------------------------------------------------"
-    echo "4. 放行端口        5. 删除放行端口    6. 查看放行端口"
-    echo "-------------------------------------------------"
-    echo "7. 封禁IP          8. 解封IP          9. 查看黑名单"
-    echo "-------------------------------------------------"
-    echo "10. SSH防爆破 (模版默认常开)"
-    echo "11. DDOS防护  (模版默认常开)"
-    echo "12. 重载配置  (强制重新编译)"
-    echo "0. 退出"
-    echo "========================="
-    read -p "请选择操作 [0-12]: " opt
-    case $opt in
-        1) add_forward ;;
-        2) del_forward ;;
-        3) show_forward ;;
-        4) add_port ;;
-        5) del_port ;;
-        6) show_ports ;;
-        7) add_blacklist ;;
-        8) del_blacklist ;;
-        9) show_blacklist ;;
-        10|11) echo "ℹ️ 防护逻辑内嵌于 rules/filter.nft.tpl，无需开关。" ;;
-        12) trigger_render ;;
-        0) exit 0 ;;
-        *) echo "❌ 无效输入" ;;
-    esac
-done
+cat "$BASE_DIR/rules/filter.nft.tpl" >> "$BUILD_CONF"
+sed -i "s/#BLACKLIST#/$BLACKLIST/g" "$BUILD_CONF"
+sed -i "s/#TCP_PORTS#/$TCP_PORTS/g" "$BUILD_CONF"
+sed -i "s/#UDP_PORTS#/$UDP_PORTS/g" "$BUILD_CONF"
+sed -i "s/#SSH_PORT#/$SSH_PORT/g" "$BUILD_CONF"
+
+cat "$BASE_DIR/rules/nat.nft.tpl" >> "$BUILD_CONF"
+sed -i "s@#DNAT_RULES#@$DNAT_RULES@g" "$BUILD_CONF"
+sed -i "s@#SNAT_RULES#@$SNAT_RULES@g" "$BUILD_CONF"
+
+nft -f "$BUILD_CONF"
+if [ $? -eq 0 ]; then
+    cp "$BUILD_CONF" "$SYSTEM_CONF"
+    systemctl enable nftables &>/dev/null
+    systemctl restart nftables &>/dev/null
+    exit 0
+else
+    echo "❌ 动态生成的 nft.conf 存在语法错误，拒绝写入内核！"
+    exit 1
+fi
