@@ -1,9 +1,19 @@
 #!/bin/bash
-# --- fw.sh ---
+# --- fw.sh (原汁原味架构 + 语法强合规版) ---
 
-# 🔹 追踪软链接的真正物理源头路径，彻底杜绝路径错位
-REAL_SCRIPT_PATH=$(readlink -f "${BASH_SOURCE[0]}")
-BASE_DIR="$(cd "$(dirname "$REAL_SCRIPT_PATH")" && pwd)"
+if [ -L "${BASH_SOURCE[0]}" ]; then
+    REAL_SCRIPT_PATH=$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || echo "")
+    if [ -z "$REAL_SCRIPT_PATH" ]; then
+        REAL_SCRIPT_PATH=$(ls -l "${BASH_SOURCE[0]}" | awk -F '-> ' '{print $2}')
+    fi
+else
+    REAL_SCRIPT_PATH="${BASH_SOURCE[0]}"
+fi
+
+BASE_DIR="$(cd "$(dirname "$REAL_SCRIPT_PATH")" 2>/dev/null && pwd)"
+if [[ "$BASE_DIR" == "/usr/local/bin" || -z "$BASE_DIR" ]]; then
+    BASE_DIR="/opt/sb-fw"
+fi
 
 STATE_FILE="$BASE_DIR/state.json"
 RENDER_BIN="$BASE_DIR/render.sh"
@@ -13,9 +23,11 @@ if [[ $EUID -ne 0 ]]; then
    exit 1
 fi
 
-# 确保状态文件结构完备
-if [ ! -f "$STATE_FILE" ] || [ ! -s "$STATE_FILE" ]; then
+# ── 🛡️ 状态文件完美防御（完美吸纳你的 jq 验证思路） ──
+# 只要文件不存在、大小为 0，或者通过不了你指定的 jq empty 语法检测，就立刻强制初始化
+if [ ! -f "$STATE_FILE" ] || [ ! -s "$STATE_FILE" ] || ! jq empty "$STATE_FILE" >/dev/null 2>&1; then
     echo '{"forwards":[],"open_ports":{"tcp":[],"udp":[]},"blacklist":[]}' > "$STATE_FILE"
+    chmod 644 "$STATE_FILE"
 fi
 
 trigger_render() {
@@ -49,7 +61,7 @@ add_forward() {
 
     for p in "${protocols[@]}"; do
         exists=$(jq --arg sport "$sport" --arg dport "$dport" --arg proto "$p" \
-            '.forwards[] | select(.sport==$sport and .dport==$dport and .proto==$proto)' "$STATE_FILE")
+            '.forwards[]? | select(.sport==$sport and .dport==$dport and .proto==$proto)' "$STATE_FILE" 2>/dev/null)
         if [ -z "$exists" ]; then
             jq --arg sport "$sport" --arg dport "$dport" --arg dip "$dip" --arg proto "$p" \
                '.forwards += [{"sport":$sport, "dport":$dport, "dip":$dip, "proto":$proto}]' "$STATE_FILE" > "${STATE_FILE}.tmp" && mv "${STATE_FILE}.tmp" "$STATE_FILE"
@@ -71,7 +83,7 @@ show_forward() {
     echo -e "\n=== 📍 当前端口转发规则列表 ==="
     echo -e "Index\t协议\t本地端口\t目标映射"
     echo -e "-----------------------------------------------"
-    jq -r '.forwards | to_entries[] | "\(.key)\t\(.value.proto)\t\(.value.sport)-\(.value.dport)\t-> \(.value.dip)"' "$STATE_FILE"
+    jq -r '.forwards | to_entries[] | "\(.key)\t\(.value.proto)\t\(.value.sport)-\(.value.dport)\t-> \(.value.dip)"' "$STATE_FILE" 2>/dev/null
     echo ""
 }
 
@@ -101,8 +113,9 @@ del_port() {
 
 show_ports() {
     echo -e "\n=== 🔓 开放端口一览 ==="
-    echo "TCP 开放: $(jq -r '.open_ports.tcp | join(", ")' "$STATE_FILE")"
-    echo "UDP 开放: $(jq -r '.open_ports.udp | join(", ")' "$STATE_FILE")"
+    # 💡 加上后缀 ? 兜底，防止意外
+    echo "TCP 开放: $(jq -r '.open_ports.tcp? | join(", ")' "$STATE_FILE" 2>/dev/null)"
+    echo "UDP 开放: $(jq -r '.open_ports.udp? | join(", ")' "$STATE_FILE" 2>/dev/null)"
     echo ""
 }
 
@@ -120,7 +133,7 @@ del_blacklist() {
 
 show_blacklist() {
     echo -e "\n=== 🚫 恶意 IP 黑名单 ==="
-    jq -r '.blacklist[]' "$STATE_FILE"
+    jq -r '.blacklist[]?' "$STATE_FILE" 2>/dev/null
     echo ""
 }
 
@@ -128,6 +141,7 @@ while true; do
     echo "========================="
     echo "   SB Firewall Manager   "
     echo "========================="
+    show_ports
     echo "1. 添加端口转发    2. 删除端口转发    3. 查看端口转发"
     echo "-------------------------------------------------"
     echo "4. 放行端口        5. 删除放行端口    6. 查看放行端口"
