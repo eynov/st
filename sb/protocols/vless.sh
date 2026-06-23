@@ -9,15 +9,27 @@ proto_register \
     "surge_vless" \
     "outbound_vless"
 
+# 内部安全路径检查函数
+_ensure_env_vars() {
+    # 如果全局变量为空，则赋予默认安全路径，防止 cat > "$CONFIG_FILE" 崩溃
+    CONFIG_FILE="${CONFIG_FILE:-/etc/sing-box/config.json}"
+    META_FILE="${META_FILE:-/etc/sing-box/meta.json}"
+    
+    # 递归创建父目录
+    mkdir -p "$(dirname "$CONFIG_FILE")" "$(dirname "$META_FILE")"
+}
+
 build_vless() {
     local port="$1"
-    # 自定义 server_name，默认使用 www.cloudflare.com
     local server_name="${2:-www.cloudflare.com}"
 
     if ! command -v sing-box &> /dev/null; then
         echo "Error: sing-box is not installed or not in PATH." >&2
         return 1
     fi
+
+    # 初始化并检查环境变量与目录
+    _ensure_env_vars
 
     local keypair
     keypair="$(sing-box generate reality-keypair)"
@@ -37,10 +49,7 @@ build_vless() {
     local short_id
     short_id="$(openssl rand -hex 8)"
 
-    mkdir -p "$(dirname "$CONFIG_FILE")" "$(dirname "$META_FILE")"
-
     # config.json (纯 sing-box 服务端格式)
-    # 彻底移除 "flow": "xtls-rprx-vision"
     cat > "$CONFIG_FILE" <<EOF
 {
   "inbounds": [
@@ -85,12 +94,17 @@ EOF
 }
 EOF
 
-    state_set "protocol" "VLESS"
-    state_set "port" "$port"
+    # 确保调用外部函数时，状态和端口是可用的
+    if [[ "$(type -t state_set)" == "function" ]]; then
+        state_set "protocol" "VLESS"
+        state_set "port" "$port"
+    fi
 }
 
 uri_vless() {
-    local meta_file="$1"
+    # 如果没传 meta_file 参数，尝试使用默认的
+    _ensure_env_vars
+    local meta_file="${1:-$META_FILE}"
     local current_ip="$2"
 
     if [[ ! -f "$meta_file" ]]; then
@@ -110,12 +124,12 @@ uri_vless() {
         host="[$host]"
     fi
 
-    # 纯 sing-box 客户端通常通过订阅/JSON导入，但通用通用链接格式中去掉 flow 字段
     echo "vless://${uuid}@${host}:${port}?encryption=none&security=reality&sni=${server_name}&fp=chrome&pbk=${public_key}&sid=${short_id}&type=tcp#VLESS-Reality"
 }
 
 surge_vless() {
-    local meta_file="$1"
+    _ensure_env_vars
+    local meta_file="${1:-$META_FILE}"
     local current_ip="$2"
 
     if [[ ! -f "$meta_file" ]]; then
@@ -130,15 +144,14 @@ surge_vless() {
     short_id="$(jq -r '.short_id // empty' "$meta_file")"
     server_name="$(jq -r '.server_name // "www.cloudflare.com"' "$meta_file")"
 
-    # Surge 的 VLESS 同样去掉 flow 字段
     cat <<EOF
 VLESS-Reality = vless, ${current_ip}, ${port}, username=${uuid}, tls=true, reality=true, reality-public-key=${public_key}, reality-short-id=${short_id}, sni=${server_name}, client-fingerprint=chrome
 EOF
 }
 
-# 纯 sing-box 客户端 outbounds 配置 (重点在 multiplex 和 packet_encoding)
 outbound_vless() {
-    local meta_file="$1"
+    _ensure_env_vars
+    local meta_file="${1:-$META_FILE}"
     local current_ip="$2"
 
     if [[ ! -f "$meta_file" ]]; then
@@ -153,7 +166,6 @@ outbound_vless() {
     short_id="$(jq -r '.short_id // empty' "$meta_file")"
     server_name="$(jq -r '.server_name // "www.cloudflare.com"' "$meta_file")"
 
-    # sing-box 规范的 VLESS 客户端配置
     cat <<EOF
 {
   "type": "vless",
