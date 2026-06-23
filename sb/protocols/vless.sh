@@ -1,175 +1,156 @@
-#!/usr/bin/env bash
+#!/bin/bash
+# ==============================================================================
+# Protocol Plugin: VLESS Reality (Pure sing-box Edition)
+# ==============================================================================
 
-# 注册协议
-proto_register \
-    "VLESS" \
-    "VLESS Reality" \
-    "build_vless" \
-    "uri_vless" \
-    "surge_vless" \
-    "outbound_vless"
-
-# 内部安全路径检查函数
-_ensure_env_vars() {
-    # 如果全局变量为空，则赋予默认安全路径，防止 cat > "$CONFIG_FILE" 崩溃
-    CONFIG_FILE="${CONFIG_FILE:-/etc/sing-box/config.json}"
-    META_FILE="${META_FILE:-/etc/sing-box/meta.json}"
-    
-    # 递归创建父目录
-    mkdir -p "$(dirname "$CONFIG_FILE")" "$(dirname "$META_FILE")"
-}
+# 格式：
+# proto_register <协议KEY> <菜单显示名称> <build函数> <标准URI函数> <Surge函数> <Outbound函数>
+proto_register "VLESS" "VLESS Reality" "build_vless" "uri_vless" "surge_vless" "outbound_vless"
 
 build_vless() {
     local port="$1"
-    local server_name="${2:-www.cloudflare.com}"
+    # 支持自定义 server_name，如果没传则默认使用 www.microsoft.com
+    local server_name="${2:-www.microsoft.com}"
 
     if ! command -v sing-box &> /dev/null; then
         echo "Error: sing-box is not installed or not in PATH." >&2
         return 1
     fi
 
-    # 初始化并检查环境变量与目录
-    _ensure_env_vars
+    # ==========================================================
+    # 1. 生成协议所需参数 (动态生成 Reality 密钥对)
+    # ==========================================================
+    local uuid keypair private_key public_key short_id
 
-    local keypair
+    uuid=$(cat /proc/sys/kernel/random/uuid)
+    
+    # 动态生成真实的 Reality 密钥
     keypair="$(sing-box generate reality-keypair)"
-
-    local private_key
     private_key="$(echo "$keypair" | sed -n 's/^PrivateKey:[[:space:]]*//p')"
-    local public_key
     public_key="$(echo "$keypair" | sed -n 's/^PublicKey:[[:space:]]*//p')"
-
-    local uuid
-    if [[ -f /proc/sys/kernel/random/uuid ]]; then
-        uuid="$(cat /proc/sys/kernel/random/uuid)"
-    else
-        uuid="$(openssl rand -hex 16 | sed -E 's/(.{8})(.{4})(.{4})(.{4})(.{12})/\1-\2-\3-\4-\5/')"
-    fi
-
-    local short_id
     short_id="$(openssl rand -hex 8)"
 
-    # config.json (纯 sing-box 服务端格式)
-    cat > "$CONFIG_FILE" <<EOF
+    # 核心安全保障：确保实例目录存在，彻底根治 "No such file or directory" 报错
+    mkdir -p "${INST_DIR}/${port}"
+
+    # ==========================================================
+    # 2. 生成 sing-box config.json (纯服务端格式，剔除 Vision)
+    # ==========================================================
+    cat > "${INST_DIR}/${port}/config.json" <<JSONEOF
 {
-  "inbounds": [
-    {
-      "type": "vless",
-      "listen": "::",
-      "listen_port": $port,
-      "users": [
-        {
-          "uuid": "$uuid"
-        }
-      ],
-      "tls": {
+  "log": {
+    "level": "info",
+    "timestamp": true
+  },
+  "inbounds": [{
+    "type": "vless",
+    "listen": "::",
+    "listen_port": ${port},
+    "users": [{
+      "uuid": "${uuid}"
+    }],
+    "tls": {
+      "enabled": true,
+      "server_name": "${server_name}",
+      "reality": {
         "enabled": true,
-        "server_name": "$server_name",
-        "reality": {
-          "enabled": true,
-          "handshake": {
-            "server": "$server_name",
-            "server_port": 443
-          },
-          "private_key": "$private_key",
-          "short_id": [
-            "$short_id"
-          ]
-        }
+        "handshake": {
+          "server": "${server_name}",
+          "server_port": 443
+        },
+        "private_key": "${private_key}",
+        "short_id": [
+          "${short_id}"
+        ]
       }
     }
-  ]
+  }],
+  "outbounds": [{
+    "type": "direct"
+  }]
 }
-EOF
+JSONEOF
 
-    # meta.json
-    cat > "$META_FILE" <<EOF
+    # ==========================================================
+    # 3. 生成 meta.json (保存所有必要参数)
+    # ==========================================================
+    cat > "${INST_DIR}/${port}/meta.json" <<JSONEOF
 {
-  "type": "vless",
-  "port": $port,
-  "uuid": "$uuid",
-  "public_key": "$public_key",
-  "short_id": "$short_id",
-  "server_name": "$server_name"
+  "port": ${port},
+  "protocol": "VLESS",
+  "uuid": "${uuid}",
+  "server_name": "${server_name}",
+  "public_key": "${public_key}",
+  "short_id": "${short_id}",
+  "created_at": "$(date '+%Y-%m-%d %H:%M:%S')",
+  "enabled": true
 }
-EOF
+JSONEOF
 
-    # 确保调用外部函数时，状态和端口是可用的
-    if [[ "$(type -t state_set)" == "function" ]]; then
-        state_set "protocol" "VLESS"
-        state_set "port" "$port"
-    fi
+    # ==========================================================
+    # 4. 写入 State Store
+    # ==========================================================
+    state_set "$port" "$(cat "${INST_DIR}/${port}/meta.json")"
 }
 
 uri_vless() {
-    # 如果没传 meta_file 参数，尝试使用默认的
-    _ensure_env_vars
-    local meta_file="${1:-$META_FILE}"
+    local meta_file="$1"
     local current_ip="$2"
 
-    if [[ ! -f "$meta_file" ]]; then
-        echo "Error: Meta file $meta_file not found." >&2
-        return 1
-    fi
+    local port uuid server_name public_key short_id tag host
 
-    local uuid port public_key short_id server_name
-    uuid="$(jq -r '.uuid // empty' "$meta_file")"
-    port="$(jq -r '.port // empty' "$meta_file")"
-    public_key="$(jq -r '.public_key // empty' "$meta_file")"
-    short_id="$(jq -r '.short_id // empty' "$meta_file")"
-    server_name="$(jq -r '.server_name // "www.cloudflare.com"' "$meta_file")"
+    port=$(jq -r '.port' "$meta_file")
+    uuid=$(jq -r '.uuid' "$meta_file")
+    server_name=$(jq -r '.server_name // empty' "$meta_file")
+    public_key=$(jq -r '.public_key // empty' "$meta_file")
+    short_id=$(jq -r '.short_id // empty' "$meta_file")
 
-    local host="$current_ip"
+    tag=$(urlencode "VLESS_${port}")
+    
+    # IPv6 兼容处理
+    host="$current_ip"
     if [[ "$host" == *:* ]]; then
         host="[$host]"
     fi
 
-    echo "vless://${uuid}@${host}:${port}?encryption=none&security=reality&sni=${server_name}&fp=chrome&pbk=${public_key}&sid=${short_id}&type=tcp#VLESS-Reality"
+    # 通用 VLESS Reality 链接 (纯 sing-box 规范，不包含 flow 字段)
+    echo "vless://${uuid}@${host}:${port}?encryption=none&security=reality&sni=${server_name}&fp=chrome&pbk=${public_key}&sid=${short_id}&type=tcp#${tag}"
 }
 
 surge_vless() {
-    _ensure_env_vars
-    local meta_file="${1:-$META_FILE}"
+    local meta_file="$1"
     local current_ip="$2"
 
-    if [[ ! -f "$meta_file" ]]; then
-        echo "Error: Meta file $meta_file not found." >&2
-        return 1
-    fi
+    local port uuid server_name public_key short_id
 
-    local uuid port public_key short_id server_name
-    uuid="$(jq -r '.uuid // empty' "$meta_file")"
-    port="$(jq -r '.port // empty' "$meta_file")"
-    public_key="$(jq -r '.public_key // empty' "$meta_file")"
-    short_id="$(jq -r '.short_id // empty' "$meta_file")"
-    server_name="$(jq -r '.server_name // "www.cloudflare.com"' "$meta_file")"
+    port=$(jq -r '.port' "$meta_file")
+    uuid=$(jq -r '.uuid' "$meta_file")
+    server_name=$(jq -r '.server_name // empty' "$meta_file")
+    public_key=$(jq -r '.public_key // empty' "$meta_file")
+    short_id=$(jq -r '.short_id // empty' "$meta_file")
 
-    cat <<EOF
-VLESS-Reality = vless, ${current_ip}, ${port}, username=${uuid}, tls=true, reality=true, reality-public-key=${public_key}, reality-short-id=${short_id}, sni=${server_name}, client-fingerprint=chrome
-EOF
+    echo "🟣 VLESS_${port} = vless, ${current_ip}, ${port}, username=${uuid}, tls=true, reality=true, reality-public-key=${public_key}, reality-short-id=${short_id}, sni=${server_name}, client-fingerprint=chrome"
 }
 
+# ==========================================================
+# 新增：生成纯 sing-box 客户端所需的 outbounds JSON 配置
+# ==========================================================
 outbound_vless() {
-    _ensure_env_vars
-    local meta_file="${1:-$META_FILE}"
+    local meta_file="$1"
     local current_ip="$2"
 
-    if [[ ! -f "$meta_file" ]]; then
-        echo "Error: Meta file $meta_file not found." >&2
-        return 1
-    fi
+    local port uuid server_name public_key short_id
 
-    local uuid port public_key short_id server_name
-    uuid="$(jq -r '.uuid // empty' "$meta_file")"
-    port="$(jq -r '.port // empty' "$meta_file")"
-    public_key="$(jq -r '.public_key // empty' "$meta_file")"
-    short_id="$(jq -r '.short_id // empty' "$meta_file")"
-    server_name="$(jq -r '.server_name // "www.cloudflare.com"' "$meta_file")"
+    port=$(jq -r '.port' "$meta_file")
+    uuid=$(jq -r '.uuid' "$meta_file")
+    server_name=$(jq -r '.server_name // empty' "$meta_file")
+    public_key=$(jq -r '.public_key // empty' "$meta_file")
+    short_id=$(jq -r '.short_id // empty' "$meta_file")
 
-    cat <<EOF
+    cat <<JSONEOF
 {
   "type": "vless",
-  "tag": "VLESS-Reality-Out",
+  "tag": "VLESS-Reality-${port}",
   "server": "${current_ip}",
   "server_port": ${port},
   "uuid": "${uuid}",
@@ -195,5 +176,5 @@ outbound_vless() {
     "max_streams": 0
   }
 }
-EOF
+JSONEOF
 }
