@@ -1,160 +1,144 @@
-#!/bin/bash
-# --- fw.sh (自适应穿透与合规防御终极版) ---
+#!/usr/bin/env bash
+set -euo pipefail
 
-# 🔹 追踪软链接的真正物理源头路径，彻底杜绝路径错位
-REAL_SCRIPT_PATH=$(readlink -f "${BASH_SOURCE[0]}")
-BASE_DIR="$(cd "$(dirname "$REAL_SCRIPT_PATH")" && pwd)"
-
-STATE_FILE="$BASE_DIR/state.json"
-RENDER_BIN="$BASE_DIR/render.sh"
-
+# ── 1. 权限检查 ──────────────────────────────────────────
 if [[ $EUID -ne 0 ]]; then
-   echo "❌ 请以 root 权限运行此脚本"
-   exit 1
+    echo "❌ 错误：此脚本需要 root 权限，请使用 sudo 运行。" >&2
+    exit 1
 fi
 
-# ── 🛡️ 状态文件合规性强行防御 ──────────────────────────────────
-# 核心修复：文件不存在、大小为0，或者通过不了 jq 语法解析（比如含空格/乱码），立刻强行用标准骨架洗白
-if [ ! -f "$STATE_FILE" ] || [ ! -s "$STATE_FILE" ] || ! jq '.' "$STATE_FILE" >/dev/null 2>&1; then
-    echo '{"forwards":[],"open_ports":{"tcp":[],"udp":[]},"blacklist":[]}' > "$STATE_FILE"
-    chmod 644 "$STATE_FILE"
+REPO="eynov/st"
+TMP_DIR="$(mktemp -d)"
+trap 'rm -rf "$TMP_DIR"' EXIT
+
+# ── 2. 下载解压 ──────────────────────────────────────────
+echo "📦 正在从 GitHub 下载最新源码..."
+curl -fSsL --retry 3 --retry-delay 2 \
+  "https://github.com/$REPO/archive/refs/heads/main.tar.gz" \
+  -o "$TMP_DIR/archive.tar.gz"
+
+tar -xzf "$TMP_DIR/archive.tar.gz" -C "$TMP_DIR"
+
+SRC_DIR=$(find "$TMP_DIR" -maxdepth 1 -type d -name "st-*" | head -n 1)
+
+if [[ -z "$SRC_DIR" ]]; then
+    echo "❌ 错误：未找到解压后的源码目录" >&2
+    exit 1
 fi
 
-trigger_render() {
-    echo "⚙️ 正在通过模板编译新规则..."
-    bash "$RENDER_BIN"
-    if [ $? -eq 0 ]; then
-        echo "✅ 编译成功，规则已实时应用！"
+# ── 3. 列出可安装项目 ────────────────────────────────────
+printf '\n📋 可安装项目列表：\n'
+echo "------------------------"
+find "$SRC_DIR" \
+  -mindepth 1 -maxdepth 1 \
+  -type d \
+  ! -name "docs" \
+  ! -name ".github" \
+  -exec basename {} \;
+echo "------------------------"
+
+# ── 4. 参数或交互输入 ────────────────────────────────────
+PROJECT="${1:-}"
+MAIN_BIN="${2:-}"
+
+# 💡 仅加上 </dev/tty 确保用 bash <(curl) 运行时交互 read 不会因为标准输入被霸占而直接跳过
+[[ -n "$PROJECT" ]] || read -rp "👉 请输入项目名称: " PROJECT </dev/tty
+[[ -z "$PROJECT" ]] && { echo "❌ 错误：项目名称不能为空"; exit 1; }
+
+if [[ ! -d "$SRC_DIR/$PROJECT" ]]; then
+    echo "❌ 错误：项目 '$PROJECT' 不存在或不支持部署" >&2
+    exit 1
+fi
+
+# ── 5. ⚙️ 高精度自动检测主命令 ─────────────────────────────
+# 🌟 策略 A：优先在源码目录中寻找本身就具备可执行权限（-executable）的二进制或核心文件
+AUTO_BIN=$(find "$SRC_DIR/$PROJECT" \
+    -maxdepth 1 \
+    -type f \
+    -executable \
+    ! -name "*.sh" \
+    ! -name "*.py" \
+    | sort | head -n1)
+
+# 🌟 策略 B：如果没找到，则降级使用黑名单过滤，锁死所有的配置文件后缀（防止 .json 等篡位）
+if [[ -z "$AUTO_BIN" ]]; then
+    AUTO_BIN=$(find "$SRC_DIR/$PROJECT" \
+        -maxdepth 1 \
+        -type f \
+        ! -name "*.sh" \
+        ! -name "*.py" \
+        ! -name "*.json" \
+        ! -name "*.conf" \
+        ! -name "*.tpl" \
+        ! -name "*.base" \
+        ! -name "*.txt" \
+        ! -name "*.md" \
+        ! -name "*.service" \
+        ! -name "README*" \
+        ! -name "LICENSE*" \
+        ! -name ".*" \
+        | sort | head -n1)
+fi
+
+# 🌟 策略 C：终极兜底，如果项目全是由 .sh 脚本构成，则排除掉安装器和编译器，精准推荐控制台主脚本
+if [[ -z "$AUTO_BIN" ]]; then
+    AUTO_BIN=$(find "$SRC_DIR/$PROJECT" \
+        -maxdepth 1 \
+        -type f \
+        -name "*.sh" \
+        ! -name "render.sh" \
+        ! -name "install.sh" \
+        | sort | head -n1)
+fi
+
+# 提取纯文件名
+if [[ -n "$AUTO_BIN" ]]; then
+    AUTO_BIN="${AUTO_BIN##*/}"
+fi
+
+if [[ -z "$MAIN_BIN" ]]; then
+    if [[ -n "$AUTO_BIN" ]]; then
+        read -rp "👉 检测到可能的主程序 [$AUTO_BIN]，请输入快捷命令名称（直接回车则默认使用该主程序，输入 - 留空跳过）: " MAIN_BIN </dev/tty
     else
-        echo "❌ 编译失败，内核已安全回滚到上一次可用状态。"
+        read -rp "👉 未检测到主命令，输入快捷命令名称；留空则不创建命令: " MAIN_BIN </dev/tty
     fi
-}
+fi
 
-add_forward() {
-    read -p "🔹 请输入目标落地 IP 或域名: " dest_addr
-    if [[ ! "$dest_addr" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-        dip=$(dig +short "$dest_addr" | tail -n1)
-        if [ -z "$dip" ]; then echo "❌ 域名解析失败！"; return; fi
+# 输入 - 表示不创建快捷命令
+if [[ "$MAIN_BIN" == "-" ]]; then
+    MAIN_BIN=""
+fi
+
+# ── 6. 安装（安全原子替换）───────────────────────────────
+INSTALL_DIR="/opt/$PROJECT"
+NEW_DIR="${INSTALL_DIR}.new"
+
+echo "🚀 开始安装 $PROJECT 到 $INSTALL_DIR ..."
+rm -rf "$NEW_DIR"
+mkdir -p "$NEW_DIR"
+
+# 复制文件并保持属性
+cp -a "$SRC_DIR/$PROJECT/." "$NEW_DIR/"
+
+# ✅ 核心修复点：依然留在你原本的第 6 步，但精细化过滤，只加给脚本/二进制，放过 .json
+find "$NEW_DIR" -type f \( -name "*.sh" -o -name "*.py" -o ! -name "*.*" \) -exec chmod +x {} \;
+
+# 如果指定了快捷命令，则验证主程序文件是否存在
+if [[ -n "$MAIN_BIN" && ! -e "$NEW_DIR/$MAIN_BIN" ]]; then
+    # 额外兼容：如果用户输入的快捷名没有写 .sh，但实际文件带 .sh，自动帮用户对齐
+    if [[ ! "$MAIN_BIN" =~ \.sh$ && -e "$NEW_DIR/${MAIN_BIN}.sh" ]]; then
+        MAIN_BIN="${MAIN_BIN}.sh"
     else
-        dip="$dest_addr"
+        echo "❌ 错误：在安装目录中未找到主程序文件：$MAIN_BIN" >&2
+        rm -rf "$NEW_DIR"
+        exit 1
     fi
-    
-    read -p "🔹 请输入起始端口: " sport
-    read -p "🔹 请输入结束端口 (若单端口直接回车): " dport
-    [ -z "$dport" ] && dport="$sport"
-    read -p "🔹 请输入协议 (tcp/udp/both, 默认 both): " proto
-    [ -z "$proto" ] && proto="both"
+fi
 
-    protocols=("tcp" "udp")
-    [ "$proto" == "tcp" ] && protocols=("tcp")
-    [ "$proto" == "udp" ] && protocols=("udp")
+# 替换旧目录
+rm -rf "$INSTALL_DIR"
+mv "$NEW_DIR" "$INSTALL_DIR"
 
-    for p in "${protocols[@]}"; do
-        exists=$(jq --arg sport "$sport" --arg dport "$dport" --arg proto "$p" \
-            '.forwards[] | select(.sport==$sport and .dport==$dport and .proto==$proto)' "$STATE_FILE")
-        if [ -z "$exists" ]; then
-            jq --arg sport "$sport" --arg dport "$dport" --arg dip "$dip" --arg proto "$p" \
-               '.forwards += [{"sport":$sport, "dport":$dport, "dip":$dip, "proto":$proto}]' "$STATE_FILE" > "${STATE_FILE}.tmp" && mv "${STATE_FILE}.tmp" "$STATE_FILE"
-        fi
-    done
-    trigger_render
-}
-
-del_forward() {
-    show_forward
-    read -p "❌ 请输入要删除的规则 Index: " idx
-    if [ -n "$idx" ]; then
-        jq "del(.forwards[$idx])" "$STATE_FILE" > "${STATE_FILE}.tmp" && mv "${STATE_FILE}.tmp" "$STATE_FILE"
-        trigger_render
-    fi
-}
-
-show_forward() {
-    echo -e "\n=== 📍 当前端口转发规则列表 ==="
-    echo -e "Index\t协议\t本地端口\t目标映射"
-    echo -e "-----------------------------------------------"
-    jq -r '.forwards | to_entries[] | "\(.key)\t\(.value.proto)\t\(.value.sport)-\(.value.dport)\t-> \(.value.dip)"' "$STATE_FILE"
-    echo ""
-}
-
-add_port() {
-    read -p "🔹 请输入放行端口或段 (例如 80 或 80-90): " port
-    read -p "🔹 协议类型 (tcp/udp/both): " proto
-    if [ "$proto" == "tcp" ] || [ "$proto" == "both" ]; then
-        jq --arg port "$port" '.open_ports.tcp += [$port] | .open_ports.tcp |= unique' "$STATE_FILE" > "${STATE_FILE}.tmp" && mv "${STATE_FILE}.tmp" "$STATE_FILE"
-    fi
-    if [ "$proto" == "udp" ] || [ "$proto" == "both" ]; then
-        jq --arg port "$port" '.open_ports.udp += [$port] | .open_ports.udp |= unique' "$STATE_FILE" > "${STATE_FILE}.tmp" && mv "${STATE_FILE}.tmp" "$STATE_FILE"
-    fi
-    trigger_render
-}
-
-del_port() {
-    read -p "❌ 请输入要取消放行的端口: " port
-    read -p "🔹 协议类型 (tcp/udp/both): " proto
-    if [ "$proto" == "tcp" ] || [ "$proto" == "both" ]; then
-        jq --arg port "$port" '.open_ports.tcp -= [$port]' "$STATE_FILE" > "${STATE_FILE}.tmp" && mv "${STATE_FILE}.tmp" "$STATE_FILE"
-    fi
-    if [ "$proto" == "udp" ] || [ "$proto" == "both" ]; then
-        jq --arg port "$port" '.open_ports.udp -= [$port]' "$STATE_FILE" > "${STATE_FILE}.tmp" && mv "${STATE_FILE}.tmp" "$STATE_FILE"
-    fi
-    trigger_render
-}
-
-show_ports() {
-    echo -e "\n=== 🔓 开放端口一览 ==="
-    echo "TCP 开放: $(jq -r '.open_ports.tcp | join(", ")' "$STATE_FILE")"
-    echo "UDP 开放: $(jq -r '.open_ports.udp | join(", ")' "$STATE_FILE")"
-    echo ""
-}
-
-add_blacklist() {
-    read -p "🚫 请输入要封禁的 IP 或网段: " ip
-    jq --arg ip "$ip" '.blacklist += [$ip] | .blacklist |= unique' "$STATE_FILE" > "${STATE_FILE}.tmp" && mv "${STATE_FILE}.tmp" "$STATE_FILE"
-    trigger_render
-}
-
-del_blacklist() {
-    read -p "🟢 请输入要解封的 IP 或网段: " ip
-    jq --arg ip "$ip" '.blacklist -= [$ip]' "$STATE_FILE" > "${STATE_FILE}.tmp" && mv "${STATE_FILE}.tmp" "$STATE_FILE"
-    trigger_render
-}
-
-show_blacklist() {
-    echo -e "\n=== 🚫 恶意 IP 黑名单 ==="
-    jq -r '.blacklist[]' "$STATE_FILE"
-    echo ""
-}
-
-while true; do
-    echo "========================="
-    echo "   SB Firewall Manager   "
-    echo "========================="
-    echo "1. 添加端口转发    2. 删除端口转发    3. 查看端口转发"
-    echo "-------------------------------------------------"
-    echo "4. 放行端口        5. 删除放行端口    6. 查看放行端口"
-    echo "-------------------------------------------------"
-    echo "7. 封禁IP          8. 解封IP          9. 查看黑名单"
-    echo "-------------------------------------------------"
-    echo "10. SSH防爆破 (模版默认常开)"
-    echo "11. DDOS防护  (模版默认常开)"
-    echo "12. 重载配置  (强制重新编译)"
-    echo "0. 退出"
-    echo "========================="
-    read -p "请选择操作 [0-12]: " opt
-    case $opt in
-        1) add_forward ;;
-        2) del_forward ;;
-        3) show_forward ;;
-        4) add_port ;;
-        5) del_port ;;
-        6) show_ports ;;
-        7) add_blacklist ;;
-        8) del_blacklist ;;
-        9) show_blacklist ;;
-        10|11) echo "ℹ️ 防护逻辑内嵌于 rules/filter.nft.tpl，无需开关。" ;;
-        12) trigger_render ;;
-        0) exit 0 ;;
-        *) echo "❌ 无效输入" ;;
-    esac
-done
+# ── 7. ⚡ 智能业务初始化向导（核心联动钩子）────────────────
+if [[ -f "$INSTALL_DIR/install.sh" ]]; then
+    echo "⚙
