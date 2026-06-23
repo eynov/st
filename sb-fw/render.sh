@@ -32,6 +32,11 @@ if [ -z "$SRC_IP" ]; then
     exit 1
 fi
 
+# 🛡️ 安全逃生舱：动态提取当前真实的 SSH 监听端口 (防止 policy drop 导致断连)
+SSH_PORT=$(ss -tlnp | grep -E 'sshd|listen' | grep -oP '(?<=:)\d+(?=\s)' | head -n1)
+[ -z "$SSH_PORT" ] && SSH_PORT=$(awk '/^Port/ {print $2}' /etc/ssh/sshd_config | head -n1)
+[ -z "$SSH_PORT" ] && SSH_PORT="22" # 最终保底
+
 # --- 数据清洗与安全边界处理 ---
 BLACKLIST=$(jq -r '.blacklist | join(", ")' "$STATE_FILE" 2>/dev/null)
 [ -z "$BLACKLIST" ] && BLACKLIST="127.0.0.2"
@@ -63,13 +68,14 @@ done < <(jq -c '.forwards[]' "$STATE_FILE" 2>/dev/null)
 # --- 模板渲染逻辑 ---
 echo "flush ruleset" > "$BUILD_CONF"
 
-# 1. 渲染 filter 表
+# 1. 渲染并编译 filter 表
 cat "$BASE_DIR/rules/filter.nft.tpl" >> "$BUILD_CONF"
 sed -i "s/#BLACKLIST#/$BLACKLIST/g" "$BUILD_CONF"
 sed -i "s/#TCP_PORTS#/$TCP_PORTS/g" "$BUILD_CONF"
 sed -i "s/#UDP_PORTS#/$UDP_PORTS/g" "$BUILD_CONF"
+sed -i "s/#SSH_PORT#/$SSH_PORT/g" "$BUILD_CONF" # 注入自动识别的 SSH 端口
 
-# 2. 渲染 nat 表
+# 2. 渲染并编译 nat 表
 cat "$BASE_DIR/rules/nat.nft.tpl" >> "$BUILD_CONF"
 sed -i "s@#DNAT_RULES#@$DNAT_RULES@g" "$BUILD_CONF"
 sed -i "s@#SNAT_RULES#@$SNAT_RULES@g" "$BUILD_CONF"
