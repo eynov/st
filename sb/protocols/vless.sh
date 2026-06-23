@@ -1,20 +1,38 @@
 #!/bin/bash
 # ==============================================================================
-# Protocol Plugin: VLESS Reality (Full Custom Edition)
+# Protocol Plugin: VLESS Reality (Smart Auto-Parsing Edition)
 # ==============================================================================
 
 proto_register "VLESS" "VLESS Reality" "build_vless" "uri_vless" "surge_vless" "outbound_vless"
 
 build_vless() {
-    local port="$1"
-    # 参数 2：伪装域名（默认：www.microsoft.com）
-    local server_name="${2:-www.microsoft.com}"
-    # 参数 3：节点别名（默认：VLESS_端口）
-    local custom_tag="${3:-VLESS_${port}}"
-    # 参数 4：自定义 UUID（默认：自动随机生成）
-    local uuid="${4:-$(cat /proc/sys/kernel/random/uuid)}"
-    # 参数 5：自定义 Short ID（默认：自动随机生成 8 字节）
-    local short_id="${5:-$(openssl rand -hex 8)}"
+    # ==========================================================
+    # 🌟 核心修复：智能拆解带空格的输入
+    # ==========================================================
+    local raw_input="$1"
+    local port server_name custom_tag uuid short_id
+
+    # 如果检测到传入的参数 1 里面包含空格，说明是复合输入，自动拆分
+    if [[ "$raw_input" == *" "* ]]; then
+        read -r port server_name custom_tag <<< "$raw_input"
+    else
+        port="$raw_input"
+        server_name="$2"
+        custom_tag="$3"
+    fi
+
+    # 设置默认值兜底
+    port=$(echo "$port" | tr -d '[:space:]')
+    server_name="${server_name:-www.microsoft.com}"
+    custom_tag="${custom_tag:-VLESS_${port}}"
+    uuid="$(cat /proc/sys/kernel/random/uuid)"
+    short_id="$(openssl rand -hex 8)"
+
+    # 验证提取出的端口是否为纯数字，防止主脚本传错位置
+    if [[ ! "$port" =~ ^[0-9]+$ ]]; then
+        echo "Error: Invalid port number extracted: '$port'" >&2
+        return 1
+    fi
 
     if ! command -v sing-box &> /dev/null; then
         echo "Error: sing-box is not installed or not in PATH." >&2
@@ -27,6 +45,7 @@ build_vless() {
     private_key="$(echo "$keypair" | sed -n 's/^PrivateKey:[[:space:]]*//p')"
     public_key="$(echo "$keypair" | sed -n 's/^PublicKey:[[:space:]]*//p')"
 
+    # 强行创建标准目录（去除所有空格干扰）
     mkdir -p "${INST_DIR}/${port}"
 
     # 服务端配置
@@ -53,7 +72,7 @@ build_vless() {
 }
 JSONEOF
 
-    # 元数据保存（新增了 custom_tag 别名保存）
+    # 元数据保存
     cat > "${INST_DIR}/${port}/meta.json" <<JSONEOF
 {
   "port": ${port},
@@ -68,6 +87,7 @@ JSONEOF
 }
 JSONEOF
 
+    # 精准写入，只把纯数字端口传给主脚本的状态仓库
     state_set "$port" "$(cat "${INST_DIR}/${port}/meta.json")"
 }
 
@@ -83,7 +103,6 @@ uri_vless() {
     short_id=$(jq -r '.short_id // empty' "$meta_file")
     node_tag=$(jq -r '.node_tag // empty' "$meta_file")
 
-    # 如果元数据里有自定义别名就用别名，没有就用默认的
     [[ -n "$node_tag" ]] && tag=$(urlencode "$node_tag") || tag=$(urlencode "VLESS_${port}")
     
     host="$current_ip"
