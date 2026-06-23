@@ -10,10 +10,10 @@ check_and_install_core() {
     echo "🔄 正在核验 sing-box 核心资产与依赖链..."
     apt-get update -qq && apt-get install -y curl jq tar gzip openssl wget qrencode >/dev/null 2>&1
 
-    # 注册快捷命令 sb（软链接到 main.sh）
+    # 注册快捷命令 sb
     if [ ! -L "/usr/local/bin/sb" ]; then
-        chmod +x "${BASE_DIR}/main"
-        ln -sf "${BASE_DIR}/main" /usr/local/bin/sb
+        chmod +x "${BASE_DIR}/sb"
+        ln -sf "${BASE_DIR}/sb" /usr/local/bin/sb
         ok "快捷命令 'sb' 已注册至 /usr/local/bin/sb"
     fi
 
