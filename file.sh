@@ -120,8 +120,8 @@ mkdir -p "$NEW_DIR"
 # 复制文件并保持属性
 cp -a "$SRC_DIR/$PROJECT/." "$NEW_DIR/"
 
-# 确保常规文件具有执行权限
-find "$NEW_DIR" -type f -exec chmod +x {} \;
+# ✅ 精确赋予执行权限，放过 .json, .tpl, .md 等纯文本
+find "$NEW_DIR" -type f \( -name "*.sh" -o -name "*.py" -o ! -name "*.*" \) -exec chmod +x {} \;
 
 # 如果指定了快捷命令，则验证主程序文件是否存在
 if [[ -n "$MAIN_BIN" && ! -e "$NEW_DIR/$MAIN_BIN" ]]; then
