@@ -28,6 +28,7 @@ done
 # 初始化运行时资产目录
 mkdir -p "$INST_DIR" "$CERT_DIR"
 state_init
+state_sync_from_instances
 
 # ==============================================================================
 # 新增实例
