@@ -91,32 +91,64 @@ def send_email(subject, body, filepaths=None, to_email=None):
     except Exception as e:
         print(f"[ERROR] Email failed: {e}")
 
-def send_telegram(text, chat_id=None):
+def send_telegram(text):
     try:
         url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-        data = {'chat_id': chat_id or ADMIN_USER_ID, 'text': text, 'parse_mode': 'HTML'}
-        requests.post(url, data=data, timeout=10)
+
+        data = {
+            "chat_id": FORUM_GROUP_ID,
+            "message_thread_id": 459,
+            "text": text,
+            "parse_mode": "HTML"
+        }
+
+        r = requests.post(url, data=data, timeout=10)
+
+        print(f"[TG] {r.status_code}")
+        print(f"[TG] {r.text}")
+
     except Exception as e:
         print(f"[ERROR] Telegram failed: {e}")
 
-def send_telegram_files(filepaths, chat_id=None):
+def send_telegram_files(filepaths):
     try:
         for path in filepaths:
             if os.path.exists(path):
                 url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendDocument"
-                with open(path, 'rb') as f:
-                    files = {'document': f}
-                    data = {'chat_id': chat_id or ADMIN_USER_ID}
-                    requests.post(url, files=files, data=data, timeout=15)
+
+                with open(path, "rb") as f:
+                    files = {"document": f}
+
+                    data = {
+                        "chat_id": FORUM_GROUP_ID,
+                        "message_thread_id": 459
+                    }
+
+                    r = requests.post(
+                        url,
+                        files=files,
+                        data=data,
+                        timeout=15
+                    )
+
+                    print(f"[TG FILE] {r.status_code}")
+                    print(f"[TG FILE] {r.text}")
+
     except Exception as e:
         print(f"[ERROR] Telegram files failed: {e}")
 
 def async_notification_worker(notice, saved_paths):
     send_telegram(notice)
+
     if saved_paths:
         send_telegram_files(saved_paths)
-    send_email("🌿 Anonymous Message", notice, filepaths=saved_paths)
 
+    send_email(
+        "🌿 Anonymous Message",
+        notice,
+        filepaths=saved_paths
+    )
+    
 
 # ========================= Routes ==========================
 
