@@ -501,9 +501,9 @@ if [ ! -f "$SS_EXEC" ]; then
   upgrade_core || { echo "❌ 初始化运行环境失败"; exit 1; }
 fi
 
-if ! command -v qrencode >/dev/null 2>&1; then
-  echo ">> 正在补全核心系统依赖组件 (qrencode)..."
-  sudo apt update && sudo apt install -y qrencode file >/dev/null 2>&1
+if ! dpkg -l qrencode file xz-utils >/dev/null 2>&1 ||    ! command -v qrencode >/dev/null 2>&1 ||    ! command -v file >/dev/null 2>&1 ||    ! command -v xz >/dev/null 2>&1; then
+  echo ">> 正在补全核心系统依赖组件 (qrencode file xz-utils)..."
+  sudo apt update -qq && sudo apt install -y qrencode file xz-utils >/dev/null 2>&1
 fi
 
 # ========== 功能模块：删除节点 ==========
