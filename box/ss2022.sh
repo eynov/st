@@ -463,6 +463,12 @@ PYEOF
 # ========== 初始化动作 ==========
 init_json
 
+# ========== 启动前依赖补全（前置，确保所有路径均可用） ==========
+if ! command -v file >/dev/null 2>&1 ||    ! command -v xz >/dev/null 2>&1 ||    ! command -v qrencode >/dev/null 2>&1; then
+  echo ">> 正在补全核心系统依赖组件 (file xz-utils qrencode)..."
+  sudo apt update -qq && sudo apt install -y file xz-utils qrencode >/dev/null 2>&1
+fi
+
 # ========== 启动前自愈自检 ==========
 if [ -f "$SS_EXEC" ]; then
   "$SS_EXEC" -h >/dev/null 2>&1 || {
