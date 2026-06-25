@@ -2,7 +2,6 @@
 
 # ========================================================
 #  Shadowsocks-Rust 
-
 # ========================================================
 
 # ========== 全局变量与目录配置 ==========
@@ -293,6 +292,137 @@ gen_ss_uri() {
   echo "ss://${userinfo}@${server}:${port}#${tag}"
 }
 
+# ========== 6. 扫描接管现有节点 ==========
+import_existing() {
+  init_json
+  echo ">> 开始扫描现有 Shadowsocks 节点配置..."
+
+  # 扫描所有 config*.json（支持 /etc/shadowsocks/ 及常见备选路径）
+  local SCAN_DIRS="/etc/shadowsocks /etc/shadowsocks-libev"
+  local found=0
+
+  for SCAN_DIR in $SCAN_DIRS; do
+    [ -d "$SCAN_DIR" ] || continue
+    for CONF in "${SCAN_DIR}"/config*.json; do
+      [ -f "$CONF" ] || continue
+
+      # 用 Python 解析配置，避免 jq 依赖
+      CONF="$CONF" python3 - << 'PYEOF'
+import json, os, subprocess, sys
+
+conf_path = os.environ['CONF']
+inst_path = os.environ.get('INSTANCES_JSON', '/etc/shadowsocks/instances.json')
+
+try:
+    with open(conf_path) as f:
+        c = json.load(f)
+except Exception as e:
+    print(f'  ⚠️  跳过 {conf_path}：JSON 解析失败 ({e})')
+    sys.exit(0)
+
+port   = str(c.get('server_port', ''))
+method = c.get('method', 'unknown')
+
+if not port:
+    print(f'  ⚠️  跳过 {conf_path}：未找到 server_port')
+    sys.exit(0)
+
+# 判断协议类型
+proto = 'ss2022' if '2022' in method else 'ss'
+
+# 检查 systemd service 实际运行状态
+svc = f'ss{port}'
+res = subprocess.run(['systemctl', 'is-active', svc], capture_output=True, text=True)
+real_state = 'running' if res.returncode == 0 else 'stopped'
+expect_state = 'active' if real_state == 'running' else 'inactive'
+
+import fcntl, datetime
+try:
+    with open(inst_path, 'r+') as f:
+        fcntl.flock(f, fcntl.LOCK_EX)
+        d = json.load(f)
+        if port in d['ports']:
+            print(f'  ℹ️  端口 {port} 已在状态机中，跳过（如需强制覆盖请先注销）')
+            fcntl.flock(f, fcntl.LOCK_UN)
+            sys.exit(0)
+        d['ports'][port] = {
+            'protocol':   proto,
+            'method':     method,
+            'state':      expect_state,
+            'sub_state':  real_state,
+            'conf_path':  conf_path,
+            'updated_at': datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        }
+        f.seek(0); json.dump(d, f, indent=2); f.truncate()
+        fcntl.flock(f, fcntl.LOCK_UN)
+    print(f'  ✅ 端口 {port} | 协议: {proto} | 算法: {method} | 物理状态: {real_state} → 已接管')
+except Exception as e:
+    print(f'  ❌ 端口 {port} 写入状态机失败: {e}')
+PYEOF
+      found=$((found + 1))
+    done
+  done
+
+  # 额外：扫描正在运行但没有 config*.json 的 ssserver 进程（兜底）
+  echo ">> 扫描运行中 ssserver 进程（兜底检测）..."
+  ss_pids=$(pgrep -x ssserver 2>/dev/null || pgrep -x ss-server 2>/dev/null || true)
+  if [ -n "$ss_pids" ]; then
+    for pid in $ss_pids; do
+      cmdline=$(cat /proc/"$pid"/cmdline 2>/dev/null | tr '\0' ' ')
+      conf=$(echo "$cmdline" | grep -oP '(?<=-c )\S+' || true)
+      if [ -n "$conf" ] && [ -f "$conf" ]; then
+        echo "  >> 进程 $pid 使用配置: $conf"
+        CONF="$conf" INSTANCES_JSON="$INSTANCES_JSON" python3 - << 'PYEOF'
+import json, os, fcntl, datetime, sys
+conf_path = os.environ['CONF']
+inst_path = os.environ['INSTANCES_JSON']
+try:
+    c = json.load(open(conf_path))
+    port   = str(c.get('server_port', ''))
+    method = c.get('method', 'unknown')
+    proto  = 'ss2022' if '2022' in method else 'ss'
+    if not port:
+        sys.exit(0)
+    with open(inst_path, 'r+') as f:
+        fcntl.flock(f, fcntl.LOCK_EX)
+        d = json.load(f)
+        if port not in d['ports']:
+            d['ports'][port] = {
+                'protocol':   proto,
+                'method':     method,
+                'state':      'active',
+                'sub_state':  'running',
+                'conf_path':  conf_path,
+                'updated_at': datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            }
+            f.seek(0); json.dump(d, f, indent=2); f.truncate()
+            print(f'  ✅ 进程兜底接管：端口 {port} | 算法: {method}')
+        fcntl.flock(f, fcntl.LOCK_UN)
+except Exception as e:
+    print(f'  ⚠️  进程兜底失败: {e}')
+PYEOF
+      fi
+    done
+  fi
+
+  if [ "$found" -eq 0 ] && [ -z "$ss_pids" ]; then
+    echo "  ℹ️  未发现任何现有节点配置文件，无需导入。"
+  else
+    echo ""
+    echo "✅ 扫描接管完成，当前状态机快照："
+    echo "--------------------------------------------------"
+    INSTANCES_JSON="$INSTANCES_JSON" python3 - << 'PYEOF'
+import json, os
+path = os.environ['INSTANCES_JSON']
+d = json.load(open(path))
+for port, info in d.get('ports', {}).items():
+    print(f"端口: {port} | 协议: {info.get('protocol')} | 算法: {info.get('method')} | 状态: {info.get('state')} / {info.get('sub_state')}")
+PYEOF
+    echo "--------------------------------------------------"
+    echo ">> 现在可使用菜单选项 4 执行内核升级，升级后所有 active 节点将自动热重启。"
+  fi
+}
+
 # ========== 初始化动作 ==========
 init_json
 
@@ -313,13 +443,15 @@ echo "2) 安全注销并删除节点"
 echo "3) 全量查看活跃节点与 Core 状态"
 echo "4) 检查并执行原子内核升级 (Upgrade)"
 echo "5) 一键崩溃灾备回滚 (Rollback)"
+echo "6) 扫描并接管现有节点 (Import)"
 echo "0) 安全退出"
 echo "=================================================="
-read -rp "请输入操作代码 [0-5]: " MODE
+read -rp "请输入操作代码 [0-6]: " MODE
 
 case $MODE in
   4) upgrade_core; exit 0 ;;
   5) rollback_core; exit 0 ;;
+  6) import_existing; exit 0 ;;
   2) DELETE_MODE=1 ;;
   3) LIST_MODE=1 ;;
   0) exit 0 ;;
