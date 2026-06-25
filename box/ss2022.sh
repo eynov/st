@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # ========================================================
-#  Shadowsocks-Rust
+#  Shadowsocks-Rust 
 # ========================================================
 
 # ========== 全局变量与目录配置 ==========
@@ -165,7 +165,7 @@ PYEOF
   }
 
   local URL LATEST_VERSION
-  URL=$(echo "$LATEST_DATA" | grep browser_download_url | grep x86_64-unknown-linux-gnu.tar.xz | cut -d '"' -f4)
+  URL=$(echo "$LATEST_DATA" | grep browser_download_url | grep x86_64-unknown-linux-gnu.tar.xz | grep -v sha256 | cut -d '"' -f4)
   LATEST_VERSION=$(echo "$LATEST_DATA" | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/')
 
   if [ -z "$URL" ]; then
@@ -189,9 +189,8 @@ PYEOF
   # 代理列表：先直连，失败依次 fallback
   local PROXY_LIST=(
     ""
-    "https://ghfast.top/"
-    "https://gh.con.sh/"
-    "https://mirror.ghproxy.com/"
+    "https://v6.gh-proxy.org/"
+    "https://gh.jasonzeng.dev/"
   )
 
   local download_ok=0
@@ -203,15 +202,17 @@ PYEOF
       echo "  >> 直连失败，尝试代理: ${prefix}"
     fi
 
-    wget --timeout=30 --tries=2 -q --show-progress -O "$TMP_FILE" "$TRY_URL" &&     file "$TMP_FILE" 2>/dev/null | grep -q "XZ compressed data" && {
+    rm -f "$TMP_FILE"
+    wget --timeout=60 --tries=2 -q --show-progress -O "$TMP_FILE" "$TRY_URL" 2>/dev/null && \
+    file "$TMP_FILE" 2>/dev/null | grep -q "XZ compressed data" && {
       download_ok=1
+      echo "  >> 下载成功: ${prefix:-直连}"
       break
     }
-    rm -f "$TMP_FILE"
   done
 
   [ "$download_ok" -eq 1 ] || {
-    echo "❌ 所有下载源均失败（直连 + 3 个代理），请检查 VPS 网络"
+    echo "❌ 所有下载源均失败（直连 + 2 个代理），请检查 VPS 网络"
     return 1
   }
 
