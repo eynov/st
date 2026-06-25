@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # ========================================================
-#  Shadowsocks-Rust 
+#  Shadowsocks-Rust
 # ========================================================
 
 # ========== 全局变量与目录配置 ==========
@@ -144,11 +144,23 @@ except:
 PYEOF
 )
 
-  local API="https://api.github.com/repos/shadowsocks/shadowsocks-rust/releases/latest"
-  # [F5] 增加超时与重试
-  local LATEST_DATA
-  LATEST_DATA=$(curl --max-time 15 --retry 3 --retry-delay 2 -fsSL "$API") || {
-    echo "❌ 无法访问 GitHub API（网络超时或连接失败）"
+  # GitHub API + 下载均走 fallback（部分 VPS 直连 api.github.com 被墙）
+  local API_LIST=(
+    "https://api.github.com/repos/shadowsocks/shadowsocks-rust/releases/latest"
+    "https://ghfast.top/https://api.github.com/repos/shadowsocks/shadowsocks-rust/releases/latest"
+    "https://gh.con.sh/https://api.github.com/repos/shadowsocks/shadowsocks-rust/releases/latest"
+  )
+
+  local LATEST_DATA=""
+  for api_url in "${API_LIST[@]}"; do
+    echo "  >> 尝试获取 Release 信息: ${api_url%%repos*}..."
+    LATEST_DATA=$(curl --max-time 15 --retry 2 -fsSL "$api_url" 2>/dev/null) && \
+    echo "$LATEST_DATA" | grep -q "tag_name" && break
+    LATEST_DATA=""
+  done
+
+  [ -n "$LATEST_DATA" ] || {
+    echo "❌ 无法获取 GitHub Release 信息（所有 API 源均失败）"
     return 1
   }
 
@@ -157,7 +169,7 @@ PYEOF
   LATEST_VERSION=$(echo "$LATEST_DATA" | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/')
 
   if [ -z "$URL" ]; then
-    echo "❌ 无法从 GitHub 抓取最新 Release 链接"
+    echo "❌ 无法从 Release 信息中提取下载链接"
     return 1
   fi
 
@@ -173,9 +185,33 @@ PYEOF
   rm -rf "$TMP_FILE" "$TMP_UNPACK" && mkdir -p "$TMP_UNPACK"
 
   echo ">> 正在安全下载最新生产包..."
-  # [F5] wget 增加超时
-  wget --timeout=60 --tries=3 -q --show-progress -O "$TMP_FILE" "$URL" || {
-    echo "❌ 下载内核包失败"
+
+  # 代理列表：先直连，失败依次 fallback
+  local PROXY_LIST=(
+    ""
+    "https://ghfast.top/"
+    "https://gh.con.sh/"
+    "https://mirror.ghproxy.com/"
+  )
+
+  local download_ok=0
+  for prefix in "${PROXY_LIST[@]}"; do
+    local TRY_URL="${prefix}${URL}"
+    if [ -z "$prefix" ]; then
+      echo "  >> 尝试直连下载..."
+    else
+      echo "  >> 直连失败，尝试代理: ${prefix}"
+    fi
+
+    wget --timeout=30 --tries=2 -q --show-progress -O "$TMP_FILE" "$TRY_URL" &&     file "$TMP_FILE" 2>/dev/null | grep -q "XZ compressed data" && {
+      download_ok=1
+      break
+    }
+    rm -f "$TMP_FILE"
+  done
+
+  [ "$download_ok" -eq 1 ] || {
+    echo "❌ 所有下载源均失败（直连 + 3 个代理），请检查 VPS 网络"
     return 1
   }
 
