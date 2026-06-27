@@ -633,20 +633,51 @@ while true; do
     upgrade_core || { echo "❌ 初始化运行环境失败"; continue; }
   fi
 
-  # ========== 功能模块：删除节点 ==========
-  if [ "$MODE" = "2" ]; then
-    read -rp "请输入需要安全下线的端口号（空格分隔）: " PORTS
-    for PORT in $PORTS; do
-      sudo systemctl stop "ss${PORT}"    2>/dev/null || true
-      sudo systemctl disable "ss${PORT}" 2>/dev/null || true
-      sudo rm -f "/etc/systemd/system/ss${PORT}.service"
-      sudo rm -f "${SS_DIR}/config${PORT}.json"
-      delete_json_port "$PORT" || true
-      echo "🗑 端口 ${PORT} 已彻底执行下线隔离并注销。"
-    done
-    sudo systemctl daemon-reload
-    continue
-  fi
+ # ========== 功能模块：删除节点 ==========
+if [ "$MODE" = "2" ]; then
+  read -rp "请输入需要安全下线的端口号（空格分隔）: " PORTS
+
+  for PORT in $PORTS; do
+
+    echo ">> 正在彻底清理端口 ${PORT} ..."
+
+    # 1. 停止 & 禁用服务（先做，避免残留占用）
+    sudo systemctl stop "ss${PORT}" 2>/dev/null || true
+    sudo systemctl disable "ss${PORT}" 2>/dev/null || true
+
+    # 2. 删除 systemd unit
+    sudo rm -f "/etc/systemd/system/ss${PORT}.service"
+
+    # 3. 删除配置文件
+    sudo rm -f "${SS_DIR}/config${PORT}.json"
+
+    # 4. 删除日志（你已有，这里保留）
+    sudo rm -f "${LOG_DIR}/ss${PORT}.log"
+
+    # 5. 清理 Surge / URI（加强版：避免误匹配）
+    sudo sed -i "/SS_${PORT} = ss,/d" "$SURGE_FILE" 2>/dev/null || true
+    sudo sed -i "/SS2022_${PORT} = ss,/d" "$SURGE_FILE" 2>/dev/null || true
+    sudo sed -i "/SS_${PORT} = ss2022,/d" "$SURGE_FILE" 2>/dev/null || true
+
+    sudo sed -i "/#.*${PORT}/d" "$SS_DIR/ss_uris.txt" 2>/dev/null || true
+    sudo sed -i "/@.*:${PORT}#/d" "$SS_DIR/ss_uris.txt" 2>/dev/null || true
+
+    # 6. 清理二维码
+    sudo rm -f "${QR_DIR}/"*"$PORT"* 2>/dev/null || true
+
+    # 7. 清理 systemd runtime cache（关键补强）
+    sudo systemctl reset-failed "ss${PORT}" 2>/dev/null || true
+
+    # 8. 状态机删除（最后做，避免中断）
+    delete_json_port "$PORT" || true
+
+    echo "🗑 端口 ${PORT} 已彻底执行下线隔离并注销。"
+
+  done
+
+  sudo systemctl daemon-reload
+  continue
+fi
 
   # ========== 功能模块：状态盘点 + 端口详情查询 ==========
   if [ "$MODE" = "3" ]; then
@@ -681,7 +712,7 @@ PYEOF
     if [ $? -ne 0 ]; then continue; fi
 
     echo ""
-    read -rp "🔍 是否要查看特定节点的详细连接信息(密码/URI/二维码)？请输入端口号（直接回车跳过）: " QUERY_PORTS
+    read -rp "查看特定节点的详细信息，请输入端口号（直接回车跳过）: " QUERY_PORTS
     if [ -n "$QUERY_PORTS" ]; then
       LOCAL_IP=$(curl --max-time 5 -s -4 ifconfig.me)
       [ -n "$LOCAL_IP" ] || LOCAL_IP="你的VPS_IP"
