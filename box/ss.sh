@@ -573,7 +573,7 @@ case $MODE in
   4) upgrade_core; exit 0 ;;
   5) rollback_core; exit 0 ;;
   6) import_existing; exit 0 ;;
-  8) node_control; exit 0 ;;
+  7) node_control; exit 0 ;;
   2) DELETE_MODE=1 ;;
   3) LIST_MODE=1 ;;
   0) exit 0 ;;
