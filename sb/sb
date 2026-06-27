@@ -240,7 +240,7 @@ show_instance_detail() {
 while true; do
     echo ""
     echo "========================================="
-    echo "   sing-box 容器化多实例智能管理面板 v4"
+    echo " sing-box "
     echo "========================================="
     echo " 1. 新增 端口协议实例"
     echo " 2. 删除 指定端口实例"
