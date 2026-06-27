@@ -107,7 +107,7 @@ add_instance() {
 
 # ==============================================================================
 # 删除实例
-# 升级点：同步调用 state_del 清除 State Store 记录
+# 升级点：同步调用 state_del 清除 State Store 记录，集成 Runtime 强一致性清理层
 # ==============================================================================
 delete_instance() {
     read -p "请输入欲卸载删除的端口实例: " port
@@ -124,6 +124,28 @@ delete_instance() {
     systemctl stop "sb-${port}" 2>/dev/null || true
     systemctl disable "sb-${port}" 2>/dev/null || true
     rm -f "/etc/systemd/system/sb-${port}.service"
+
+    # =========================================
+    # 🧨 强一致性修复：Runtime 强制清理层
+    # =========================================
+
+    # 1️⃣ 杀 systemd 未完全回收的残留进程
+    pkill -9 -f "sing-box.*${port}" 2>/dev/null || true
+    pkill -9 -f "ss-server.*${port}" 2>/dev/null || true
+    pkill -9 sing-box 2>/dev/null || true
+
+    sleep 1
+
+    # 2️⃣ 二次确认是否仍有监听（防 ghost port）
+    if ss -tulnp | grep -q ":${port}"; then
+        warn "⚠️ 端口仍在监听（可能存在 systemd socket / orphan process）"
+        ss -tulnp | grep ":${port}" || true
+
+        # 再次强杀所有相关进程
+        fuser -k "${port}/tcp" 2>/dev/null || true
+        fuser -k "${port}/udp" 2>/dev/null || true
+    fi
+
     rm -rf "${INST_DIR}/${port}"
     rm -f "${CERT_DIR}/cert_${port}.crt" "${CERT_DIR}/private_${port}.key"
 
