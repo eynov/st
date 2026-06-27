@@ -41,10 +41,7 @@ EOF
 }
 
 # ========== 3. 读写工具（环境变量传参 + fcntl 文件锁） ==========
-# [F1] 全部改用环境变量传参，彻底消除 Shell → Python 字符串注入风险
-
 update_json_core() {
-  # [F2] 修复：每行一个 local 声明
   local cur_v=$1
   local bak_v=$2
   local time_str=$3
@@ -126,10 +123,7 @@ except Exception as e:
 PYEOF
 }
 
-# ========== 4. 高级原子升级（显式错误链替代 trap ERR） ==========
-# [F4] 去掉不可靠的 trap ERR，改为 || return 1 显式链
-# [F5] curl/wget 增加 --max-time / --timeout 与 --retry
-
+# ========== 4. 高级原子升级 ==========
 upgrade_core() {
   echo ">> 启动自动化原子升级模块..."
   init_json
@@ -144,7 +138,6 @@ except:
 PYEOF
 )
 
-  # GitHub API + 下载均走 fallback（部分 VPS 直连 api.github.com 被墙）
   local API_LIST=(
     "https://api.github.com/repos/shadowsocks/shadowsocks-rust/releases/latest"
     "https://ghfast.top/https://api.github.com/repos/shadowsocks/shadowsocks-rust/releases/latest"
@@ -186,7 +179,6 @@ PYEOF
 
   echo ">> 正在安全下载最新生产包..."
 
-  # 代理列表：先直连，失败依次 fallback
   local PROXY_LIST=(
     ""
     "https://v6.gh-proxy.org/"
@@ -316,17 +308,67 @@ PYEOF
 }
 
 # ========== 工具函数：生成标准 ss:// URI ==========
-# [OPT] 标准 Base64 URI，兼容 Shadowrocket / Clash 等客户端
 gen_ss_uri() {
   local method=$1
   local password=$2
   local server=$3
   local port=$4
   local tag=$5
-  # ss://BASE64(method:password)@server:port#tag
   local userinfo
   userinfo=$(echo -n "${method}:${password}" | base64 -w0)
   echo "ss://${userinfo}@${server}:${port}#${tag}"
+}
+
+# ========== 工具函数：检测最优 server 绑定地址 ==========
+# 返回值直接用于 JSON "server" 字段（已含引号或数组括号）
+# 策略：
+#   1) IPv6 不可用              → "0.0.0.0"
+#   2) bindv6only=0             → "::"        (单地址双栈)
+#   3) bindv6only=1 且可改为 0  → "::"        (改完后双栈)
+#   4) bindv6only=1 且无法修改  → ["0.0.0.0","::"]  (双地址)
+detect_server_bind() {
+  # 检查 IPv6 是否整体禁用
+  local ipv6_disabled
+  ipv6_disabled=$(cat /proc/sys/net/ipv6/conf/all/disable_ipv6 2>/dev/null)
+  if [ ! -f /proc/sys/net/ipv6/conf/all/disable_ipv6 ] || [ "$ipv6_disabled" = "1" ]; then
+    echo ">> IPv6 不可用，使用 0.0.0.0 监听" >&2
+    echo '"0.0.0.0"'
+    return
+  fi
+
+  # 读取 bindv6only
+  local bindv6only
+  bindv6only=$(cat /proc/sys/net/ipv6/bindv6only 2>/dev/null)
+  echo ">> 检测到 /proc/sys/net/ipv6/bindv6only = ${bindv6only}" >&2
+
+  if [ "$bindv6only" = "0" ]; then
+    # 已是双栈模式，:: 可同时接收 IPv4/IPv6
+    echo ">> bindv6only=0，使用 \"::\" 双栈监听" >&2
+    echo '"::"'
+
+  elif [ "$bindv6only" = "1" ]; then
+    # 尝试临时改为 0
+    echo ">> bindv6only=1，尝试修改为 0..." >&2
+    if echo 0 | sudo tee /proc/sys/net/ipv6/bindv6only >/dev/null 2>&1; then
+      local verify
+      verify=$(cat /proc/sys/net/ipv6/bindv6only 2>/dev/null)
+      if [ "$verify" = "0" ]; then
+        echo ">> bindv6only 已成功改为 0，使用 \"::\" 双栈监听" >&2
+        echo '"::"'
+      else
+        echo ">> bindv6only 修改未生效，降级为双地址监听" >&2
+        echo '["0.0.0.0","::"]'
+      fi
+    else
+      echo ">> bindv6only 无法修改（权限不足），降级为双地址监听" >&2
+      echo '["0.0.0.0","::"]'
+    fi
+
+  else
+    # 未知值，保守降级
+    echo ">> bindv6only 值未知 (${bindv6only})，使用 0.0.0.0 监听" >&2
+    echo '"0.0.0.0"'
+  fi
 }
 
 # ========== 6. 扫描接管现有节点 ==========
@@ -334,7 +376,6 @@ import_existing() {
   init_json
   echo ">> 开始扫描现有 Shadowsocks 节点配置..."
 
-  # 扫描所有 config*.json（支持 /etc/shadowsocks/ 及常见备选路径）
   local SCAN_DIRS="/etc/shadowsocks /etc/shadowsocks-libev"
   local found=0
 
@@ -343,7 +384,6 @@ import_existing() {
     for CONF in "${SCAN_DIR}"/config*.json; do
       [ -f "$CONF" ] || continue
 
-      # 用 Python 解析配置，避免 jq 依赖
       CONF="$CONF" python3 - << 'PYEOF'
 import json, os, subprocess, sys
 
@@ -364,10 +404,8 @@ if not port:
     print(f'  ⚠️  跳过 {conf_path}：未找到 server_port')
     sys.exit(0)
 
-# 判断协议类型
 proto = 'ss2022' if '2022' in method else 'ss'
 
-# 检查 systemd service 实际运行状态
 svc = f'ss{port}'
 res = subprocess.run(['systemctl', 'is-active', svc], capture_output=True, text=True)
 real_state = 'running' if res.returncode == 0 else 'stopped'
@@ -400,7 +438,6 @@ PYEOF
     done
   done
 
-  # 额外：扫描正在运行但没有 config*.json 的 ssserver 进程（兜底）
   echo ">> 扫描运行中 ssserver 进程（兜底检测）..."
   ss_pids=$(pgrep -x ssserver 2>/dev/null || pgrep -x ss-server 2>/dev/null || true)
   if [ -n "$ss_pids" ]; then
@@ -463,8 +500,10 @@ PYEOF
 # ========== 初始化动作 ==========
 init_json
 
-# ========== 启动前依赖补全（前置，确保所有路径均可用） ==========
-if ! command -v file >/dev/null 2>&1 ||    ! command -v xz >/dev/null 2>&1 ||    ! command -v qrencode >/dev/null 2>&1; then
+# ========== 启动前依赖补全 ==========
+if ! command -v file >/dev/null 2>&1 || \
+   ! command -v xz >/dev/null 2>&1 || \
+   ! command -v qrencode >/dev/null 2>&1; then
   sudo apt update -qq >/dev/null 2>&1 && sudo apt install -y file xz-utils qrencode >/dev/null 2>&1
 fi
 
@@ -506,36 +545,30 @@ if [ ! -f "$SS_EXEC" ]; then
   upgrade_core || { echo "❌ 初始化运行环境失败"; exit 1; }
 fi
 
-if ! dpkg -l qrencode file xz-utils >/dev/null 2>&1 ||    ! command -v qrencode >/dev/null 2>&1 ||    ! command -v file >/dev/null 2>&1 ||    ! command -v xz >/dev/null 2>&1; then
+if ! dpkg -l qrencode file xz-utils >/dev/null 2>&1 || \
+   ! command -v qrencode >/dev/null 2>&1 || \
+   ! command -v file >/dev/null 2>&1 || \
+   ! command -v xz >/dev/null 2>&1; then
   sudo apt update -qq && sudo apt install -y qrencode file xz-utils >/dev/null 2>&1
 fi
 
-  # ========== 功能模块：删除节点（完美全净化版） ==========
-  if [ "$MODE" = "2" ]; then
-    read -rp "请输入需要安全下线的端口号（空格分隔）: " PORTS
-    for PORT in $PORTS; do
-      # 1. 物理停止并禁用服务
-      sudo systemctl stop "ss${PORT}"    2>/dev/null || true
-      sudo systemctl disable "ss${PORT}" 2>/dev/null || true
-      
-      # 2. 清除 systemd 服务底座与残留状态
-      sudo rm -f "/etc/systemd/system/ss${PORT}.service"
-      sudo systemctl daemon-reload 2>/dev/null || true
-      sudo systemctl reset-failed "ss${PORT}" 2>/dev/null || true
-      
-      # 3. 清除物理配置文件与日志文件（彻底净化）
-      sudo rm -f "${SS_DIR}/config${PORT}.json"
-      sudo rm -f "/var/log/shadowsocks/ss${PORT}.log"
-      
-      # 4. 注销中央状态机中的元数据
-      delete_json_port "$PORT" || true
-      
-      echo "🗑 端口 ${PORT} 的服务、配置、日志及状态机记录已彻底净化删除。"
-    done
-    sudo systemctl daemon-reload
-    continue
-  fi
-
+# ========== 功能模块：删除节点 ==========
+if [ "$MODE" = "2" ]; then
+  read -rp "请输入需要安全下线的端口号（空格分隔）: " PORTS
+  for PORT in $PORTS; do
+    sudo systemctl stop "ss${PORT}"    2>/dev/null || true
+    sudo systemctl disable "ss${PORT}" 2>/dev/null || true
+    sudo rm -f "/etc/systemd/system/ss${PORT}.service"
+    sudo systemctl daemon-reload 2>/dev/null || true
+    sudo systemctl reset-failed "ss${PORT}" 2>/dev/null || true
+    sudo rm -f "${SS_DIR}/config${PORT}.json"
+    sudo rm -f "/var/log/shadowsocks/ss${PORT}.log"
+    delete_json_port "$PORT" || true
+    echo "🗑 端口 ${PORT} 的服务、配置、日志及状态机记录已彻底净化删除。"
+  done
+  sudo systemctl daemon-reload
+  exit 0
+fi
 
 # ========== 功能模块：状态盘点 ==========
 if [ "$LIST_MODE" = "1" ]; then
@@ -568,7 +601,6 @@ fi
 
 # ========== 功能模块：批量新增节点 ==========
 read -rp "请输入中转域名/落地IP（留空则自动抓取本地公网 IP）: " SERVER_DOMAIN
-# [F5] 增加超时
 SERVER_IP=${SERVER_DOMAIN:-$(curl --max-time 10 -s -4 ifconfig.me)}
 echo ">> 当前入站目标寻址地址: $SERVER_IP"
 
@@ -580,9 +612,15 @@ PROTO="ss"; [ "$PROTO_OPT" = "2" ] && PROTO="ss2022"
 
 read -rp "请输入待部署的批量端口号（空格分隔）: " PORTS
 echo "# Surge Declarative Proxy System" > "$SURGE_FILE"
-# [OPT] 同步生成标准 ss:// URI 列表
 SS_URI_FILE="${SS_DIR}/ss_uris.txt"
 echo "# Standard ss:// URI List" > "$SS_URI_FILE"
+
+# 提前检测一次绑定地址（所有端口共用同一结果）
+echo ""
+echo ">> 正在检测服务器 IPv6 绑定策略..."
+SERVER_BIND=$(detect_server_bind)
+echo ">> 最终绑定地址配置: ${SERVER_BIND}"
+echo ""
 
 for PORT in $PORTS; do
   if ! [[ "$PORT" =~ ^[0-9]+$ ]] || [ "$PORT" -lt 1 ] || [ "$PORT" -gt 65535 ]; then
@@ -610,7 +648,7 @@ for PORT in $PORTS; do
 
     sudo tee "${SS_CONF}" > /dev/null << EOL
 {
-  "server": "0.0.0.0",
+  "server": ${SERVER_BIND},
   "server_port": ${PORT},
   "password": "${PASSWORD}",
   "method": "${METHOD}",
@@ -620,7 +658,6 @@ for PORT in $PORTS; do
 EOL
 
     SURGE_LINK="SS_${PORT} = ss, ${SERVER_IP}, ${PORT}, encrypt-method=${METHOD}, password=${PASSWORD}, udp-relay=true"
-    # [OPT] 生成标准 URI
     SS_URI=$(gen_ss_uri "$METHOD" "$PASSWORD" "$SERVER_IP" "$PORT" "SS_${PORT}")
 
   else
@@ -635,17 +672,15 @@ EOL
       *) METHOD="2022-blake3-aes-128-gcm";        KEY_SIZE=32 ;;
     esac
 
-    # [F3] 改用 hex 避免 base64 特殊字符污染 Surge/URI 格式
     MASTER_KEY=$(openssl rand -hex "$KEY_SIZE")
     SUB_KEY=$(openssl rand -hex "$KEY_SIZE")
 
-    # SS2022 密码字段在配置文件中需要 base64 格式
     MASTER_KEY_B64=$(echo -n "$MASTER_KEY" | xxd -r -p | base64 -w0)
     SUB_KEY_B64=$(echo -n "$SUB_KEY"    | xxd -r -p | base64 -w0)
 
     sudo tee "${SS_CONF}" > /dev/null << EOL
 {
-  "server": "0.0.0.0",
+  "server": ${SERVER_BIND},
   "server_port": ${PORT},
   "method": "${METHOD}",
   "password": "${MASTER_KEY_B64}",
@@ -662,7 +697,6 @@ EOL
     SS_URI=$(gen_ss_uri "$METHOD" "$SUB_KEY_B64" "$SERVER_IP" "$PORT" "SS2022_${PORT}")
   fi
 
-  # [OPT] systemd 服务追加日志输出
   sudo tee "${SYSTEMD_SERVICE}" > /dev/null << EOL
 [Unit]
 Description=Shadowsocks Declarative Node Service on Port ${PORT}
@@ -689,7 +723,6 @@ EOL
   echo "$SURGE_LINK" >> "$SURGE_FILE"
   echo "$SS_URI"     >> "$SS_URI_FILE"
 
-  # 生成两种二维码：Surge 格式 + 标准 ss:// URI
   qrencode -o "${QR_DIR}/${PORT}_surge.png" -t PNG "$SURGE_LINK"
   qrencode -o "${QR_DIR}/${PORT}_ssuri.png" -t PNG "$SS_URI"
 done
