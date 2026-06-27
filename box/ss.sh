@@ -554,72 +554,73 @@ if [ -f "$SS_EXEC" ]; then
   }
 fi
 
-# ========== 交互式主菜单 ==========
-echo "=================================================="
-echo " Shadowsocks-Rust 管理脚本"
-echo "=================================================="
-echo "1) 批量新增并上线节点"
-echo "2) 安全注销并删除节点"
-echo "3) 全量查看活跃节点与 Core 状态"
-echo "4) 检查执行内核升级 (Upgrade)"
-echo "5) 一键崩溃灾备回滚 (Rollback)"
-echo "6) 扫描并接管现有节点 (Import)"
-echo "7) 节点控制台 (启动/重启/停止)"
-echo "0) 安全退出"
-echo "=================================================="
-read -rp "请输入操作代码 [0-6,8]: " MODE
-
-case $MODE in
-  4) upgrade_core; exit 0 ;;
-  5) rollback_core; exit 0 ;;
-  6) import_existing; exit 0 ;;
-  7) node_control; exit 0 ;;
-  2) DELETE_MODE=1 ;;
-  3) LIST_MODE=1 ;;
-  0) exit 0 ;;
-  *) ;;
-esac
-
-# ========== 动态依赖补全 ==========
-if [ ! -f "$SS_EXEC" ]; then
-  echo ">> 系统未发现运行内核，正在触发首次环境构建..."
-  upgrade_core || { echo "❌ 初始化运行环境失败"; exit 1; }
-fi
-
-if ! dpkg -l qrencode file xz-utils >/dev/null 2>&1 || \
-   ! command -v qrencode >/dev/null 2>&1 || \
-   ! command -v file >/dev/null 2>&1 || \
-   ! command -v xz >/dev/null 2>&1 || \
-   ! command -v xxd >/dev/null 2>&1; then
-  sudo apt update -qq && sudo apt install -y qrencode file xz-utils xxd >/dev/null 2>&1
-fi
-
-# ========== 功能模块：删除节点 ==========
-if [ "$DELETE_MODE" = "1" ]; then
-  read -rp "请输入需要安全下线的端口号（空格分隔）: " PORTS
-  for PORT in $PORTS; do
-    sudo systemctl stop "ss${PORT}"    2>/dev/null || true
-    sudo systemctl disable "ss${PORT}" 2>/dev/null || true
-    sudo rm -f "/etc/systemd/system/ss${PORT}.service"
-    sudo rm -f "${SS_DIR}/config${PORT}.json"
-    delete_json_port "$PORT"
-    echo "🗑 端口 ${PORT} 已彻底执行下线隔离并注销。"
-  done
-  sudo systemctl daemon-reload
-  exit 0
-fi
-
-# ========== 功能模块：状态盘点 ==========
-if [ "$LIST_MODE" = "1" ]; then
+# ========== 交互式主菜单（循环） ==========
+while true; do
+  echo ""
   echo "=================================================="
-  CURRENT_VER=$(INSTANCES_JSON="$INSTANCES_JSON" python3 -c \
-    "import json,os; print(json.load(open(os.environ['INSTANCES_JSON']))['core']['current_version'])" 2>/dev/null)
-  echo "  Core 状态  | 运行内核: ${CURRENT_VER}"
+  echo " Shadowsocks-Rust 管理脚本"
   echo "=================================================="
-  echo " 实例清单 (State Matrix) ："
-  echo "--------------------------------------------------"
+  echo "1) 批量新增并上线节点"
+  echo "2) 安全注销并删除节点"
+  echo "3) 全量查看活跃节点与 Core 状态"
+  echo "4) 检查执行内核升级 (Upgrade)"
+  echo "5) 一键崩溃灾备回滚 (Rollback)"
+  echo "6) 扫描并接管现有节点 (Import)"
+  echo "7) 节点控制台 (启动/重启/停止)"
+  echo "0) 安全退出"
+  echo "=================================================="
+  read -rp "请输入操作代码 [0-7]: " MODE
 
-  INSTANCES_JSON="$INSTANCES_JSON" python3 - << 'PYEOF'
+  case $MODE in
+    0) echo "👋 已安全退出。"; exit 0 ;;
+    4) upgrade_core; continue ;;
+    5) rollback_core; continue ;;
+    6) import_existing; continue ;;
+    7) node_control; continue ;;
+    1|2|3) ;;
+    *) echo "❌ 无效选项，请重新输入。"; continue ;;
+  esac
+
+  # ========== 动态依赖补全 ==========
+  if [ ! -f "$SS_EXEC" ]; then
+    echo ">> 系统未发现运行内核，正在触发首次环境构建..."
+    upgrade_core || { echo "❌ 初始化运行环境失败"; continue; }
+  fi
+
+  if ! dpkg -l qrencode file xz-utils >/dev/null 2>&1 || \
+     ! command -v qrencode >/dev/null 2>&1 || \
+     ! command -v file >/dev/null 2>&1 || \
+     ! command -v xz >/dev/null 2>&1 || \
+     ! command -v xxd >/dev/null 2>&1; then
+    sudo apt update -qq && sudo apt install -y qrencode file xz-utils xxd >/dev/null 2>&1
+  fi
+
+  # ========== 功能模块：删除节点 ==========
+  if [ "$MODE" = "2" ]; then
+    read -rp "请输入需要安全下线的端口号（空格分隔）: " PORTS
+    for PORT in $PORTS; do
+      sudo systemctl stop "ss${PORT}"    2>/dev/null || true
+      sudo systemctl disable "ss${PORT}" 2>/dev/null || true
+      sudo rm -f "/etc/systemd/system/ss${PORT}.service"
+      sudo rm -f "${SS_DIR}/config${PORT}.json"
+      delete_json_port "$PORT"
+      echo "🗑 端口 ${PORT} 已彻底执行下线隔离并注销。"
+    done
+    sudo systemctl daemon-reload
+    continue
+  fi
+
+  # ========== 功能模块：状态盘点 ==========
+  if [ "$MODE" = "3" ]; then
+    echo "=================================================="
+    CURRENT_VER=$(INSTANCES_JSON="$INSTANCES_JSON" python3 -c \
+      "import json,os; print(json.load(open(os.environ['INSTANCES_JSON']))['core']['current_version'])" 2>/dev/null)
+    echo "  Core 状态  | 运行内核: ${CURRENT_VER}"
+    echo "=================================================="
+    echo " 实例清单 (State Matrix) ："
+    echo "--------------------------------------------------"
+
+    INSTANCES_JSON="$INSTANCES_JSON" python3 - << 'PYEOF'
 import json, subprocess, os
 path = os.environ['INSTANCES_JSON']
 try:
@@ -635,50 +636,50 @@ except Exception as e:
     print(f'❌ JSON 损坏: {e}')
     exit(1)
 PYEOF
-  exit 0
-fi
-
-# ========== 功能模块：批量新增节点 ==========
-read -rp "请输入中转域名/落地IP（留空则自动抓取本地公网 IP）: " SERVER_DOMAIN
-SERVER_IP=${SERVER_DOMAIN:-$(curl --max-time 10 -s -4 ifconfig.me)}
-echo ">> 当前入站目标寻址地址: $SERVER_IP"
-
-echo "请选择运行协议簇："
-echo "  1) Shadowsocks Legacy (SS)"
-echo "  2) Shadowsocks 2022 Standard (SS2022)"
-read -rp "选择选项 (1-2, 默认 1): " PROTO_OPT
-PROTO="ss"; [ "$PROTO_OPT" = "2" ] && PROTO="ss2022"
-
-read -rp "请输入待部署的批量端口号（空格分隔）: " PORTS
-echo "# Surge Declarative Proxy System" > "$SURGE_FILE"
-SS_URI_FILE="${SS_DIR}/ss_uris.txt"
-echo "# Standard ss:// URI List" > "$SS_URI_FILE"
-
-for PORT in $PORTS; do
-  if ! [[ "$PORT" =~ ^[0-9]+$ ]] || [ "$PORT" -lt 1 ] || [ "$PORT" -gt 65535 ]; then
-    echo ">> [跳过] 无效非法端口规范: $PORT"
     continue
   fi
 
-  SS_CONF="${SS_DIR}/config${PORT}.json"
-  SYSTEMD_SERVICE="/etc/systemd/system/ss${PORT}.service"
+  # ========== 功能模块：批量新增节点 ==========
+  read -rp "请输入中转域名/落地IP（留空则自动抓取本地公网 IP）: " SERVER_DOMAIN
+  SERVER_IP=${SERVER_DOMAIN:-$(curl --max-time 10 -s -4 ifconfig.me)}
+  echo ">> 当前入站目标寻址地址: $SERVER_IP"
 
-  if [ "$PROTO" = "ss" ]; then
-    echo "请指定传统端口 ${PORT} 的流控加密方式："
-    echo "  1) none"
-    echo "  2) aes-128-gcm"
-    echo "  3) aes-256-gcm"
-    echo "  4) chacha20-ietf-poly1305"
-    read -rp "加密指引 (1-4, 默认 4): " METHOD_OPT
-    case "$METHOD_OPT" in
-      1) METHOD="none" ;;
-      2) METHOD="aes-128-gcm" ;;
-      3) METHOD="aes-256-gcm" ;;
-      *) METHOD="chacha20-ietf-poly1305" ;;
-    esac
-    PASSWORD=$(openssl rand -hex 16)
+  echo "请选择运行协议簇："
+  echo "  1) Shadowsocks Legacy (SS)"
+  echo "  2) Shadowsocks 2022 Standard (SS2022)"
+  read -rp "选择选项 (1-2, 默认 1): " PROTO_OPT
+  PROTO="ss"; [ "$PROTO_OPT" = "2" ] && PROTO="ss2022"
 
-    sudo tee "${SS_CONF}" > /dev/null << EOL
+  read -rp "请输入待部署的批量端口号（空格分隔）: " PORTS
+  echo "# Surge Declarative Proxy System" > "$SURGE_FILE"
+  SS_URI_FILE="${SS_DIR}/ss_uris.txt"
+  echo "# Standard ss:// URI List" > "$SS_URI_FILE"
+
+  for PORT in $PORTS; do
+    if ! [[ "$PORT" =~ ^[0-9]+$ ]] || [ "$PORT" -lt 1 ] || [ "$PORT" -gt 65535 ]; then
+      echo ">> [跳过] 无效非法端口规范: $PORT"
+      continue
+    fi
+
+    SS_CONF="${SS_DIR}/config${PORT}.json"
+    SYSTEMD_SERVICE="/etc/systemd/system/ss${PORT}.service"
+
+    if [ "$PROTO" = "ss" ]; then
+      echo "请指定传统端口 ${PORT} 的流控加密方式："
+      echo "  1) none"
+      echo "  2) aes-128-gcm"
+      echo "  3) aes-256-gcm"
+      echo "  4) chacha20-ietf-poly1305"
+      read -rp "加密指引 (1-4, 默认 4): " METHOD_OPT
+      case "$METHOD_OPT" in
+        1) METHOD="none" ;;
+        2) METHOD="aes-128-gcm" ;;
+        3) METHOD="aes-256-gcm" ;;
+        *) METHOD="chacha20-ietf-poly1305" ;;
+      esac
+      PASSWORD=$(openssl rand -hex 16)
+
+      sudo tee "${SS_CONF}" > /dev/null << EOL
 {
   "server": ["0.0.0.0", "::"],
   "server_port": ${PORT},
@@ -689,28 +690,28 @@ for PORT in $PORTS; do
 }
 EOL
 
-    SURGE_LINK="SS_${PORT} = ss, ${SERVER_IP}, ${PORT}, encrypt-method=${METHOD}, password=${PASSWORD}, udp-relay=true"
-    SS_URI=$(gen_ss_uri "$METHOD" "$PASSWORD" "$SERVER_IP" "$PORT" "SS_${PORT}")
+      SURGE_LINK="SS_${PORT} = ss, ${SERVER_IP}, ${PORT}, encrypt-method=${METHOD}, password=${PASSWORD}, udp-relay=true"
+      SS_URI=$(gen_ss_uri "$METHOD" "$PASSWORD" "$SERVER_IP" "$PORT" "SS_${PORT}")
 
-  else
-    echo "请指定标准 2022 端口 ${PORT} 的强制对称加密算法："
-    echo "  1) 2022-blake3-aes-128-gcm"
-    echo "  2) 2022-blake3-aes-256-gcm"
-    echo "  3) 2022-blake3-chacha20-poly1305"
-    read -rp "算法指引 (1-3, 默认 1): " METHOD_OPT
-    case "$METHOD_OPT" in
-      2) METHOD="2022-blake3-aes-256-gcm";      KEY_SIZE=64 ;;
-      3) METHOD="2022-blake3-chacha20-poly1305"; KEY_SIZE=64 ;;
-      *) METHOD="2022-blake3-aes-128-gcm";       KEY_SIZE=32 ;;
-    esac
+    else
+      echo "请指定标准 2022 端口 ${PORT} 的强制对称加密算法："
+      echo "  1) 2022-blake3-aes-128-gcm"
+      echo "  2) 2022-blake3-aes-256-gcm"
+      echo "  3) 2022-blake3-chacha20-poly1305"
+      read -rp "算法指引 (1-3, 默认 1): " METHOD_OPT
+      case "$METHOD_OPT" in
+        2) METHOD="2022-blake3-aes-256-gcm";      KEY_SIZE=64 ;;
+        3) METHOD="2022-blake3-chacha20-poly1305"; KEY_SIZE=64 ;;
+        *) METHOD="2022-blake3-aes-128-gcm";       KEY_SIZE=32 ;;
+      esac
 
-    MASTER_KEY=$(openssl rand -hex "$KEY_SIZE")
-    SUB_KEY=$(openssl rand -hex "$KEY_SIZE")
+      MASTER_KEY=$(openssl rand -hex "$KEY_SIZE")
+      SUB_KEY=$(openssl rand -hex "$KEY_SIZE")
 
-    MASTER_KEY_B64=$(echo -n "$MASTER_KEY" | xxd -r -p | base64 -w0)
-    SUB_KEY_B64=$(echo -n "$SUB_KEY"    | xxd -r -p | base64 -w0)
+      MASTER_KEY_B64=$(echo -n "$MASTER_KEY" | xxd -r -p | base64 -w0)
+      SUB_KEY_B64=$(echo -n "$SUB_KEY"    | xxd -r -p | base64 -w0)
 
-    sudo tee "${SS_CONF}" > /dev/null << EOL
+      sudo tee "${SS_CONF}" > /dev/null << EOL
 {
   "server": ["0.0.0.0", "::"],
   "server_port": ${PORT},
@@ -725,11 +726,11 @@ EOL
 }
 EOL
 
-    SURGE_LINK="SS2022_${PORT} = ss, ${SERVER_IP}, ${PORT}, encrypt-method=${METHOD}, password=${SUB_KEY_B64}, udp-relay=true"
-    SS_URI=$(gen_ss_uri "$METHOD" "$SUB_KEY_B64" "$SERVER_IP" "$PORT" "SS2022_${PORT}")
-  fi
+      SURGE_LINK="SS2022_${PORT} = ss, ${SERVER_IP}, ${PORT}, encrypt-method=${METHOD}, password=${SUB_KEY_B64}, udp-relay=true"
+      SS_URI=$(gen_ss_uri "$METHOD" "$SUB_KEY_B64" "$SERVER_IP" "$PORT" "SS2022_${PORT}")
+    fi
 
-  sudo tee "${SYSTEMD_SERVICE}" > /dev/null << EOL
+    sudo tee "${SYSTEMD_SERVICE}" > /dev/null << EOL
 [Unit]
 Description=Shadowsocks Declarative Node Service on Port ${PORT}
 After=network.target
@@ -745,22 +746,24 @@ RestartSec=5s
 WantedBy=multi-user.target
 EOL
 
-  sudo systemctl daemon-reload
-  sudo systemctl enable "ss${PORT}" >/dev/null 2>&1
-  sudo systemctl restart "ss${PORT}"
+    sudo systemctl daemon-reload
+    sudo systemctl enable "ss${PORT}" >/dev/null 2>&1
+    sudo systemctl restart "ss${PORT}"
 
-  update_json_port "$PORT" "$PROTO" "$METHOD" "active" "running"
+    update_json_port "$PORT" "$PROTO" "$METHOD" "active" "running"
 
-  echo "✅ 端口 ${PORT} 已成功上线。"
-  echo "$SURGE_LINK" >> "$SURGE_FILE"
-  echo "$SS_URI"     >> "$SS_URI_FILE"
+    echo "✅ 端口 ${PORT} 已成功上线。"
+    echo "$SURGE_LINK" >> "$SURGE_FILE"
+    echo "$SS_URI"     >> "$SS_URI_FILE"
 
-  qrencode -o "${QR_DIR}/${PORT}_surge.png" -t PNG "$SURGE_LINK"
-  qrencode -o "${QR_DIR}/${PORT}_ssuri.png" -t PNG "$SS_URI"
+    qrencode -o "${QR_DIR}/${PORT}_surge.png" -t PNG "$SURGE_LINK"
+    qrencode -o "${QR_DIR}/${PORT}_ssuri.png" -t PNG "$SS_URI"
+  done
+
+  echo ""
+  echo ">> 批量新增执行完毕。"
+  echo "   Surge 代理行   → $SURGE_FILE"
+  echo "   标准 ss:// URI → $SS_URI_FILE"
+  echo "   二维码目录      → $QR_DIR"
+
 done
-
-echo ""
-echo ">> 批量新增执行完毕。"
-echo "   Surge 代理行   → $SURGE_FILE"
-echo "   标准 ss:// URI → $SS_URI_FILE"
-echo "   二维码目录      → $QR_DIR"
