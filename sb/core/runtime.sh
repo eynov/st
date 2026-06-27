@@ -8,16 +8,8 @@ source "$BASE_DIR/core/common.sh"
 source "$BASE_DIR/core/state.sh"
 
 # ------------------------------------------------------------------------------
-# 动态生成分享链接
+# 动态生成分享链接（双栈：IPv4 + IPv6 各一条）
 # 用法: generate_dynamic_uri <instance_dir> <uri|surge>
-#
-# 升级点：
-# 不再在 runtime.sh 写死 SS / SS2022 / HY2 case。
-# 改为从协议插件注册表 PROTO_URI / PROTO_SURGE 自动调用。
-#
-# 每个协议插件只需要提供：
-#   uri_xxx <meta_file> <current_ip>
-#   surge_xxx <meta_file> <current_ip>
 # ------------------------------------------------------------------------------
 generate_dynamic_uri() {
     local target_dir="$1"
@@ -26,8 +18,9 @@ generate_dynamic_uri() {
 
     [ -f "$meta_file" ] || return
 
-    local current_ip proto fn
-    current_ip=$(get_ip)
+    local ipv4 ipv6 proto fn output=""
+    ipv4=$(get_ipv4)
+    ipv6=$(get_ipv6)
     proto=$(jq -r '.protocol // empty' "$meta_file")
 
     if [ -z "$proto" ]; then
@@ -36,40 +29,43 @@ generate_dynamic_uri() {
     fi
 
     case "$mode" in
-        uri)
-            fn="${PROTO_URI[$proto]}"
-            ;;
-        surge)
-            fn="${PROTO_SURGE[$proto]}"
-            ;;
+        uri)   fn="${PROTO_URI[$proto]}"   ;;
+        surge) fn="${PROTO_SURGE[$proto]}" ;;
         *)
             warn "未知分享链接生成模式: ${mode}"
             return 1
             ;;
     esac
 
-    if [ -z "$fn" ]; then
+    if [ -z "$fn" ] || ! declare -F "$fn" >/dev/null 2>&1; then
         warn "协议 [${proto}] 未注册 ${mode} 生成函数。"
         return 1
     fi
 
-    if ! declare -F "$fn" >/dev/null 2>&1; then
-        warn "协议 [${proto}] 的 ${mode} 生成函数 [${fn}] 不存在。"
-        return 1
+    if [ -n "$ipv4" ]; then
+        output+="$("$fn" "$meta_file" "$ipv4")"$'\n'
+    else
+        warn "未能获取 IPv4 地址，跳过。"
     fi
 
-    "$fn" "$meta_file" "$current_ip"
+    if [ -n "$ipv6" ]; then
+        local ip_arg="$ipv6"
+        [ "$mode" = "uri" ] && ip_arg="[${ipv6}]"
+        output+="$("$fn" "$meta_file" "$ip_arg")"$'\n'
+    else
+        warn "未能获取 IPv6 地址，跳过。"
+    fi
+
+    printf '%s' "$output"
 }
 
 # ------------------------------------------------------------------------------
-# 全量热重载
-# 升级点：从 state_list_enabled 读取端口，不再遍历目录
+# 全量热重载（只重启 enabled=true 的实例）
 # ------------------------------------------------------------------------------
 restart_all() {
     local has_any=false
     local ports
 
-    # 只重启 enabled=true 的实例
     mapfile -t ports < <(state_list_enabled)
 
     if [ "${#ports[@]}" -eq 0 ]; then
