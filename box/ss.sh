@@ -633,51 +633,20 @@ while true; do
     upgrade_core || { echo "❌ 初始化运行环境失败"; continue; }
   fi
 
- # ========== 功能模块：删除节点 ==========
-if [ "$MODE" = "2" ]; then
-  read -rp "请输入需要安全下线的端口号（空格分隔）: " PORTS
-
-  for PORT in $PORTS; do
-
-    echo ">> 正在彻底清理端口 ${PORT} ..."
-
-    # 1. 停止 & 禁用服务（先做，避免残留占用）
-    sudo systemctl stop "ss${PORT}" 2>/dev/null || true
-    sudo systemctl disable "ss${PORT}" 2>/dev/null || true
-
-    # 2. 删除 systemd unit
-    sudo rm -f "/etc/systemd/system/ss${PORT}.service"
-
-    # 3. 删除配置文件
-    sudo rm -f "${SS_DIR}/config${PORT}.json"
-
-    # 4. 删除日志（你已有，这里保留）
-    sudo rm -f "${LOG_DIR}/ss${PORT}.log"
-
-    # 5. 清理 Surge / URI（加强版：避免误匹配）
-    sudo sed -i "/SS_${PORT} = ss,/d" "$SURGE_FILE" 2>/dev/null || true
-    sudo sed -i "/SS2022_${PORT} = ss,/d" "$SURGE_FILE" 2>/dev/null || true
-    sudo sed -i "/SS_${PORT} = ss2022,/d" "$SURGE_FILE" 2>/dev/null || true
-
-    sudo sed -i "/#.*${PORT}/d" "$SS_DIR/ss_uris.txt" 2>/dev/null || true
-    sudo sed -i "/@.*:${PORT}#/d" "$SS_DIR/ss_uris.txt" 2>/dev/null || true
-
-    # 6. 清理二维码
-    sudo rm -f "${QR_DIR}/"*"$PORT"* 2>/dev/null || true
-
-    # 7. 清理 systemd runtime cache（关键补强）
-    sudo systemctl reset-failed "ss${PORT}" 2>/dev/null || true
-
-    # 8. 状态机删除（最后做，避免中断）
-    delete_json_port "$PORT" || true
-
-    echo "🗑 端口 ${PORT} 已彻底执行下线隔离并注销。"
-
-  done
-
-  sudo systemctl daemon-reload
-  continue
-fi
+  # ========== 功能模块：删除节点 ==========
+  if [ "$MODE" = "2" ]; then
+    read -rp "请输入需要安全下线的端口号（空格分隔）: " PORTS
+    for PORT in $PORTS; do
+      sudo systemctl stop "ss${PORT}"    2>/dev/null || true
+      sudo systemctl disable "ss${PORT}" 2>/dev/null || true
+      sudo rm -f "/etc/systemd/system/ss${PORT}.service"
+      sudo rm -f "${SS_DIR}/config${PORT}.json"
+      delete_json_port "$PORT" || true
+      echo "🗑 端口 ${PORT} 已彻底执行下线隔离并注销。"
+    done
+    sudo systemctl daemon-reload
+    continue
+  fi
 
   # ========== 功能模块：状态盘点 + 端口详情查询 ==========
   if [ "$MODE" = "3" ]; then
@@ -712,7 +681,7 @@ PYEOF
     if [ $? -ne 0 ]; then continue; fi
 
     echo ""
-    read -rp "查看特定节点的详细信息，请输入端口号（直接回车跳过）: " QUERY_PORTS
+    read -rp "🔍 是否要查看特定节点的详细连接信息(密码/URI/二维码)？请输入端口号（直接回车跳过）: " QUERY_PORTS
     if [ -n "$QUERY_PORTS" ]; then
       LOCAL_IP=$(curl --max-time 5 -s -4 ifconfig.me)
       [ -n "$LOCAL_IP" ] || LOCAL_IP="你的VPS_IP"
@@ -783,7 +752,7 @@ PYEOF
     continue
   fi
 
-    # ========== 功能模块：批量新增节点 ==========
+  # ========== 功能模块：批量新增节点 ==========
   read -rp "请输入中转域名/落地IP（留空则自动抓取本地公网 IP）: " SERVER_DOMAIN
   SERVER_IP=${SERVER_DOMAIN:-$(curl --max-time 10 -s -4 ifconfig.me)}
   echo ">> 当前入站目标寻址地址: $SERVER_IP"
@@ -805,7 +774,7 @@ PYEOF
       continue
     fi
 
-    # 【前置阻断】物理网络端口冲突精确校验
+    # 【后置优化：前置阻断】物理网络端口冲突精确校验
     if sudo ss -lntup 2>/dev/null | grep -q ":${PORT} "; then
       echo "❌ 端口 ${PORT} 已被占用（ss/进程冲突），跳过"
       continue
@@ -813,18 +782,6 @@ PYEOF
 
     SS_CONF="${SS_DIR}/config${PORT}.json"
     SYSTEMD_SERVICE="/etc/systemd/system/ss${PORT}.service"
-
-    # 【Diff 落地】IPv4 / IPv6 双栈动态计算绑定
-    HAS_IPV6=0
-    if ip -6 addr show scope global 2>/dev/null | grep -q inet6; then
-      HAS_IPV6=1
-    fi
-
-    if [ "$HAS_IPV6" -eq 1 ]; then
-      SERVER_BIND='["0.0.0.0", "::"]'
-    else
-      SERVER_BIND='"0.0.0.0"'
-    fi
 
     if [ "$PROTO" = "ss" ]; then
       echo "请指定传统端口 ${PORT} 的流控加密方式："
@@ -839,13 +796,12 @@ PYEOF
         3) METHOD="aes-256-gcm" ;;
         *) METHOD="chacha20-ietf-poly1305" ;;
       esac
-      
-      # SS Legacy 保持独立逻辑：使用 16 字节 hex
       PASSWORD=$(openssl rand -hex 16)
 
+      # 【Diff 5 落地】IPv6 / IPv4 物理网卡双栈动态绑定绑定
       sudo tee "${SS_CONF}" > /dev/null << EOL
 {
-  "server": ${SERVER_BIND},
+  "server": ["0.0.0.0"${IPV6_BIND}],
   "server_port": ${PORT},
   "password": "${PASSWORD}",
   "method": "${METHOD}",
@@ -864,34 +820,38 @@ EOL
       echo "  3) 2022-blake3-chacha20-poly1305"
       read -rp "算法指引 (1-3, 默认 1): " METHOD_OPT
       case "$METHOD_OPT" in
-        2) METHOD="2022-blake3-aes-256-gcm" ;;
-        3) METHOD="2022-blake3-chacha20-poly1305" ;;
-        *) METHOD="2022-blake3-aes-128-gcm" ;;
+        2) METHOD="2022-blake3-aes-256-gcm";      KEY_SIZE=64 ;;
+        3) METHOD="2022-blake3-chacha20-poly1305"; KEY_SIZE=64 ;;
+        *) METHOD="2022-blake3-aes-128-gcm";       KEY_SIZE=32 ;;
       esac
 
-      # 【Diff 落地】SS2022 独立强随机 Key 逻辑：截取 32 字节并进行标准 Base64 编码
-      KEY_32=$(head -c 32 /dev/urandom | base64 | tr -d '\n')
+      MASTER_KEY=$(openssl rand -hex "$KEY_SIZE")
+      SUB_KEY=$(openssl rand -hex "$KEY_SIZE")
 
+      MASTER_KEY_B64=$(echo -n "$MASTER_KEY" | xxd -r -p | base64 -w0)
+      SUB_KEY_B64=$(echo -n "$SUB_KEY"    | xxd -r -p | base64 -w0)
+
+      # 【Diff 5 落地】2022 架构同步支持单双栈绑定
       sudo tee "${SS_CONF}" > /dev/null << EOL
 {
-  "server": ${SERVER_BIND},
+  "server": ["0.0.0.0"${IPV6_BIND}],
   "server_port": ${PORT},
   "method": "${METHOD}",
-  "password": "${KEY_32}",
+  "password": "${MASTER_KEY_B64}",
   "users": [
     {
       "name": "user1",
-      "password": "${KEY_32}"
+      "password": "${SUB_KEY_B64}"
     }
   ]
 }
 EOL
 
-      SURGE_LINK="SS2022_${PORT} = ss, ${SERVER_IP}, ${PORT}, encrypt-method=${METHOD}, password=${KEY_32}, udp-relay=true"
-      SS_URI=$(gen_ss_uri "$METHOD" "$KEY_32" "$SERVER_IP" "$PORT" "SS2022_${PORT}")
+      SURGE_LINK="SS2022_${PORT} = ss, ${SERVER_IP}, ${PORT}, encrypt-method=${METHOD}, password=${SUB_KEY_B64}, udp-relay=true"
+      SS_URI=$(gen_ss_uri "$METHOD" "$SUB_KEY_B64" "$SERVER_IP" "$PORT" "SS2022_${PORT}")
     fi
 
-    # [Systemd 生产级沙箱保持原样不变]
+    # 【Diff 3 落地】Systemd 生产级高强度沙箱配置（拒绝 Root 逃逸，限缩写权限至 Log 目录）
     sudo tee "${SYSTEMD_SERVICE}" > /dev/null << EOL
 [Unit]
 Description=Shadowsocks Declarative Node Service on Port ${PORT}
@@ -921,7 +881,7 @@ EOL
     sudo systemctl enable "ss${PORT}" >/dev/null 2>&1
     sudo systemctl restart "ss${PORT}"
 
-    # 【后置校验】高烈度物理启动检查与诊断输出
+    # 【后置优化：后置校验】高烈度物理启动检查与诊断输出
     if ! systemctl is-active --quiet "ss${PORT}"; then
       echo "❌ ss${PORT} 启动失败（状态未写入）"
       echo "📌 可能原因："
@@ -932,14 +892,13 @@ EOL
       continue
     fi
 
-    # 防脏数据写入中央状态机
+    # 【后置优化：防脏数据】物理服务完全就绪后，才允许向状态机注册
     update_json_port "$PORT" "$PROTO" "$METHOD" "active" "running" || continue
 
     echo "✅ 端口 ${PORT} 已成功上线并注册状态。"
     echo "$SURGE_LINK" >> "$SURGE_FILE"
     echo "$SS_URI"     >> "$SS_URI_FILE"
   done
-
 
   echo ""
   echo ">> 批量新增执行完毕。"
