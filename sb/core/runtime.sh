@@ -8,7 +8,7 @@ source "$BASE_DIR/core/common.sh"
 source "$BASE_DIR/core/state.sh"
 
 # ------------------------------------------------------------------------------
-# 动态生成分享链接（双栈：IPv4 + IPv6 各一条）
+# 动态生成分享链接（仅 IPv4）
 # 用法: generate_dynamic_uri <instance_dir> <uri|surge>
 # ------------------------------------------------------------------------------
 generate_dynamic_uri() {
@@ -18,9 +18,8 @@ generate_dynamic_uri() {
 
     [ -f "$meta_file" ] || return
 
-    local ipv4 ipv6 proto fn output=""
+    local ipv4 proto fn
     ipv4=$(get_ipv4)
-    ipv6=$(get_ipv6)
     proto=$(jq -r '.protocol // empty' "$meta_file")
 
     if [ -z "$proto" ]; then
@@ -43,20 +42,10 @@ generate_dynamic_uri() {
     fi
 
     if [ -n "$ipv4" ]; then
-        output+="$("$fn" "$meta_file" "$ipv4")"$'\n'
+        "$fn" "$meta_file" "$ipv4"
     else
-        warn "未能获取 IPv4 地址，跳过。"
+        warn "未能获取 IPv4 地址。"
     fi
-
-    if [ -n "$ipv6" ]; then
-        local ip_arg="$ipv6"
-        [ "$mode" = "uri" ] && ip_arg="[${ipv6}]"
-        output+="$("$fn" "$meta_file" "$ip_arg")"$'\n'
-    else
-        warn "未能获取 IPv6 地址，跳过。"
-    fi
-
-    printf '%s' "$output"
 }
 
 # ------------------------------------------------------------------------------
