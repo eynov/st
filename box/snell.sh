@@ -102,7 +102,7 @@ build_snell_config() {
 listen = ${listen_ip}
 psk = ${psk}
 version = 6
-dns-ip-preference = auto
+dns-ip-preference = default
 ipv6 = ${ipv6_flag}
 udp-relay = true
 max_conn = ${max_conn}
