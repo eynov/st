@@ -587,9 +587,8 @@ init_json
 if ! command -v file >/dev/null 2>&1 || \
    ! command -v xz >/dev/null 2>&1 || \
    ! command -v qrencode >/dev/null 2>&1 || \
-   ! command -v jq >/dev/null 2>&1 || \
-   ! command -v xxd >/dev/null 2>&1; then
-  sudo apt update -qq >/dev/null 2>&1 && sudo apt install -y file xz-utils qrencode jq xxd >/dev/null 2>&1
+   ! command -v jq >/dev/null 2>&1; then
+  sudo apt update -qq >/dev/null 2>&1 && sudo apt install -y file xz-utils qrencode jq >/dev/null 2>&1
 fi
 
 # ========== 启动前自愈自检 ==========
@@ -604,7 +603,7 @@ fi
 while true; do
   echo ""
   echo "=================================================="
-  echo " Shadowsocks-Rust "
+  echo " Shadowsocks-Rust 管理脚本"
   echo "=================================================="
   echo "1) 批量新增并上线节点"
   echo "2) 安全注销并删除节点"
@@ -633,7 +632,7 @@ while true; do
     upgrade_core || { echo "❌ 初始化运行环境失败"; continue; }
   fi
 
-  # ========== 功能模块：删除节点（完美全净化版） ==========
+    # ========== 功能模块：删除节点（完美全净化版） ==========
   if [ "$MODE" = "2" ]; then
     read -rp "请输入需要安全下线的端口号（空格分隔）: " PORTS
     for PORT in $PORTS; do
@@ -693,7 +692,7 @@ PYEOF
     if [ $? -ne 0 ]; then continue; fi
 
     echo ""
-    read -rp "是否要查看特定节点的详细信息，请输入端口号（直接回车跳过）: " QUERY_PORTS
+    read -rp "🔍 是否要查看特定节点的详细连接信息(密码/URI/二维码)？请输入端口号（直接回车跳过）: " QUERY_PORTS
     if [ -n "$QUERY_PORTS" ]; then
       LOCAL_IP=$(curl --max-time 5 -s -4 ifconfig.me)
       [ -n "$LOCAL_IP" ] || LOCAL_IP="你的VPS_IP"
@@ -832,16 +831,10 @@ EOL
       echo "  3) 2022-blake3-chacha20-poly1305"
       read -rp "算法指引 (1-3, 默认 1): " METHOD_OPT
       case "$METHOD_OPT" in
-        2) METHOD="2022-blake3-aes-256-gcm";      KEY_SIZE=64 ;;
-        3) METHOD="2022-blake3-chacha20-poly1305"; KEY_SIZE=64 ;;
-        *) METHOD="2022-blake3-aes-128-gcm";       KEY_SIZE=32 ;;
+        2) METHOD="2022-blake3-aes-256-gcm";      PASSWORD=$(openssl rand -base64 32 | tr -d '\n') ;;
+        3) METHOD="2022-blake3-chacha20-poly1305"; PASSWORD=$(openssl rand -base64 32 | tr -d '\n') ;;
+        *) METHOD="2022-blake3-aes-128-gcm";       PASSWORD=$(openssl rand -base64 16 | tr -d '\n') ;;
       esac
-
-      MASTER_KEY=$(openssl rand -hex "$KEY_SIZE")
-      SUB_KEY=$(openssl rand -hex "$KEY_SIZE")
-
-      MASTER_KEY_B64=$(echo -n "$MASTER_KEY" | xxd -r -p | base64 -w0)
-      SUB_KEY_B64=$(echo -n "$SUB_KEY"    | xxd -r -p | base64 -w0)
 
       # 【Diff 5 落地】2022 架构同步支持单双栈绑定
       sudo tee "${SS_CONF}" > /dev/null << EOL
@@ -849,18 +842,12 @@ EOL
   "server": ["0.0.0.0"${IPV6_BIND}],
   "server_port": ${PORT},
   "method": "${METHOD}",
-  "password": "${MASTER_KEY_B64}",
-  "users": [
-    {
-      "name": "user1",
-      "password": "${SUB_KEY_B64}"
-    }
-  ]
+  "password": "${PASSWORD}"
 }
 EOL
 
-      SURGE_LINK="SS2022_${PORT} = ss, ${SERVER_IP}, ${PORT}, encrypt-method=${METHOD}, password=${SUB_KEY_B64}, udp-relay=true"
-      SS_URI=$(gen_ss_uri "$METHOD" "$SUB_KEY_B64" "$SERVER_IP" "$PORT" "SS2022_${PORT}")
+      SURGE_LINK="SS2022_${PORT} = ss, ${SERVER_IP}, ${PORT}, encrypt-method=${METHOD}, password=${PASSWORD}, udp-relay=true"
+      SS_URI=$(gen_ss_uri "$METHOD" "$PASSWORD" "$SERVER_IP" "$PORT" "SS2022_${PORT}")
     fi
 
     # 【Diff 3 落地】Systemd 生产级高强度沙箱配置（拒绝 Root 逃逸，限缩写权限至 Log 目录）
