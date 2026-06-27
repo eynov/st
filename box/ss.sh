@@ -633,20 +633,32 @@ while true; do
     upgrade_core || { echo "❌ 初始化运行环境失败"; continue; }
   fi
 
-  # ========== 功能模块：删除节点 ==========
+  # ========== 功能模块：删除节点（完美全净化版） ==========
   if [ "$MODE" = "2" ]; then
     read -rp "请输入需要安全下线的端口号（空格分隔）: " PORTS
     for PORT in $PORTS; do
+      # 1. 物理停止并禁用服务
       sudo systemctl stop "ss${PORT}"    2>/dev/null || true
       sudo systemctl disable "ss${PORT}" 2>/dev/null || true
+      
+      # 2. 清除 systemd 服务底座与残留状态
       sudo rm -f "/etc/systemd/system/ss${PORT}.service"
+      sudo systemctl daemon-reload 2>/dev/null || true
+      sudo systemctl reset-failed "ss${PORT}" 2>/dev/null || true
+      
+      # 3. 清除物理配置文件与日志文件（彻底净化）
       sudo rm -f "${SS_DIR}/config${PORT}.json"
+      sudo rm -f "/var/log/shadowsocks/ss${PORT}.log"
+      
+      # 4. 注销中央状态机中的元数据
       delete_json_port "$PORT" || true
-      echo "🗑 端口 ${PORT} 已彻底执行下线隔离并注销。"
+      
+      echo "🗑 端口 ${PORT} 的服务、配置、日志及状态机记录已彻底净化删除。"
     done
     sudo systemctl daemon-reload
     continue
   fi
+
 
   # ========== 功能模块：状态盘点 + 端口详情查询 ==========
   if [ "$MODE" = "3" ]; then
