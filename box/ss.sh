@@ -541,8 +541,9 @@ init_json
 # ========== 启动前依赖补全 ==========
 if ! command -v file >/dev/null 2>&1 || \
    ! command -v xz >/dev/null 2>&1 || \
-   ! command -v qrencode >/dev/null 2>&1; then
-  sudo apt update -qq >/dev/null 2>&1 && sudo apt install -y file xz-utils qrencode >/dev/null 2>&1
+   ! command -v qrencode >/dev/null 2>&1 || \
+   ! command -v xxd >/dev/null 2>&1; then
+  sudo apt update -qq >/dev/null 2>&1 && sudo apt install -y file xz-utils qrencode xxd >/dev/null 2>&1
 fi
 
 # ========== 启动前自愈自检 ==========
@@ -588,8 +589,9 @@ fi
 if ! dpkg -l qrencode file xz-utils >/dev/null 2>&1 || \
    ! command -v qrencode >/dev/null 2>&1 || \
    ! command -v file >/dev/null 2>&1 || \
-   ! command -v xz >/dev/null 2>&1; then
-  sudo apt update -qq && sudo apt install -y qrencode file xz-utils >/dev/null 2>&1
+   ! command -v xz >/dev/null 2>&1 || \
+   ! command -v xxd >/dev/null 2>&1; then
+  sudo apt update -qq && sudo apt install -y qrencode file xz-utils xxd >/dev/null 2>&1
 fi
 
 # ========== 功能模块：删除节点 ==========
