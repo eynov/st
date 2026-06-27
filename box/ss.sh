@@ -603,7 +603,7 @@ fi
 while true; do
   echo ""
   echo "=================================================="
-  echo " Shadowsocks-Rust 管理脚本"
+  echo " Shadowsocks-Rust "
   echo "=================================================="
   echo "1) 批量新增并上线节点"
   echo "2) 安全注销并删除节点"
@@ -692,7 +692,7 @@ PYEOF
     if [ $? -ne 0 ]; then continue; fi
 
     echo ""
-    read -rp "🔍 是否要查看特定节点的详细连接信息(密码/URI/二维码)？请输入端口号（直接回车跳过）: " QUERY_PORTS
+    read -rp "是否要查看特定节点的详细信息，请输入端口号（直接回车跳过）: " QUERY_PORTS
     if [ -n "$QUERY_PORTS" ]; then
       LOCAL_IP=$(curl --max-time 5 -s -4 ifconfig.me)
       [ -n "$LOCAL_IP" ] || LOCAL_IP="你的VPS_IP"
