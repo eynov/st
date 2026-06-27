@@ -755,16 +755,6 @@ EOL
     echo "✅ 端口 ${PORT} 已成功上线。"
     echo "$SURGE_LINK" >> "$SURGE_FILE"
     echo "$SS_URI"     >> "$SS_URI_FILE"
-
-    qrencode -o "${QR_DIR}/${PORT}_surge.png" -t PNG "$SURGE_LINK"
-    qrencode -o "${QR_DIR}/${PORT}_ssuri.png" -t PNG "$SS_URI"
-
-    echo ""
-    echo "📱 端口 ${PORT} | Surge 二维码："
-    qrencode -t UTF8 "$SURGE_LINK"
-    echo ""
-    echo "📱 端口 ${PORT} | ss:// URI 二维码："
-    qrencode -t UTF8 "$SS_URI"
   done
 
   echo ""
@@ -777,7 +767,16 @@ EOL
   echo " 标准 ss:// URI："
   echo "--------------------------------------------------"
   grep -v '^#' "$SS_URI_FILE" | grep -v '^$'
+  echo ""
+  echo " 二维码："
+  echo "--------------------------------------------------"
+  while IFS= read -r uri; do
+    [ -z "$uri" ] && continue
+    tag=$(echo "$uri" | grep -oP '(?<=#).+$' || echo "$uri")
+    echo "📱 ${tag}"
+    qrencode -t UTF8 "$uri"
+    echo ""
+  done < <(grep -v '^#' "$SS_URI_FILE" | grep -v '^$')
   echo "=================================================="
-  echo "   二维码目录 → $QR_DIR"
 
 done
