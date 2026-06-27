@@ -752,7 +752,7 @@ PYEOF
     continue
   fi
 
-  # ========== 功能模块：批量新增节点 ==========
+    # ========== 功能模块：批量新增节点 ==========
   read -rp "请输入中转域名/落地IP（留空则自动抓取本地公网 IP）: " SERVER_DOMAIN
   SERVER_IP=${SERVER_DOMAIN:-$(curl --max-time 10 -s -4 ifconfig.me)}
   echo ">> 当前入站目标寻址地址: $SERVER_IP"
@@ -774,7 +774,7 @@ PYEOF
       continue
     fi
 
-    # 【后置优化：前置阻断】物理网络端口冲突精确校验
+    # 【前置阻断】物理网络端口冲突精确校验
     if sudo ss -lntup 2>/dev/null | grep -q ":${PORT} "; then
       echo "❌ 端口 ${PORT} 已被占用（ss/进程冲突），跳过"
       continue
@@ -782,6 +782,18 @@ PYEOF
 
     SS_CONF="${SS_DIR}/config${PORT}.json"
     SYSTEMD_SERVICE="/etc/systemd/system/ss${PORT}.service"
+
+    # 【Diff 落地】IPv4 / IPv6 双栈动态计算绑定
+    HAS_IPV6=0
+    if ip -6 addr show scope global 2>/dev/null | grep -q inet6; then
+      HAS_IPV6=1
+    fi
+
+    if [ "$HAS_IPV6" -eq 1 ]; then
+      SERVER_BIND='["0.0.0.0", "::"]'
+    else
+      SERVER_BIND='"0.0.0.0"'
+    fi
 
     if [ "$PROTO" = "ss" ]; then
       echo "请指定传统端口 ${PORT} 的流控加密方式："
@@ -796,12 +808,13 @@ PYEOF
         3) METHOD="aes-256-gcm" ;;
         *) METHOD="chacha20-ietf-poly1305" ;;
       esac
+      
+      # SS Legacy 保持独立逻辑：使用 16 字节 hex
       PASSWORD=$(openssl rand -hex 16)
 
-      # 【Diff 5 落地】IPv6 / IPv4 物理网卡双栈动态绑定绑定
       sudo tee "${SS_CONF}" > /dev/null << EOL
 {
-  "server": ["0.0.0.0"${IPV6_BIND}],
+  "server": ${SERVER_BIND},
   "server_port": ${PORT},
   "password": "${PASSWORD}",
   "method": "${METHOD}",
@@ -820,38 +833,34 @@ EOL
       echo "  3) 2022-blake3-chacha20-poly1305"
       read -rp "算法指引 (1-3, 默认 1): " METHOD_OPT
       case "$METHOD_OPT" in
-        2) METHOD="2022-blake3-aes-256-gcm";      KEY_SIZE=64 ;;
-        3) METHOD="2022-blake3-chacha20-poly1305"; KEY_SIZE=64 ;;
-        *) METHOD="2022-blake3-aes-128-gcm";       KEY_SIZE=32 ;;
+        2) METHOD="2022-blake3-aes-256-gcm" ;;
+        3) METHOD="2022-blake3-chacha20-poly1305" ;;
+        *) METHOD="2022-blake3-aes-128-gcm" ;;
       esac
 
-      MASTER_KEY=$(openssl rand -hex "$KEY_SIZE")
-      SUB_KEY=$(openssl rand -hex "$KEY_SIZE")
+      # 【Diff 落地】SS2022 独立强随机 Key 逻辑：截取 32 字节并进行标准 Base64 编码
+      KEY_32=$(head -c 32 /dev/urandom | base64 | tr -d '\n')
 
-      MASTER_KEY_B64=$(echo -n "$MASTER_KEY" | xxd -r -p | base64 -w0)
-      SUB_KEY_B64=$(echo -n "$SUB_KEY"    | xxd -r -p | base64 -w0)
-
-      # 【Diff 5 落地】2022 架构同步支持单双栈绑定
       sudo tee "${SS_CONF}" > /dev/null << EOL
 {
-  "server": ["0.0.0.0"${IPV6_BIND}],
+  "server": ${SERVER_BIND},
   "server_port": ${PORT},
   "method": "${METHOD}",
-  "password": "${MASTER_KEY_B64}",
+  "password": "${KEY_32}",
   "users": [
     {
       "name": "user1",
-      "password": "${SUB_KEY_B64}"
+      "password": "${KEY_32}"
     }
   ]
 }
 EOL
 
-      SURGE_LINK="SS2022_${PORT} = ss, ${SERVER_IP}, ${PORT}, encrypt-method=${METHOD}, password=${SUB_KEY_B64}, udp-relay=true"
-      SS_URI=$(gen_ss_uri "$METHOD" "$SUB_KEY_B64" "$SERVER_IP" "$PORT" "SS2022_${PORT}")
+      SURGE_LINK="SS2022_${PORT} = ss, ${SERVER_IP}, ${PORT}, encrypt-method=${METHOD}, password=${KEY_32}, udp-relay=true"
+      SS_URI=$(gen_ss_uri "$METHOD" "$KEY_32" "$SERVER_IP" "$PORT" "SS2022_${PORT}")
     fi
 
-    # 【Diff 3 落地】Systemd 生产级高强度沙箱配置（拒绝 Root 逃逸，限缩写权限至 Log 目录）
+    # [Systemd 生产级沙箱保持原样不变]
     sudo tee "${SYSTEMD_SERVICE}" > /dev/null << EOL
 [Unit]
 Description=Shadowsocks Declarative Node Service on Port ${PORT}
@@ -881,7 +890,7 @@ EOL
     sudo systemctl enable "ss${PORT}" >/dev/null 2>&1
     sudo systemctl restart "ss${PORT}"
 
-    # 【后置优化：后置校验】高烈度物理启动检查与诊断输出
+    # 【后置校验】高烈度物理启动检查与诊断输出
     if ! systemctl is-active --quiet "ss${PORT}"; then
       echo "❌ ss${PORT} 启动失败（状态未写入）"
       echo "📌 可能原因："
@@ -892,13 +901,14 @@ EOL
       continue
     fi
 
-    # 【后置优化：防脏数据】物理服务完全就绪后，才允许向状态机注册
+    # 防脏数据写入中央状态机
     update_json_port "$PORT" "$PROTO" "$METHOD" "active" "running" || continue
 
     echo "✅ 端口 ${PORT} 已成功上线并注册状态。"
     echo "$SURGE_LINK" >> "$SURGE_FILE"
     echo "$SS_URI"     >> "$SS_URI_FILE"
   done
+
 
   echo ""
   echo ">> 批量新增执行完毕。"
