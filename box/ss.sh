@@ -758,6 +758,13 @@ EOL
 
     qrencode -o "${QR_DIR}/${PORT}_surge.png" -t PNG "$SURGE_LINK"
     qrencode -o "${QR_DIR}/${PORT}_ssuri.png" -t PNG "$SS_URI"
+
+    echo ""
+    echo "📱 端口 ${PORT} | Surge 二维码："
+    qrencode -t UTF8 "$SURGE_LINK"
+    echo ""
+    echo "📱 端口 ${PORT} | ss:// URI 二维码："
+    qrencode -t UTF8 "$SS_URI"
   done
 
   echo ""
