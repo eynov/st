@@ -590,69 +590,98 @@ while true; do
     echo "--------------------------------------------------"
 
     INSTANCES_JSON="$INSTANCES_JSON" python3 - << 'PYEOF'
-import json, subprocess, os
+import json, subprocess, os, sys
 path = os.environ['INSTANCES_JSON']
 try:
     d = json.load(open(path))
-    ports = d.get('ports', {})
+    ports = sorted(list(d.get('ports', {}).keys()), key=lambda x: int(x) if x.isdigit() else 0)
     if not ports:
-        print("  ℹ️  当前无任何托管节点。")
-    for port, info in ports.items():
+        print("  ℹ️  中央状态机中暂无已注册的节点。")
+    for port in ports:
+        info = d['ports'][port]
         res = subprocess.run(['systemctl', 'is-active', f'ss{port}'],
                              capture_output=True, text=True)
-        real_sub = 'running ✅' if res.returncode == 0 else 'stopped ❌'
+        real_sub = 'running' if res.returncode == 0 else 'stopped'
         print(f"端口: {port} | 协议: {info.get('protocol')} | 算法: {info.get('method')}")
-        print(f"预期状态: {info.get('state')} | 物理状态: {real_sub} | 更新: {info.get('updated_at','')}")
+        print(f"预期状态(State): {info.get('state')} | 物理状态(Sub-state): {real_sub}")
         print('-' * 50)
 except Exception as e:
-    print(f'❌ JSON 损坏: {e}')
+    print(f'❌ JSON 损坏: {e}', file=sys.stderr)
+    sys.exit(1)
 PYEOF
 
+    if [ $? -ne 0 ]; then continue; fi
+
     echo ""
-    read -rp "输入端口号查看详细信息（留空跳过）: " DETAIL_PORT
-    if [ -n "$DETAIL_PORT" ]; then
-      echo ""
-      echo "========== 端口 ${DETAIL_PORT} 详细信息 =========="
+    read -rp "🔍 是否要查看特定节点的详细连接信息(密码/URI/二维码)？请输入端口号（直接回车跳过）: " QUERY_PORTS
+    if [ -n "$QUERY_PORTS" ]; then
+      LOCAL_IP=$(curl --max-time 5 -s -4 ifconfig.me)
+      [ -n "$LOCAL_IP" ] || LOCAL_IP="你的VPS_IP"
 
-      # systemctl status
-      echo "--- systemd 服务状态 ---"
-      sudo systemctl status "ss${DETAIL_PORT}" --no-pager -l 2>/dev/null || \
-        echo "  ⚠️  服务 ss${DETAIL_PORT} 不存在或未托管"
+      for Q_PORT in $QUERY_PORTS; do
+        echo ""
+        echo "==================== [ 端口 $Q_PORT 详情 ] ===================="
+        CONF_PATH="${SS_DIR}/config${Q_PORT}.json"
 
-      # 配置文件
-      echo ""
-      echo "--- 配置文件内容 ---"
-      CONF_PATH="${SS_DIR}/config${DETAIL_PORT}.json"
-      if [ -f "$CONF_PATH" ]; then
-        cat "$CONF_PATH"
-      else
-        echo "  ⚠️  配置文件不存在: ${CONF_PATH}"
-      fi
+        if [ ! -f "$CONF_PATH" ]; then
+          CONF_PATH=$(INSTANCES_JSON="$INSTANCES_JSON" python3 -c \
+            "import json,os; d=json.load(open(os.environ['INSTANCES_JSON'])); print(d['ports'].get('${Q_PORT}', {}).get('conf_path', ''))" 2>/dev/null)
+        fi
 
-      # 最新日志
-      echo ""
-      echo "--- 最新日志（最后 30 行）---"
-      LOG_PATH="${LOG_DIR}/ss${DETAIL_PORT}.log"
-      if [ -f "$LOG_PATH" ]; then
-        tail -n 30 "$LOG_PATH"
-      else
-        echo "  ℹ️  日志文件不存在: ${LOG_PATH}"
-      fi
+        if [ -z "$CONF_PATH" ] || [ ! -f "$CONF_PATH" ]; then
+          echo "❌ 找不到端口 ${Q_PORT} 的配置文件，请确认端口是否正确或节点是否已删除。"
+          continue
+        fi
 
-      # Surge / URI
-      echo ""
-      echo "--- 节点连接信息 ---"
-      if [ -f "$SURGE_FILE" ]; then
-        grep "^SS.*_${DETAIL_PORT} " "$SURGE_FILE" 2>/dev/null || \
-        grep "${DETAIL_PORT}" "$SURGE_FILE" 2>/dev/null || \
-          echo "  ℹ️  Surge 文件中未找到端口 ${DETAIL_PORT} 记录"
-      fi
-      if [ -f "${SS_DIR}/ss_uris.txt" ]; then
-        grep "@.*:${DETAIL_PORT}#" "${SS_DIR}/ss_uris.txt" 2>/dev/null || \
-          echo "  ℹ️  URI 文件中未找到端口 ${DETAIL_PORT} 记录"
-      fi
+        CONF_PATH="$CONF_PATH" LOCAL_IP="$LOCAL_IP" Q_PORT="$Q_PORT" \
+        INSTANCES_JSON="$INSTANCES_JSON" python3 - << 'PYEOF'
+import json, os, subprocess, sys
 
-      echo "=================================================="
+conf_path = os.environ['CONF_PATH']
+ip        = os.environ['LOCAL_IP']
+port      = os.environ['Q_PORT']
+
+try:
+    with open(conf_path) as f:
+        c = json.load(f)
+except Exception as e:
+    print(f"❌ 配置文件解析失败: {e}", file=sys.stderr)
+    sys.exit(1)
+
+method = c.get('method', 'unknown')
+users  = c.get('users', [])
+is_ss2022 = len(users) > 0 or '2022' in method
+
+if is_ss2022:
+    password = users[0].get('password', c.get('password', '')) if users else c.get('password', '')
+    tag = f"SS2022_{port}"
+else:
+    password = c.get('password', '')
+    tag = f"SS_{port}"
+
+try:
+    import base64
+    userinfo = base64.b64encode(f"{method}:{password}".encode('utf-8')).decode('utf-8')
+    ss_uri = f"ss://{userinfo}@{ip}:{port}#{tag}"
+    surge_line = f"{tag} = ss, {ip}, {port}, encrypt-method={method}, password={password}, udp-relay=true"
+
+    print(f"🔹 协议族类型: {'Shadowsocks 2022' if is_ss2022 else 'Shadowsocks Legacy'}")
+    print(f"🔹 加密算法  : {method}")
+    print(f"🔹 密钥/密码 : {password}")
+    print(f"\n📋 Surge 代理配置行:")
+    print(f"--------------------------------------------------\n{surge_line}\n--------------------------------------------------")
+    print(f"\n🔗 标准 ss:// URI:")
+    print(f"--------------------------------------------------\n{ss_uri}\n--------------------------------------------------")
+    print(f"\n📱 客户端节点二维码:")
+    print(f"--------------------------------------------------")
+    subprocess.run(['qrencode', '-t', 'UTF8', ss_uri])
+    print(f"--------------------------------------------------")
+except Exception as e:
+    print(f"❌ 数据串转换异常: {e}", file=sys.stderr)
+    sys.exit(1)
+PYEOF
+        if [ $? -ne 0 ]; then echo "⚠️ 该端口详情加载失败。"; fi
+      done
     fi
     continue
   fi
