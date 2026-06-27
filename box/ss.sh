@@ -515,89 +515,153 @@ if [ -f "$SS_EXEC" ]; then
   }
 fi
 
-# ========== 交互式主菜单 ==========
-echo "=================================================="
-echo " Shadowsocks-Rust "
-echo "=================================================="
-echo "1) 批量新增并上线节点"
-echo "2) 安全注销并删除节点"
-echo "3) 全量查看活跃节点与 Core 状态"
-echo "4) 检查执行内核升级 (Upgrade)"
-echo "5) 一键崩溃灾备回滚 (Rollback)"
-echo "6) 扫描并接管现有节点 (Import)"
-echo "0) 安全退出"
-echo "=================================================="
-read -rp "请输入操作代码 [0-6]: " MODE
-
-case $MODE in
-  4) upgrade_core; exit 0 ;;
-  5) rollback_core; exit 0 ;;
-  6) import_existing; exit 0 ;;
-  2) DELETE_MODE=1 ;;
-  3) LIST_MODE=1 ;;
-  0) exit 0 ;;
-  *) ;;
-esac
-
-# ========== 动态依赖补全 ==========
-if [ ! -f "$SS_EXEC" ]; then
-  echo ">> 系统未发现运行内核，正在触发首次环境构建..."
-  upgrade_core || { echo "❌ 初始化运行环境失败"; exit 1; }
-fi
-
-if ! dpkg -l qrencode file xz-utils >/dev/null 2>&1 || \
-   ! command -v qrencode >/dev/null 2>&1 || \
-   ! command -v file >/dev/null 2>&1 || \
-   ! command -v xz >/dev/null 2>&1; then
-  sudo apt update -qq && sudo apt install -y qrencode file xz-utils >/dev/null 2>&1
-fi
-
-# ========== 功能模块：删除节点 ==========
-if [ "$MODE" = "2" ]; then
-  read -rp "请输入需要安全下线的端口号（空格分隔）: " PORTS
-  for PORT in $PORTS; do
-    sudo systemctl stop "ss${PORT}"    2>/dev/null || true
-    sudo systemctl disable "ss${PORT}" 2>/dev/null || true
-    sudo rm -f "/etc/systemd/system/ss${PORT}.service"
-    sudo systemctl daemon-reload 2>/dev/null || true
-    sudo systemctl reset-failed "ss${PORT}" 2>/dev/null || true
-    sudo rm -f "${SS_DIR}/config${PORT}.json"
-    sudo rm -f "/var/log/shadowsocks/ss${PORT}.log"
-    delete_json_port "$PORT" || true
-    echo "🗑 端口 ${PORT} 的服务、配置、日志及状态机记录已彻底净化删除。"
-  done
-  sudo systemctl daemon-reload
-  exit 0
-fi
-
-# ========== 功能模块：状态盘点 ==========
-if [ "$LIST_MODE" = "1" ]; then
+# ========== 交互式主菜单（循环，不自动退出） ==========
+while true; do
+  echo ""
   echo "=================================================="
-  CURRENT_VER=$(INSTANCES_JSON="$INSTANCES_JSON" python3 -c \
-    "import json,os; print(json.load(open(os.environ['INSTANCES_JSON']))['core']['current_version'])" 2>/dev/null)
-  echo "  Core 状态  | 运行内核: ${CURRENT_VER}"
+  echo " Shadowsocks-Rust "
   echo "=================================================="
-  echo " 实例清单 (State Matrix) ："
-  echo "--------------------------------------------------"
+  echo "1) 批量新增并上线节点"
+  echo "2) 安全注销并删除节点"
+  echo "3) 查看节点状态"
+  echo "4) 检查执行内核升级 (Upgrade)"
+  echo "5) 一键崩溃灾备回滚 (Rollback)"
+  echo "6) 扫描并接管现有节点 (Import)"
+  echo "0) 退出"
+  echo "=================================================="
+  read -rp "请输入操作代码 [0-6]: " MODE
 
-  INSTANCES_JSON="$INSTANCES_JSON" python3 - << 'PYEOF'
+  # -------- 选项 4/5/6 直接执行后回到菜单 --------
+  if [ "$MODE" = "4" ]; then
+    upgrade_core
+    continue
+  fi
+  if [ "$MODE" = "5" ]; then
+    rollback_core
+    continue
+  fi
+  if [ "$MODE" = "6" ]; then
+    import_existing
+    continue
+  fi
+  if [ "$MODE" = "0" ]; then
+    echo ">> 已安全退出。"
+    exit 0
+  fi
+
+  # -------- 动态依赖补全（仅在需要时触发） --------
+  if [ ! -f "$SS_EXEC" ]; then
+    echo ">> 系统未发现运行内核，正在触发首次环境构建..."
+    upgrade_core || { echo "❌ 初始化运行环境失败"; continue; }
+  fi
+
+  if ! command -v qrencode >/dev/null 2>&1 || \
+     ! command -v file >/dev/null 2>&1 || \
+     ! command -v xz >/dev/null 2>&1; then
+    sudo apt update -qq && sudo apt install -y qrencode file xz-utils >/dev/null 2>&1
+  fi
+
+  # -------- 选项 2：删除节点 --------
+  if [ "$MODE" = "2" ]; then
+    read -rp "请输入需要安全下线的端口号（空格分隔）: " PORTS
+    for PORT in $PORTS; do
+      sudo systemctl stop "ss${PORT}"    2>/dev/null || true
+      sudo systemctl disable "ss${PORT}" 2>/dev/null || true
+      sudo rm -f "/etc/systemd/system/ss${PORT}.service"
+      sudo systemctl daemon-reload 2>/dev/null || true
+      sudo systemctl reset-failed "ss${PORT}" 2>/dev/null || true
+      sudo rm -f "${SS_DIR}/config${PORT}.json"
+      sudo rm -f "/var/log/shadowsocks/ss${PORT}.log"
+      delete_json_port "$PORT" || true
+      echo "🗑 端口 ${PORT} 的服务、配置、日志及状态机记录已彻底净化删除。"
+    done
+    sudo systemctl daemon-reload
+    continue
+  fi
+
+  # -------- 选项 3：状态盘点 + 端口详情 --------
+  if [ "$MODE" = "3" ]; then
+    echo "=================================================="
+    CURRENT_VER=$(INSTANCES_JSON="$INSTANCES_JSON" python3 -c \
+      "import json,os; print(json.load(open(os.environ['INSTANCES_JSON']))['core']['current_version'])" 2>/dev/null)
+    echo "  Core 状态  | 运行内核: ${CURRENT_VER}"
+    echo "=================================================="
+    echo " 实例清单 (State Matrix) ："
+    echo "--------------------------------------------------"
+
+    INSTANCES_JSON="$INSTANCES_JSON" python3 - << 'PYEOF'
 import json, subprocess, os
 path = os.environ['INSTANCES_JSON']
 try:
     d = json.load(open(path))
-    for port, info in d.get('ports', {}).items():
+    ports = d.get('ports', {})
+    if not ports:
+        print("  ℹ️  当前无任何托管节点。")
+    for port, info in ports.items():
         res = subprocess.run(['systemctl', 'is-active', f'ss{port}'],
                              capture_output=True, text=True)
-        real_sub = 'running' if res.returncode == 0 else 'stopped'
+        real_sub = 'running ✅' if res.returncode == 0 else 'stopped ❌'
         print(f"端口: {port} | 协议: {info.get('protocol')} | 算法: {info.get('method')}")
-        print(f"预期状态(State): {info.get('state')} | 物理状态(Sub-state): {real_sub}")
+        print(f"预期状态: {info.get('state')} | 物理状态: {real_sub} | 更新: {info.get('updated_at','')}")
         print('-' * 50)
 except Exception as e:
     print(f'❌ JSON 损坏: {e}')
-    exit(1)
 PYEOF
-  exit 0
-fi
+
+    echo ""
+    read -rp "输入端口号查看详细信息（留空跳过）: " DETAIL_PORT
+    if [ -n "$DETAIL_PORT" ]; then
+      echo ""
+      echo "========== 端口 ${DETAIL_PORT} 详细信息 =========="
+
+      # systemctl status
+      echo "--- systemd 服务状态 ---"
+      sudo systemctl status "ss${DETAIL_PORT}" --no-pager -l 2>/dev/null || \
+        echo "  ⚠️  服务 ss${DETAIL_PORT} 不存在或未托管"
+
+      # 配置文件
+      echo ""
+      echo "--- 配置文件内容 ---"
+      CONF_PATH="${SS_DIR}/config${DETAIL_PORT}.json"
+      if [ -f "$CONF_PATH" ]; then
+        cat "$CONF_PATH"
+      else
+        echo "  ⚠️  配置文件不存在: ${CONF_PATH}"
+      fi
+
+      # 最新日志
+      echo ""
+      echo "--- 最新日志（最后 30 行）---"
+      LOG_PATH="${LOG_DIR}/ss${DETAIL_PORT}.log"
+      if [ -f "$LOG_PATH" ]; then
+        tail -n 30 "$LOG_PATH"
+      else
+        echo "  ℹ️  日志文件不存在: ${LOG_PATH}"
+      fi
+
+      # Surge / URI
+      echo ""
+      echo "--- 节点连接信息 ---"
+      if [ -f "$SURGE_FILE" ]; then
+        grep "^SS.*_${DETAIL_PORT} " "$SURGE_FILE" 2>/dev/null || \
+        grep "${DETAIL_PORT}" "$SURGE_FILE" 2>/dev/null || \
+          echo "  ℹ️  Surge 文件中未找到端口 ${DETAIL_PORT} 记录"
+      fi
+      if [ -f "${SS_DIR}/ss_uris.txt" ]; then
+        grep "@.*:${DETAIL_PORT}#" "${SS_DIR}/ss_uris.txt" 2>/dev/null || \
+          echo "  ℹ️  URI 文件中未找到端口 ${DETAIL_PORT} 记录"
+      fi
+
+      echo "=================================================="
+    fi
+    continue
+  fi
+
+  # -------- 选项 1：批量新增节点 --------
+  if [ "$MODE" != "1" ]; then
+    echo ">> 无效选项，请重新输入。"
+    continue
+  fi
 
 # ========== 功能模块：批量新增节点 ==========
 read -rp "请输入中转域名/落地IP（留空则自动抓取本地公网 IP）: " SERVER_DOMAIN
@@ -667,9 +731,9 @@ EOL
     echo "  3) 2022-blake3-chacha20-poly1305"
     read -rp "算法指引 (1-3, 默认 1): " METHOD_OPT
     case "$METHOD_OPT" in
-      2) METHOD="2022-blake3-aes-256-gcm";       KEY_SIZE=64 ;;
-      3) METHOD="2022-blake3-chacha20-poly1305";  KEY_SIZE=64 ;;
-      *) METHOD="2022-blake3-aes-128-gcm";        KEY_SIZE=32 ;;
+      2) METHOD="2022-blake3-aes-256-gcm";       KEY_SIZE=32 ;;
+      3) METHOD="2022-blake3-chacha20-poly1305";  KEY_SIZE=32 ;;
+      *) METHOD="2022-blake3-aes-128-gcm";        KEY_SIZE=16 ;;
     esac
 
     MASTER_KEY=$(openssl rand -hex "$KEY_SIZE")
@@ -732,3 +796,5 @@ echo ">> 批量新增执行完毕。"
 echo "   Surge 代理行  → $SURGE_FILE"
 echo "   标准 ss:// URI → $SS_URI_FILE"
 echo "   二维码目录     → $QR_DIR"
+
+done  # end while true
