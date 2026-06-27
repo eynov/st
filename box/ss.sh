@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # ========================================================
-#  Shadowsocks-Rust 
+#  Shadowsocks-Rust 声明式安全增强与健壮性重构版
 # ========================================================
 
 # ========== 全局变量与目录配置 ==========
@@ -583,7 +583,7 @@ PYEOF
 # ========== 初始化动作 ==========
 init_json
 
-# ========== 【Diff 4 变更】合并依赖补全与安装工具自动化 ==========
+# ========== 合并依赖补全与安装工具自动化 ==========
 if ! command -v file >/dev/null 2>&1 || \
    ! command -v xz >/dev/null 2>&1 || \
    ! command -v qrencode >/dev/null 2>&1 || \
@@ -681,7 +681,7 @@ PYEOF
     if [ $? -ne 0 ]; then continue; fi
 
     echo ""
-    read -rp "🔍 是否要查看特定节点的详细信息，请输入端口号（直接回车跳过）: " QUERY_PORTS
+    read -rp "🔍 是否要查看特定节点的详细连接信息(密码/URI/二维码)？请输入端口号（直接回车跳过）: " QUERY_PORTS
     if [ -n "$QUERY_PORTS" ]; then
       LOCAL_IP=$(curl --max-time 5 -s -4 ifconfig.me)
       [ -n "$LOCAL_IP" ] || LOCAL_IP="你的VPS_IP"
@@ -774,6 +774,12 @@ PYEOF
       continue
     fi
 
+    # 【后置优化：前置阻断】物理网络端口冲突精确校验
+    if sudo ss -lntup 2>/dev/null | grep -q ":${PORT} "; then
+      echo "❌ 端口 ${PORT} 已被占用（ss/进程冲突），跳过"
+      continue
+    fi
+
     SS_CONF="${SS_DIR}/config${PORT}.json"
     SYSTEMD_SERVICE="/etc/systemd/system/ss${PORT}.service"
 
@@ -792,7 +798,7 @@ PYEOF
       esac
       PASSWORD=$(openssl rand -hex 16)
 
-      # 【Diff 5 落地】利用自愈表达式完美渲染安全的 IPv6 / IPv4 多重单双栈混联绑定
+      # 【Diff 5 落地】IPv6 / IPv4 物理网卡双栈动态绑定绑定
       sudo tee "${SS_CONF}" > /dev/null << EOL
 {
   "server": ["0.0.0.0"${IPV6_BIND}],
@@ -845,7 +851,7 @@ EOL
       SS_URI=$(gen_ss_uri "$METHOD" "$SUB_KEY_B64" "$SERVER_IP" "$PORT" "SS2022_${PORT}")
     fi
 
-    # 【Diff 3 落地】Systemd 生产级高强度沙箱配置（拒绝 Root 逃逸，限缩写权限至指定 Log 目录）
+    # 【Diff 3 落地】Systemd 生产级高强度沙箱配置（拒绝 Root 逃逸，限缩写权限至 Log 目录）
     sudo tee "${SYSTEMD_SERVICE}" > /dev/null << EOL
 [Unit]
 Description=Shadowsocks Declarative Node Service on Port ${PORT}
@@ -875,9 +881,21 @@ EOL
     sudo systemctl enable "ss${PORT}" >/dev/null 2>&1
     sudo systemctl restart "ss${PORT}"
 
+    # 【后置优化：后置校验】高烈度物理启动检查与诊断输出
+    if ! systemctl is-active --quiet "ss${PORT}"; then
+      echo "❌ ss${PORT} 启动失败（状态未写入）"
+      echo "📌 可能原因："
+      echo "   - 端口意外被抢占"
+      echo "   - ss-server 启动内部错误"
+      echo "   - systemd service 安全沙箱权限冲突"
+      echo "📌 建议查看日志：journalctl -u ss${PORT} -n 50"
+      continue
+    fi
+
+    # 【后置优化：防脏数据】物理服务完全就绪后，才允许向状态机注册
     update_json_port "$PORT" "$PROTO" "$METHOD" "active" "running" || continue
 
-    echo "✅ 端口 ${PORT} 已成功上线。"
+    echo "✅ 端口 ${PORT} 已成功上线并注册状态。"
     echo "$SURGE_LINK" >> "$SURGE_FILE"
     echo "$SS_URI"     >> "$SS_URI_FILE"
   done
@@ -887,11 +905,11 @@ EOL
   echo "=================================================="
   echo " Surge 代理行："
   echo "--------------------------------------------------"
-  grep -v '^#' "$SURGE_FILE" | grep -v '^$'
+  grep -v '^#' "$SURGE_FILE" | grep -v '^$' 2>/dev/null
   echo ""
   echo " 标准 ss:// URI："
   echo "--------------------------------------------------"
-  grep -v '^#' "$SS_URI_FILE" | grep -v '^$'
+  grep -v '^#' "$SS_URI_FILE" | grep -v '^$' 2>/dev/null
   echo ""
   echo " 二维码："
   echo "--------------------------------------------------"
@@ -901,7 +919,7 @@ EOL
     echo "📱 ${tag}"
     qrencode -t UTF8 "$uri"
     echo ""
-  done < <(grep -v '^#' "$SS_URI_FILE" | grep -v '^$')
+  done < <(grep -v '^#' "$SS_URI_FILE" | grep -v '^$' 2>/dev/null)
   echo "=================================================="
 
 done
