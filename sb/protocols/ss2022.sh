@@ -76,5 +76,5 @@ surge_ss2022() {
     method=$(jq -r '.method' "$meta_file")
     password=$(jq -r '.password' "$meta_file")
 
-    echo "🟢 SS2022_${port} = ss, ${current_ip}, ${port}, encrypt-method=${method}, password=${password}"
+    echo "🟢 SS2022_${port} = ss, ${current_ip}, ${port}, encrypt-method=${method}, password=${password}, udp-relay=true"
 }
