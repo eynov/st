@@ -1,621 +1,782 @@
 #!/bin/bash
 
-set -e
+# ========================================================
+#  Shadowsocks-Rust 
+# ========================================================
 
-SNELL_DIR="/etc/snell"
-SNELL_EXEC="/usr/local/bin/snell-server"
+# ========== 全局变量与目录配置 ==========
+SS_DIR="/etc/shadowsocks"
+SS_EXEC="/usr/local/bin/ss-server"
+SS_BACKUP="/usr/local/bin/ss-server.bak"
+INSTANCES_JSON="${SS_DIR}/instances.json"
+SURGE_FILE="${SS_DIR}/surge_nodes.conf"
+QR_DIR="${SS_DIR}/qrcodes"
+LOCK_FILE="/tmp/ss.lock"
+LOG_DIR="/var/log/shadowsocks"
 
-# ======================================
-# 核心初始化与环境自愈
-# ======================================
-
-if [[ $EUID -ne 0 ]]; then
-    echo "请使用 root 用户运行此脚本"
-    exit 1
-fi
-
-MISSING_PKGS=()
-command -v wget    >/dev/null 2>&1 || MISSING_PKGS+=("wget")
-command -v python3 >/dev/null 2>&1 || MISSING_PKGS+=("python3")
-command -v openssl >/dev/null 2>&1 || MISSING_PKGS+=("openssl")
-command -v unzip   >/dev/null 2>&1 || MISSING_PKGS+=("unzip")
-command -v curl    >/dev/null 2>&1 || MISSING_PKGS+=("curl")
-command -v ip      >/dev/null 2>&1 || MISSING_PKGS+=("iproute2")
-
-if [ ${#MISSING_PKGS[@]} -gt 0 ]; then
-    echo ">> 检测到系统缺失必要依赖，正在自动安装更新: ${MISSING_PKGS[*]}..."
-    apt update -y
-    apt install -y "${MISSING_PKGS[@]}"
-fi
-
-# ======================================
-# Diff 1: 实例发现统一抽象
-# ======================================
-
-# 返回所有实例配置文件路径（数组）
-# 用法: mapfile -t files < <(list_instance_configs)
-list_instance_configs() {
-    for f in "${SNELL_DIR}"/snell-server-*.conf; do
-        [ -e "$f" ] && echo "$f"
-    done
+# ========== 1. 核心防御：全局进程互斥锁 ==========
+exec 200>"$LOCK_FILE"
+flock -n 200 || {
+  echo "❌ 另一个实例正在运行，请勿重复操作。"
+  exit 1
 }
 
-# ======================================
-# Diff 2: 端口解析统一抽象
-# ======================================
+# 确保核心目录存在
+sudo mkdir -p "${SS_DIR}" "${QR_DIR}" "${LOG_DIR}"
 
-# 从配置文件路径解析端口号
-# 用法: port=$(get_port_from_config "/etc/snell/snell-server-10001.conf")
-get_port_from_config() {
-    local f="$1"
-    local port
-    port="${f##*/snell-server-}"
-    port="${port%.conf}"
-    echo "$port"
+# ========== 2. 初始化中央状态机 ==========
+init_json() {
+  if [ ! -f "$INSTANCES_JSON" ] || [ ! -s "$INSTANCES_JSON" ]; then
+    sudo tee "$INSTANCES_JSON" > /dev/null << 'EOF'
+{
+  "core": {
+    "current_version": "none",
+    "backup_version": "none",
+    "last_upgrade": "none"
+  },
+  "ports": {}
+}
+EOF
+  fi
 }
 
-# ======================================
-# Diff 3: PSK 读取统一抽象
-# ======================================
+# ========== 3. 读写工具（环境变量传参 + fcntl 文件锁） ==========
+update_json_core() {
+  local cur_v=$1
+  local bak_v=$2
+  local time_str=$3
 
-# 从配置文件读取 PSK
-# 用法: psk=$(get_psk_from_config "/etc/snell/snell-server-10001.conf")
-get_psk_from_config() {
-    local f="$1"
-    grep -E '^psk =' "$f" | awk -F'= ' '{print $2}' | tr -d ' '
+  CUR_V="$cur_v" BAK_V="$bak_v" TIME_STR="$time_str" \
+  python3 - << 'PYEOF'
+import json, fcntl, os
+cur_v    = os.environ.get('CUR_V', '')
+bak_v    = os.environ.get('BAK_V', '')
+time_str = os.environ.get('TIME_STR', '')
+path     = os.environ.get('INSTANCES_JSON', '/etc/shadowsocks/instances.json')
+try:
+    with open(path, 'r+') as f:
+        fcntl.flock(f, fcntl.LOCK_EX)
+        d = json.load(f)
+        if cur_v:    d['core']['current_version'] = cur_v
+        if bak_v:    d['core']['backup_version']  = bak_v
+        if time_str: d['core']['last_upgrade']    = time_str
+        f.seek(0); json.dump(d, f, indent=2); f.truncate()
+        fcntl.flock(f, fcntl.LOCK_UN)
+except Exception as e:
+    print(f'❌ JSON 读写异常: {e}')
+PYEOF
 }
 
-# ======================================
-# Diff 6: 端口列表统一接口
-# ======================================
+update_json_port() {
+  local port=$1
+  local proto=$2
+  local method=$3
+  local state=$4
+  local sub_state=$5
 
-# 输出所有已注册的端口号（每行一个）
-list_ports() {
-    while IFS= read -r f; do
-        get_port_from_config "$f"
-    done < <(list_instance_configs)
+  PORT="$port" PROTO="$proto" METHOD="$method" STATE="$state" SUB_STATE="$sub_state" \
+  INSTANCES_JSON="$INSTANCES_JSON" \
+  python3 - << 'PYEOF'
+import json, datetime, fcntl, os
+port      = os.environ['PORT']
+proto     = os.environ['PROTO']
+method    = os.environ['METHOD']
+state     = os.environ['STATE']
+sub_state = os.environ['SUB_STATE']
+path      = os.environ['INSTANCES_JSON']
+try:
+    with open(path, 'r+') as f:
+        fcntl.flock(f, fcntl.LOCK_EX)
+        d = json.load(f)
+        d['ports'][port] = {
+            'protocol':   proto,
+            'method':     method,
+            'state':      state,
+            'sub_state':  sub_state,
+            'updated_at': datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        }
+        f.seek(0); json.dump(d, f, indent=2); f.truncate()
+        fcntl.flock(f, fcntl.LOCK_UN)
+except Exception as e:
+    print(f'❌ 端口标记异常: {e}')
+PYEOF
 }
 
-# ======================================
-# Diff 4/5: 配置与 Systemd 生成器抽象
-# ======================================
+delete_json_port() {
+  local port=$1
 
-# 生成 snell 配置文件内容（输出到 stdout）
-# 用法: build_snell_config PORT PSK MAX_CONN IPV6_FLAG [LISTEN_IP]
-build_snell_config() {
-    local port="$1"
-    local psk="$2"
-    local max_conn="$3"
-    local ipv6_flag="$4"
-    local listen_ip="${5:-}"
+  PORT="$port" INSTANCES_JSON="$INSTANCES_JSON" \
+  python3 - << 'PYEOF'
+import json, fcntl, os
+port = os.environ['PORT']
+path = os.environ['INSTANCES_JSON']
+try:
+    with open(path, 'r+') as f:
+        fcntl.flock(f, fcntl.LOCK_EX)
+        d = json.load(f)
+        if port in d['ports']:
+            del d['ports'][port]
+        f.seek(0); json.dump(d, f, indent=2); f.truncate()
+        fcntl.flock(f, fcntl.LOCK_UN)
+except Exception as e:
+    print(f'❌ 注销端口异常: {e}')
+PYEOF
+}
 
-    if [ -z "$listen_ip" ]; then
-        if [ "$ipv6_flag" = "true" ]; then
-            listen_ip="0.0.0.0:${port},[::]:${port}"
-        else
-            listen_ip="0.0.0.0:${port}"
-        fi
+# ========== 4. 高级原子升级 ==========
+upgrade_core() {
+  echo ">> 启动自动化原子升级模块..."
+  init_json
+
+  local OLD_VERSION
+  OLD_VERSION=$(INSTANCES_JSON="$INSTANCES_JSON" python3 - << 'PYEOF'
+import json, os
+try:
+    print(json.load(open(os.environ['INSTANCES_JSON']))['core']['current_version'])
+except:
+    print('none')
+PYEOF
+)
+
+  local API_LIST=(
+    "https://api.github.com/repos/shadowsocks/shadowsocks-rust/releases/latest"
+    "https://ghfast.top/https://api.github.com/repos/shadowsocks/shadowsocks-rust/releases/latest"
+    "https://gh.con.sh/https://api.github.com/repos/shadowsocks/shadowsocks-rust/releases/latest"
+  )
+
+  local LATEST_DATA=""
+  for api_url in "${API_LIST[@]}"; do
+    echo "  >> 尝试获取 Release 信息: ${api_url%%repos*}..."
+    LATEST_DATA=$(curl --max-time 15 --retry 2 -fsSL "$api_url" 2>/dev/null) && \
+    echo "$LATEST_DATA" | grep -q "tag_name" && break
+    LATEST_DATA=""
+  done
+
+  [ -n "$LATEST_DATA" ] || {
+    echo "❌ 无法获取 GitHub Release 信息（所有 API 源均失败）"
+    return 1
+  }
+
+  local URL LATEST_VERSION
+  URL=$(echo "$LATEST_DATA" | grep browser_download_url | grep x86_64-unknown-linux-gnu.tar.xz | grep -v sha256 | cut -d '"' -f4)
+  LATEST_VERSION=$(echo "$LATEST_DATA" | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/')
+
+  if [ -z "$URL" ]; then
+    echo "❌ 无法从 Release 信息中提取下载链接"
+    return 1
+  fi
+
+  if [ "$OLD_VERSION" = "$LATEST_VERSION" ]; then
+    echo "💎 当前系统内核已是最新版本 ($LATEST_VERSION)，无需更新。"
+    return 0
+  fi
+
+  echo ">> 发现新版本: ${LATEST_VERSION} (本地当前版本: ${OLD_VERSION:-无})"
+
+  local TMP_FILE="/tmp/ss_upgrade.tar.xz"
+  local TMP_UNPACK="/tmp/ss_upgrade_unpack"
+  rm -rf "$TMP_FILE" "$TMP_UNPACK" && mkdir -p "$TMP_UNPACK"
+
+  echo ">> 正在安全下载最新生产包..."
+
+  local PROXY_LIST=(
+    ""
+    "https://v6.gh-proxy.org/"
+    "https://gh.jasonzeng.dev/"
+  )
+
+  local download_ok=0
+  for prefix in "${PROXY_LIST[@]}"; do
+    local TRY_URL="${prefix}${URL}"
+    if [ -z "$prefix" ]; then
+      echo "  >> 尝试直连下载..."
+    else
+      echo "  >> 直连失败，尝试代理: ${prefix}"
     fi
 
-    cat <<EOF
-[snell-server]
-listen = ${listen_ip}
-psk = ${psk}
-version = 6
-dns-ip-preference = default
-ipv6 = ${ipv6_flag}
-udp-relay = true
-max_conn = ${max_conn}
-EOF
+    rm -f "$TMP_FILE"
+    wget --timeout=60 --tries=2 -q --show-progress -O "$TMP_FILE" "$TRY_URL" 2>/dev/null && \
+    file "$TMP_FILE" 2>/dev/null | grep -q "XZ compressed data" && {
+      download_ok=1
+      echo "  >> 下载成功: ${prefix:-直连}"
+      break
+    }
+  done
+
+  [ "$download_ok" -eq 1 ] || {
+    echo "❌ 所有下载源均失败（直连 + 2 个代理），请检查 VPS 网络"
+    return 1
+  }
+
+  file "$TMP_FILE" | grep -q "XZ compressed data" || {
+    echo "❌ 下载文件损坏（非标准 XZ 压缩数据），终止操作"
+    return 1
+  }
+
+  tar -xJf "$TMP_FILE" -C "$TMP_UNPACK" || {
+    echo "❌ 解压失败"
+    return 1
+  }
+
+  [ -f "${TMP_UNPACK}/ssserver" ] || {
+    echo "❌ 架构安全校验失败：解压包中未包含 ssserver"
+    return 1
+  }
+
+  "${TMP_UNPACK}/ssserver" -h >/dev/null 2>&1 || {
+    echo "❌ 新版本 binary 不可执行（可能是架构不匹配或二进制损坏）"
+    return 1
+  }
+
+  echo ">> 执行原子级替换与备份追踪..."
+  if [ -f "$SS_EXEC" ]; then
+    sudo cp -f "$SS_EXEC" "$SS_BACKUP" || {
+      echo "❌ 备份旧版本失败"
+      return 1
+    }
+    update_json_core "" "$OLD_VERSION" ""
+  fi
+
+  sudo mv "${TMP_UNPACK}/ssserver" "$SS_EXEC" || {
+    echo "❌ 替换二进制失败"
+    return 1
+  }
+  sudo chmod +x "$SS_EXEC"
+
+  echo ">> 正在安全热重启所有预期状态为 active 的实例..."
+  INSTANCES_JSON="$INSTANCES_JSON" python3 - << 'PYEOF'
+import json, subprocess, os
+path = os.environ['INSTANCES_JSON']
+try:
+    d = json.load(open(path))
+    for port, info in d.get('ports', {}).items():
+        if info.get('state') == 'active':
+            r = subprocess.run(['sudo', 'systemctl', 'restart', f'ss{port}'], check=False)
+            status = '✅' if r.returncode == 0 else '⚠️'
+            print(f'{status} 端口 {port} 重启{"成功" if r.returncode == 0 else "失败（请手动检查）"}')
+except Exception as e:
+    print(f'❌ 批量重启异常: {e}')
+PYEOF
+
+  update_json_core "$LATEST_VERSION" "" "$(date +"%Y-%m-%d %H:%M:%S")"
+  echo "✅ 原子替换升级圆满完成。当前在线版本: $LATEST_VERSION"
+  rm -rf "$TMP_FILE" "$TMP_UNPACK"
 }
 
-# 生成 systemd service 文件内容（输出到 stdout）
-# 用法: build_systemd_service PORT CONFIG_FILE
-build_systemd_service() {
-    local port="$1"
-    local conf_file="$2"
+# ========== 5. 一键回滚 ==========
+rollback_core() {
+  init_json
 
-    cat <<EOF
+  local cur_v
+  local bak_v
+  cur_v=$(INSTANCES_JSON="$INSTANCES_JSON" python3 -c \
+    "import json,os; print(json.load(open(os.environ['INSTANCES_JSON']))['core']['current_version'])" 2>/dev/null)
+  bak_v=$(INSTANCES_JSON="$INSTANCES_JSON" python3 -c \
+    "import json,os; print(json.load(open(os.environ['INSTANCES_JSON']))['core']['backup_version'])" 2>/dev/null)
+
+  [ -f "$SS_BACKUP" ] || {
+    echo "❌ 无本地 backup binary，无法回滚"
+    return 1
+  }
+
+  echo ">> 启动灾备恢复：正在回滚至历史稳定版 $bak_v ..."
+  sudo mv -f "$SS_EXEC" /tmp/ss_failed_version_dump || true
+  sudo mv -f "$SS_BACKUP" "$SS_EXEC" || {
+    echo "❌ 回滚替换失败"
+    return 1
+  }
+  sudo chmod +x "$SS_EXEC"
+
+  echo ">> 正在重启受控节点实例..."
+  INSTANCES_JSON="$INSTANCES_JSON" python3 - << 'PYEOF'
+import json, subprocess, os
+path = os.environ['INSTANCES_JSON']
+try:
+    d = json.load(open(path))
+    for port, info in d.get('ports', {}).items():
+        if info.get('state') == 'active':
+            r = subprocess.run(['sudo', 'systemctl', 'restart', f'ss{port}'], check=False)
+            status = '✅' if r.returncode == 0 else '⚠️'
+            print(f'{status} 端口 {port} 重启{"成功" if r.returncode == 0 else "失败"}')
+except Exception as e:
+    print(f'❌ JSON 损坏或重启异常: {e}')
+    exit(1)
+PYEOF
+
+  update_json_core "$bak_v" "$cur_v" "$(date +"%Y-%m-%d %H:%M:%S")"
+  echo "✅ 灾备状态回滚成功！当前激活版本: $bak_v"
+}
+
+# ========== 工具函数：生成标准 ss:// URI ==========
+gen_ss_uri() {
+  local method=$1
+  local password=$2
+  local server=$3
+  local port=$4
+  local tag=$5
+  local userinfo
+  userinfo=$(echo -n "${method}:${password}" | base64 -w0)
+  echo "ss://${userinfo}@${server}:${port}#${tag}"
+}
+
+# ========== 6. 扫描接管现有节点 ==========
+import_existing() {
+  init_json
+  echo ">> 开始扫描现有 Shadowsocks 节点配置..."
+
+  local SCAN_DIRS="/etc/shadowsocks /etc/shadowsocks-libev"
+  local found=0
+
+  for SCAN_DIR in $SCAN_DIRS; do
+    [ -d "$SCAN_DIR" ] || continue
+    for CONF in "${SCAN_DIR}"/config*.json; do
+      [ -f "$CONF" ] || continue
+
+      CONF="$CONF" python3 - << 'PYEOF'
+import json, os, subprocess, sys
+
+conf_path = os.environ['CONF']
+inst_path = os.environ.get('INSTANCES_JSON', '/etc/shadowsocks/instances.json')
+
+try:
+    with open(conf_path) as f:
+        c = json.load(f)
+except Exception as e:
+    print(f'  ⚠️  跳过 {conf_path}：JSON 解析失败 ({e})')
+    sys.exit(0)
+
+port   = str(c.get('server_port', ''))
+method = c.get('method', 'unknown')
+
+if not port:
+    print(f'  ⚠️  跳过 {conf_path}：未找到 server_port')
+    sys.exit(0)
+
+proto = 'ss2022' if '2022' in method else 'ss'
+
+svc = f'ss{port}'
+res = subprocess.run(['systemctl', 'is-active', svc], capture_output=True, text=True)
+real_state = 'running' if res.returncode == 0 else 'stopped'
+expect_state = 'active' if real_state == 'running' else 'inactive'
+
+import fcntl, datetime
+try:
+    with open(inst_path, 'r+') as f:
+        fcntl.flock(f, fcntl.LOCK_EX)
+        d = json.load(f)
+        if port in d['ports']:
+            print(f'  ℹ️  端口 {port} 已在状态机中，跳过（如需强制覆盖请先注销）')
+            fcntl.flock(f, fcntl.LOCK_UN)
+            sys.exit(0)
+        d['ports'][port] = {
+            'protocol':   proto,
+            'method':     method,
+            'state':      expect_state,
+            'sub_state':  real_state,
+            'conf_path':  conf_path,
+            'updated_at': datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        }
+        f.seek(0); json.dump(d, f, indent=2); f.truncate()
+        fcntl.flock(f, fcntl.LOCK_UN)
+    print(f'  ✅ 端口 {port} | 协议: {proto} | 算法: {method} | 物理状态: {real_state} → 已接管')
+except Exception as e:
+    print(f'  ❌ 端口 {port} 写入状态机失败: {e}')
+PYEOF
+      found=$((found + 1))
+    done
+  done
+
+  echo ">> 扫描运行中 ssserver 进程（兜底检测）..."
+  ss_pids=$(pgrep -x ssserver 2>/dev/null || pgrep -x ss-server 2>/dev/null || true)
+  if [ -n "$ss_pids" ]; then
+    for pid in $ss_pids; do
+      cmdline=$(cat /proc/"$pid"/cmdline 2>/dev/null | tr '\0' ' ')
+      conf=$(echo "$cmdline" | grep -oP '(?<=-c )\S+' || true)
+      if [ -n "$conf" ] && [ -f "$conf" ]; then
+        echo "  >> 进程 $pid 使用配置: $conf"
+        CONF="$conf" INSTANCES_JSON="$INSTANCES_JSON" python3 - << 'PYEOF'
+import json, os, fcntl, datetime, sys
+conf_path = os.environ['CONF']
+inst_path = os.environ['INSTANCES_JSON']
+try:
+    c = json.load(open(conf_path))
+    port   = str(c.get('server_port', ''))
+    method = c.get('method', 'unknown')
+    proto  = 'ss2022' if '2022' in method else 'ss'
+    if not port:
+        sys.exit(0)
+    with open(inst_path, 'r+') as f:
+        fcntl.flock(f, fcntl.LOCK_EX)
+        d = json.load(f)
+        if port not in d['ports']:
+            d['ports'][port] = {
+                'protocol':   proto,
+                'method':     method,
+                'state':      'active',
+                'sub_state':  'running',
+                'conf_path':  conf_path,
+                'updated_at': datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            }
+            f.seek(0); json.dump(d, f, indent=2); f.truncate()
+            print(f'  ✅ 进程兜底接管：端口 {port} | 算法: {method}')
+        fcntl.flock(f, fcntl.LOCK_UN)
+except Exception as e:
+    print(f'  ⚠️  进程兜底失败: {e}')
+PYEOF
+      fi
+    done
+  fi
+
+  if [ "$found" -eq 0 ] && [ -z "$ss_pids" ]; then
+    echo "  ℹ️  未发现任何现有节点配置文件，无需导入。"
+  else
+    echo ""
+    echo "✅ 扫描接管完成，当前状态机快照："
+    echo "--------------------------------------------------"
+    INSTANCES_JSON="$INSTANCES_JSON" python3 - << 'PYEOF'
+import json, os
+path = os.environ['INSTANCES_JSON']
+d = json.load(open(path))
+for port, info in d.get('ports', {}).items():
+    print(f"端口: {port} | 协议: {info.get('protocol')} | 算法: {info.get('method')} | 状态: {info.get('state')} / {info.get('sub_state')}")
+PYEOF
+    echo "--------------------------------------------------"
+    echo ">> 现在可使用菜单选项 4 执行内核升级，升级后所有 active 节点将自动热重启。"
+  fi
+}
+
+# ========== 7. 节点控制台（启动/重启/停止） ==========
+node_control() {
+  echo "=================================================="
+  echo " 节点控制台"
+  echo "=================================================="
+
+  echo "当前节点列表："
+  echo "--------------------------------------------------"
+  INSTANCES_JSON="$INSTANCES_JSON" python3 - << 'PYEOF'
+import json, subprocess, os
+path = os.environ['INSTANCES_JSON']
+try:
+    d = json.load(open(path))
+    ports = list(d.get('ports', {}).keys())
+    if not ports:
+        print("  ℹ️  暂无已注册节点")
+    for port in ports:
+        info = d['ports'][port]
+        res = subprocess.run(['systemctl', 'is-active', f'ss{port}'],
+                             capture_output=True, text=True)
+        real = '🟢 运行中' if res.returncode == 0 else '🔴 已停止'
+        print(f"  端口: {port} | 算法: {info.get('method')} | {real}")
+except Exception as e:
+    print(f'❌ 读取状态机失败: {e}')
+PYEOF
+  echo "--------------------------------------------------"
+
+  echo ""
+  echo "操作对象："
+  echo "  1) 全部节点"
+  echo "  2) 指定端口"
+  read -rp "请选择 (1-2): " TARGET_OPT
+
+  if [ "$TARGET_OPT" = "2" ]; then
+    read -rp "请输入端口号（空格分隔多个）: " TARGET_PORTS
+  else
+    TARGET_PORTS=$(INSTANCES_JSON="$INSTANCES_JSON" python3 -c \
+      "import json,os; d=json.load(open(os.environ['INSTANCES_JSON'])); print(' '.join(d.get('ports',{}).keys()))" 2>/dev/null)
+    if [ -z "$TARGET_PORTS" ]; then
+      echo "❌ 状态机中无已注册节点"
+      return 1
+    fi
+  fi
+
+  echo ""
+  echo "操作类型："
+  echo "  1) 启动 (start)"
+  echo "  2) 重启 (restart)"
+  echo "  3) 停止 (stop)"
+  read -rp "请选择 (1-3): " ACTION_OPT
+
+  local ACTION
+  local NEW_STATE
+  local NEW_SUB
+  case "$ACTION_OPT" in
+    1) ACTION="start";   NEW_STATE="active";   NEW_SUB="running" ;;
+    2) ACTION="restart"; NEW_STATE="active";   NEW_SUB="running" ;;
+    3) ACTION="stop";    NEW_STATE="inactive"; NEW_SUB="stopped" ;;
+    *) echo "❌ 无效操作"; return 1 ;;
+  esac
+
+  echo ""
+  echo ">> 正在执行 ${ACTION} ..."
+  echo "--------------------------------------------------"
+  for PORT in $TARGET_PORTS; do
+    sudo systemctl "$ACTION" "ss${PORT}" 2>/dev/null
+    local ok=false
+    if [ "$ACTION" = "stop" ]; then
+      ok=true
+    else
+      systemctl is-active "ss${PORT}" >/dev/null 2>&1 && ok=true || ok=false
+    fi
+
+    if $ok; then
+      echo "  ✅ 端口 ${PORT} ${ACTION} 成功"
+      # 读取当前 proto 和 method 更新状态机
+      local CUR_PROTO CUR_METHOD
+      CUR_PROTO=$(INSTANCES_JSON="$INSTANCES_JSON" python3 -c \
+        "import json,os; print(json.load(open(os.environ['INSTANCES_JSON']))['ports'].get('${PORT}',{}).get('protocol','ss'))" 2>/dev/null)
+      CUR_METHOD=$(INSTANCES_JSON="$INSTANCES_JSON" python3 -c \
+        "import json,os; print(json.load(open(os.environ['INSTANCES_JSON']))['ports'].get('${PORT}',{}).get('method','unknown'))" 2>/dev/null)
+      update_json_port "$PORT" "$CUR_PROTO" "$CUR_METHOD" "$NEW_STATE" "$NEW_SUB"
+    else
+      echo "  ⚠️  端口 ${PORT} ${ACTION} 失败 → journalctl -u ss${PORT} -n 20"
+    fi
+  done
+  echo "--------------------------------------------------"
+  echo "✅ 操作完成。"
+}
+
+# ========== 初始化动作 ==========
+init_json
+
+# ========== 启动前依赖补全 ==========
+if ! command -v file >/dev/null 2>&1 || \
+   ! command -v xz >/dev/null 2>&1 || \
+   ! command -v qrencode >/dev/null 2>&1 || \
+   ! command -v xxd >/dev/null 2>&1; then
+  sudo apt update -qq >/dev/null 2>&1 && sudo apt install -y file xz-utils qrencode xxd >/dev/null 2>&1
+fi
+
+# ========== 启动前自愈自检 ==========
+if [ -f "$SS_EXEC" ]; then
+  "$SS_EXEC" -h >/dev/null 2>&1 || {
+    echo "❌ ss-server 已损坏或无法运行，触发自动修复程序..."
+    upgrade_core || { echo "❌ 自动修复失败，请手动检查"; exit 1; }
+  }
+fi
+
+# ========== 交互式主菜单（循环） ==========
+while true; do
+  echo ""
+  echo "=================================================="
+  echo " Shadowsocks-Rust 管理脚本"
+  echo "=================================================="
+  echo "1) 批量新增并上线节点"
+  echo "2) 安全注销并删除节点"
+  echo "3) 全量查看活跃节点与 Core 状态"
+  echo "4) 检查执行内核升级 (Upgrade)"
+  echo "5) 一键崩溃灾备回滚 (Rollback)"
+  echo "6) 扫描并接管现有节点 (Import)"
+  echo "7) 节点控制台 (启动/重启/停止)"
+  echo "0) 安全退出"
+  echo "=================================================="
+  read -rp "请输入操作代码 [0-7]: " MODE
+
+  case $MODE in
+    0) echo "👋 已安全退出。"; exit 0 ;;
+    4) upgrade_core; continue ;;
+    5) rollback_core; continue ;;
+    6) import_existing; continue ;;
+    7) node_control; continue ;;
+    1|2|3) ;;
+    *) echo "❌ 无效选项，请重新输入。"; continue ;;
+  esac
+
+  # ========== 动态依赖补全 ==========
+  if [ ! -f "$SS_EXEC" ]; then
+    echo ">> 系统未发现运行内核，正在触发首次环境构建..."
+    upgrade_core || { echo "❌ 初始化运行环境失败"; continue; }
+  fi
+
+  if ! dpkg -l qrencode file xz-utils >/dev/null 2>&1 || \
+     ! command -v qrencode >/dev/null 2>&1 || \
+     ! command -v file >/dev/null 2>&1 || \
+     ! command -v xz >/dev/null 2>&1 || \
+     ! command -v xxd >/dev/null 2>&1; then
+    sudo apt update -qq && sudo apt install -y qrencode file xz-utils xxd >/dev/null 2>&1
+  fi
+
+  # ========== 功能模块：删除节点 ==========
+  if [ "$MODE" = "2" ]; then
+    read -rp "请输入需要安全下线的端口号（空格分隔）: " PORTS
+    for PORT in $PORTS; do
+      sudo systemctl stop "ss${PORT}"    2>/dev/null || true
+      sudo systemctl disable "ss${PORT}" 2>/dev/null || true
+      sudo rm -f "/etc/systemd/system/ss${PORT}.service"
+      sudo rm -f "${SS_DIR}/config${PORT}.json"
+      delete_json_port "$PORT"
+      echo "🗑 端口 ${PORT} 已彻底执行下线隔离并注销。"
+    done
+    sudo systemctl daemon-reload
+    continue
+  fi
+
+  # ========== 功能模块：状态盘点 ==========
+  if [ "$MODE" = "3" ]; then
+    echo "=================================================="
+    CURRENT_VER=$(INSTANCES_JSON="$INSTANCES_JSON" python3 -c \
+      "import json,os; print(json.load(open(os.environ['INSTANCES_JSON']))['core']['current_version'])" 2>/dev/null)
+    echo "  Core 状态  | 运行内核: ${CURRENT_VER}"
+    echo "=================================================="
+    echo " 实例清单 (State Matrix) ："
+    echo "--------------------------------------------------"
+
+    INSTANCES_JSON="$INSTANCES_JSON" python3 - << 'PYEOF'
+import json, subprocess, os
+path = os.environ['INSTANCES_JSON']
+try:
+    d = json.load(open(path))
+    for port, info in d.get('ports', {}).items():
+        res = subprocess.run(['systemctl', 'is-active', f'ss{port}'],
+                             capture_output=True, text=True)
+        real_sub = 'running' if res.returncode == 0 else 'stopped'
+        print(f"端口: {port} | 协议: {info.get('protocol')} | 算法: {info.get('method')}")
+        print(f"预期状态(State): {info.get('state')} | 物理状态(Sub-state): {real_sub}")
+        print('-' * 50)
+except Exception as e:
+    print(f'❌ JSON 损坏: {e}')
+    exit(1)
+PYEOF
+    continue
+  fi
+
+  # ========== 功能模块：批量新增节点 ==========
+  read -rp "请输入中转域名/落地IP（留空则自动抓取本地公网 IP）: " SERVER_DOMAIN
+  SERVER_IP=${SERVER_DOMAIN:-$(curl --max-time 10 -s -4 ifconfig.me)}
+  echo ">> 当前入站目标寻址地址: $SERVER_IP"
+
+  echo "请选择运行协议簇："
+  echo "  1) Shadowsocks Legacy (SS)"
+  echo "  2) Shadowsocks 2022 Standard (SS2022)"
+  read -rp "选择选项 (1-2, 默认 1): " PROTO_OPT
+  PROTO="ss"; [ "$PROTO_OPT" = "2" ] && PROTO="ss2022"
+
+  read -rp "请输入待部署的批量端口号（空格分隔）: " PORTS
+  echo "# Surge Declarative Proxy System" > "$SURGE_FILE"
+  SS_URI_FILE="${SS_DIR}/ss_uris.txt"
+  echo "# Standard ss:// URI List" > "$SS_URI_FILE"
+
+  for PORT in $PORTS; do
+    if ! [[ "$PORT" =~ ^[0-9]+$ ]] || [ "$PORT" -lt 1 ] || [ "$PORT" -gt 65535 ]; then
+      echo ">> [跳过] 无效非法端口规范: $PORT"
+      continue
+    fi
+
+    SS_CONF="${SS_DIR}/config${PORT}.json"
+    SYSTEMD_SERVICE="/etc/systemd/system/ss${PORT}.service"
+
+    if [ "$PROTO" = "ss" ]; then
+      echo "请指定传统端口 ${PORT} 的流控加密方式："
+      echo "  1) none"
+      echo "  2) aes-128-gcm"
+      echo "  3) aes-256-gcm"
+      echo "  4) chacha20-ietf-poly1305"
+      read -rp "加密指引 (1-4, 默认 4): " METHOD_OPT
+      case "$METHOD_OPT" in
+        1) METHOD="none" ;;
+        2) METHOD="aes-128-gcm" ;;
+        3) METHOD="aes-256-gcm" ;;
+        *) METHOD="chacha20-ietf-poly1305" ;;
+      esac
+      PASSWORD=$(openssl rand -hex 16)
+
+      sudo tee "${SS_CONF}" > /dev/null << EOL
+{
+  "server": ["0.0.0.0", "::"],
+  "server_port": ${PORT},
+  "password": "${PASSWORD}",
+  "method": "${METHOD}",
+  "timeout": 300,
+  "mode": "tcp_and_udp"
+}
+EOL
+
+      SURGE_LINK="SS_${PORT} = ss, ${SERVER_IP}, ${PORT}, encrypt-method=${METHOD}, password=${PASSWORD}, udp-relay=true"
+      SS_URI=$(gen_ss_uri "$METHOD" "$PASSWORD" "$SERVER_IP" "$PORT" "SS_${PORT}")
+
+    else
+      echo "请指定标准 2022 端口 ${PORT} 的强制对称加密算法："
+      echo "  1) 2022-blake3-aes-128-gcm"
+      echo "  2) 2022-blake3-aes-256-gcm"
+      echo "  3) 2022-blake3-chacha20-poly1305"
+      read -rp "算法指引 (1-3, 默认 1): " METHOD_OPT
+      case "$METHOD_OPT" in
+        2) METHOD="2022-blake3-aes-256-gcm";      KEY_SIZE=64 ;;
+        3) METHOD="2022-blake3-chacha20-poly1305"; KEY_SIZE=64 ;;
+        *) METHOD="2022-blake3-aes-128-gcm";       KEY_SIZE=32 ;;
+      esac
+
+      MASTER_KEY=$(openssl rand -hex "$KEY_SIZE")
+      SUB_KEY=$(openssl rand -hex "$KEY_SIZE")
+
+      MASTER_KEY_B64=$(echo -n "$MASTER_KEY" | xxd -r -p | base64 -w0)
+      SUB_KEY_B64=$(echo -n "$SUB_KEY"    | xxd -r -p | base64 -w0)
+
+      sudo tee "${SS_CONF}" > /dev/null << EOL
+{
+  "server": ["0.0.0.0", "::"],
+  "server_port": ${PORT},
+  "method": "${METHOD}",
+  "password": "${MASTER_KEY_B64}",
+  "users": [
+    {
+      "name": "user1",
+      "password": "${SUB_KEY_B64}"
+    }
+  ]
+}
+EOL
+
+      SURGE_LINK="SS2022_${PORT} = ss, ${SERVER_IP}, ${PORT}, encrypt-method=${METHOD}, password=${SUB_KEY_B64}, udp-relay=true"
+      SS_URI=$(gen_ss_uri "$METHOD" "$SUB_KEY_B64" "$SERVER_IP" "$PORT" "SS2022_${PORT}")
+    fi
+
+    sudo tee "${SYSTEMD_SERVICE}" > /dev/null << EOL
 [Unit]
-Description=Snell Proxy Service on Port ${port}
-After=network-online.target
-Wants=network-online.target
+Description=Shadowsocks Declarative Node Service on Port ${PORT}
+After=network.target
 
 [Service]
-Type=simple
-ExecStart=${SNELL_EXEC} -c ${conf_file}
-Restart=always
-RestartSec=3
-LimitNOFILE=1048576
-
-NoNewPrivileges=true
-PrivateTmp=true
-ProtectSystem=full
-ProtectHome=true
-ProtectControlGroups=true
-ProtectKernelModules=true
-ProtectKernelTunables=true
-RestrictAddressFamilies=AF_INET AF_INET6 AF_NETLINK
+ExecStart=${SS_EXEC} -c ${SS_CONF}
+StandardOutput=append:${LOG_DIR}/ss${PORT}.log
+StandardError=append:${LOG_DIR}/ss${PORT}.log
+Restart=on-failure
+RestartSec=5s
 
 [Install]
 WantedBy=multi-user.target
-EOF
-}
+EOL
 
-# ======================================
-# 安全与网络工具函数
-# ======================================
+    sudo systemctl daemon-reload
+    sudo systemctl enable "ss${PORT}" >/dev/null 2>&1
+    sudo systemctl restart "ss${PORT}"
 
-get_public_ip() {
-    local ip
-    ip=$(curl -s4 -m 3 --connect-timeout 2 icanhazip.com || \
-         curl -s  -m 3 --connect-timeout 2 https://api.ipify.org || \
-         curl -s  -m 3 --connect-timeout 2 ipinfo.io/ip)
-    if [ -z "$ip" ]; then
-        ip="你的服务器公网IP"
-    fi
-    echo "$ip"
-}
+    update_json_port "$PORT" "$PROTO" "$METHOD" "active" "running"
 
-get_latest_version() {
-    local fallback_version="6.0.0b3"
-    local fallback_zip="snell-server-v6.0.0b3-linux-amd64.zip"
-    local url="https://kb.nssurge.com/surge-knowledge-base/release-notes/snell"
+    echo "✅ 端口 ${PORT} 已成功上线。"
+    echo "$SURGE_LINK" >> "$SURGE_FILE"
+    echo "$SS_URI"     >> "$SS_URI_FILE"
+  done
 
-    local page
-    page=$(curl -fsSL -m 10 \
-        -A "Mozilla/5.0 (Windows NT 10.0; Win64; x64)" \
-        "$url")
-
-    if [ -z "$page" ]; then
-        echo ">> KB不可访问" >&2
-        echo "${fallback_version}|${fallback_zip}"
-        return
-    fi
-
-    local latest_zip
-    latest_zip=$(
-        echo "$page" | \
-        grep -oE 'snell-server-v[0-9]+\.[0-9]+\.[0-9]+[a-z0-9.-]*-linux-amd64\.zip' | \
-        sort -Vu | \
-        tail -n 1
-    )
-
-    if [ -z "$latest_zip" ]; then
-        echo ">> 解析失败" >&2
-        echo "${fallback_version}|${fallback_zip}"
-        return
-    fi
-
-    local version
-    version=${latest_zip#snell-server-v}
-    version=${version%-linux-amd64.zip}
-
-    echo "${version}|${latest_zip}"
-}
-
-install_or_upgrade_binary() {
-    local force_upgrade=$1
-    if [ -f "$SNELL_EXEC" ] && [ "$force_upgrade" != "true" ]; then
-        return
-    fi
-
-    echo ">> 正在从官方获取最新 Snell 版本信息..."
-    local version_info
-    version_info=$(get_latest_version)
-    local version zip_name url
-    version=$(echo "$version_info" | cut -d'|' -f1)
-    zip_name=$(echo "$version_info" | cut -d'|' -f2)
-    url="https://dl.nssurge.com/snell/${zip_name}"
-
-    mkdir -p "${SNELL_DIR}"
-    cd /tmp
-    rm -f "${zip_name}"
-
-    echo ">> 正在安全下载 Snell v${version}..."
-    wget --tries=3 --timeout=20 -q --show-progress -O "${zip_name}" "${url}"
-
-    if [ ! -s "${zip_name}" ]; then
-        echo "[严重错误] Snell 下载 file 为空或下载失败，请检查网络！"
-        exit 1
-    fi
-
-    python3 - <<EOF
-import zipfile
-zipfile.ZipFile("${zip_name}").extractall("/tmp")
-EOF
-
-    if [ ! -f "/tmp/snell-server" ]; then
-        echo "[严重错误] Snell 解压验证失败"
-        exit 1
-    fi
-
-    # 若已有旧版则备份（仅在 install_or_upgrade_binary 内部备份，
-    # upgrade_snell_binary 会单独管理带时间戳的备份用于回滚）
-    if [ -f "${SNELL_EXEC}" ]; then
-        cp "${SNELL_EXEC}" "${SNELL_EXEC}.bak.$(date +%Y%m%d_%H%M%S)"
-    fi
-
-    mv /tmp/snell-server "${SNELL_EXEC}"
-    chmod +x "${SNELL_EXEC}"
-    rm -f "${zip_name}"
-    echo ">> Snell 主程序核心部署/升级成功 (v${version})"
-}
-
-print_proxy_config() {
-    local ip=$1
-    local port=$2
-    local psk=$3
-    echo "Server : ${ip}"
-    echo "Port   : ${port}"
-    echo "PSK    : ${psk}"
+  echo ""
+  echo ">> 批量新增执行完毕。"
+  echo "=================================================="
+  echo " Surge 代理行："
+  echo "--------------------------------------------------"
+  grep -v '^#' "$SURGE_FILE" | grep -v '^$'
+  echo ""
+  echo " 标准 ss:// URI："
+  echo "--------------------------------------------------"
+  grep -v '^#' "$SS_URI_FILE" | grep -v '^$'
+  echo ""
+  echo " 二维码："
+  echo "--------------------------------------------------"
+  while IFS= read -r uri; do
+    [ -z "$uri" ] && continue
+    tag=$(echo "$uri" | grep -oP '(?<=#).+$' || echo "$uri")
+    echo "📱 ${tag}"
+    qrencode -t UTF8 "$uri"
     echo ""
-    echo "[Proxy]"
-    echo "node = snell,${ip},${port},psk=${psk},version=6,reuse=true"
-    echo "------------------------------------------------"
-}
+  done < <(grep -v '^#' "$SS_URI_FILE" | grep -v '^$')
+  echo "=================================================="
 
-# ======================================
-# 内部：重启所有实例（供升级回滚使用）
-# ======================================
-
-_restart_all_instances() {
-    while IFS= read -r port; do
-        systemctl restart "snell-${port}" || true
-    done < <(list_ports)
-}
-
-# ======================================
-# 菜单业务逻辑实现
-# ======================================
-
-# 1. 新增端口
-add_ports() {
-    install_or_upgrade_binary "false"
-
-    echo ""
-    read -p "请输入要创建的端口（多个请用空格分隔）: " PORTS
-    echo ""
-
-    local mem_mb
-    mem_mb=$(free -m | awk '/Mem:/ {print $2}')
-    local max_conn=$((mem_mb * 2))
-    if [ "$max_conn" -lt 300 ];   then max_conn=300;   fi
-    if [ "$max_conn" -gt 10000 ]; then max_conn=10000; fi
-
-    local valid_ports=()
-
-    for PORT in ${PORTS}; do
-        if ! [[ "$PORT" =~ ^[0-9]+$ ]] || [ "$PORT" -lt 1 ] || [ "$PORT" -gt 65535 ]; then
-            echo "跳过无效端口: $PORT"
-            continue
-        fi
-
-        local conf_file="${SNELL_DIR}/snell-server-${PORT}.conf"
-        if [ -f "${conf_file}" ]; then
-            echo "端口 ${PORT} 配置文件已存在，已自动跳过"
-            continue
-        fi
-
-        if ss -lntup | grep -q ":${PORT}\b"; then
-            echo "端口 ${PORT} 已被系统其他程序占用，自动跳过"
-            continue
-        fi
-
-        local ipv6_flag
-        if ip -6 route show default 2>/dev/null | grep -q default; then
-            ipv6_flag="true"
-        else
-            ipv6_flag="false"
-        fi
-
-        local psk
-        psk=$(openssl rand -hex 32)
-        local service_file="/etc/systemd/system/snell-${PORT}.service"
-
-        # Diff 4: 使用配置生成器
-        build_snell_config "${PORT}" "${psk}" "${max_conn}" "${ipv6_flag}" > "${conf_file}"
-
-        # Diff 5: 使用 systemd 生成器
-        build_systemd_service "${PORT}" "${conf_file}" > "${service_file}"
-
-        valid_ports+=("${PORT}")
-    done
-
-    if [ ${#valid_ports[@]} -eq 0 ]; then
-        echo "没有合法的端口被创建。"
-        return
-    fi
-
-    echo ">> 正在向系统提交重载并拉起实例服务..."
-    systemctl daemon-reload
-
-    local server_ip
-    server_ip=$(get_public_ip)
-    local success_count=0
-
-    for PORT in "${valid_ports[@]}"; do
-        systemctl enable "snell-${PORT}" >/dev/null 2>&1
-        systemctl restart "snell-${PORT}"
-
-        if ! systemctl is-active --quiet "snell-${PORT}"; then
-            echo "----------------------------------------"
-            echo "[严重错误] Snell 端口 ${PORT} 启动失败！已触发全自动回滚。"
-            echo ">> 正在捕获实时错误堆栈日志 (journalctl):"
-            echo "----------------------------------------"
-            journalctl -u "snell-${PORT}" -n 20 --no-pager
-            echo "----------------------------------------"
-            rm -f "${SNELL_DIR}/snell-server-${PORT}.conf" \
-                  "/etc/systemd/system/snell-${PORT}.service"
-            systemctl daemon-reload
-            continue
-        fi
-
-        # Diff 3: 统一 PSK 读取
-        local cur_psk
-        cur_psk=$(get_psk_from_config "${SNELL_DIR}/snell-server-${PORT}.conf")
-
-        if [ $success_count -eq 0 ]; then
-            echo -e "\n======================================\n 最终输出托管配置凭据\n======================================\n"
-        fi
-        print_proxy_config "${server_ip}" "${PORT}" "${cur_psk}"
-        success_count=$((success_count + 1))
-    done
-    echo ">> 批量部署流程结束，成功拉起 ${success_count} 个实例。"
-}
-
-# 2. 删除端口
-delete_ports() {
-    # Diff 1: 统一实例发现
-    mapfile -t files < <(list_instance_configs)
-
-    if [ ${#files[@]} -eq 0 ]; then
-        echo ">> 系统中未发现任何正在运行的 Snell 端口实例。"
-        return
-    fi
-
-    echo "当前检测到已启用的 Snell 端口有:"
-    for f in "${files[@]}"; do
-        # Diff 2: 统一端口解析
-        local p
-        p=$(get_port_from_config "$f")
-        echo " - 端口: $p"
-    done
-
-    echo ""
-    read -p "请输入你想彻底注销删除的端口（多个请用空格分隔）: " DEL_PORTS
-    echo ""
-
-    local count=0
-    for PORT in ${DEL_PORTS}; do
-        if [ -f "${SNELL_DIR}/snell-server-${PORT}.conf" ]; then
-            systemctl stop    "snell-${PORT}" >/dev/null 2>&1 || true
-            systemctl disable "snell-${PORT}" >/dev/null 2>&1 || true
-            rm -f "${SNELL_DIR}/snell-server-${PORT}.conf" \
-                  "/etc/systemd/system/snell-${PORT}.service"
-            systemctl reset-failed "snell-${PORT}" 2>/dev/null || true
-            echo ">> 已彻底移除清理端口 ${PORT} 及其关联系统配置。"
-            count=$((count + 1))
-        else
-            echo "跳过未注册的端口: ${PORT}"
-        fi
-    done
-
-    if [ $count -gt 0 ]; then
-        systemctl daemon-reload
-    fi
-}
-
-# 3. 查看配置明细
-view_config() {
-    mapfile -t files < <(list_instance_configs)
-
-    if [ ${#files[@]} -eq 0 ]; then
-        echo ">> 系统中未发现任何 Snell 实例配置。"
-        return
-    fi
-
-    for f in "${files[@]}"; do
-        echo "======================================"
-        echo " 配置文件明细: $f"
-        echo "======================================"
-        cat "$f"
-        echo ""
-    done
-}
-
-# 4. 查看托管凭据
-view_credentials() {
-    mapfile -t files < <(list_instance_configs)
-
-    if [ ${#files[@]} -eq 0 ]; then
-        echo ">> 系统中没有正在运行的 Snell 实例。"
-        return
-    fi
-
-    local server_ip
-    server_ip=$(get_public_ip)
-
-    echo "======================================"
-    echo " 运行中实例服务凭据（Surge/Rocket）"
-    echo "======================================"
-    echo ""
-    for f in "${files[@]}"; do
-        # Diff 2 + 3: 统一端口与 PSK 读取
-        local port psk
-        port=$(get_port_from_config "$f")
-        psk=$(get_psk_from_config "$f")
-        print_proxy_config "${server_ip}" "${port}" "${psk}"
-    done
-}
-
-# 5. 重启实例
-restart_instances() {
-    mapfile -t files < <(list_instance_configs)
-
-    if [ ${#files[@]} -eq 0 ]; then
-        echo ">> 没有任何服务可供重启。"
-        return
-    fi
-
-    echo "1. 重启所有运行中的 Snell 实例"
-    echo "2. 精准重启某个特定端口实例"
-    read -p "请选择操作 [1-2]: " choice
-
-    if [ "$choice" = "1" ]; then
-        for f in "${files[@]}"; do
-            local port
-            port=$(get_port_from_config "$f")
-            systemctl restart "snell-${port}"
-            echo ">> 端口 ${port} 重启完成"
-        done
-    elif [ "$choice" = "2" ]; then
-        read -p "请输入要重启的端口号: " r_port
-        if [ -f "${SNELL_DIR}/snell-server-${r_port}.conf" ]; then
-            systemctl restart "snell-${r_port}"
-            echo ">> 端口 ${r_port} 重启成功。"
-        else
-            echo ">> 该端口实例不存在。"
-        fi
-    fi
-}
-
-# 6. 升级 Snell 核心二进制（含 Diff 7 自动回滚）
-upgrade_snell_binary() {
-    if [ ! -f "$SNELL_EXEC" ]; then
-        echo ">> 检测到系统尚未初装 Snell，正执行初次安装流程..."
-        install_or_upgrade_binary "false"
-        return
-    fi
-
-    echo ">> 正在强行检索并覆盖更新最新 Snell Core 二进制程序..."
-
-    # Diff 7: 备份旧二进制，用于回滚
-    local backup_bin
-    backup_bin="${SNELL_EXEC}.bak.$(date +%s)"
-    cp "$SNELL_EXEC" "$backup_bin"
-    echo ">> 已备份旧版二进制至 ${backup_bin}"
-
-    # 下载并替换新版本（install_or_upgrade_binary 内部会再做一次带时间戳备份，无副作用）
-    install_or_upgrade_binary "true"
-
-    # 获取当前所有端口
-    mapfile -t ports < <(list_ports)
-
-    if [ ${#ports[@]} -eq 0 ]; then
-        echo ">> 无存量实例，升级完成。"
-        rm -f "$backup_bin"
-        return
-    fi
-
-    echo ">> 正在滚动热重载唤醒系统所有存量 proxy 实例..."
-    for port in "${ports[@]}"; do
-        systemctl restart "snell-${port}" || true
-    done
-
-    # Diff 7: 全量健康检查
-    local rollback_required=false
-    for port in "${ports[@]}"; do
-        if ! systemctl is-active --quiet "snell-${port}"; then
-            echo "[错误] 升级后实例 ${port} 启动失败，触发回滚..."
-            rollback_required=true
-            break
-        fi
-    done
-
-    # Diff 7: 自动回滚逻辑
-    if [ "$rollback_required" = true ]; then
-        echo ">> 正在恢复旧版二进制..."
-        cp "$backup_bin" "$SNELL_EXEC"
-        chmod +x "$SNELL_EXEC"
-
-        echo ">> 正在重启所有实例至旧版本..."
-        for port in "${ports[@]}"; do
-            systemctl restart "snell-${port}" || true
-        done
-
-        echo "升级失败，已自动回滚至旧版本"
-        return 1
-    fi
-
-    # 升级成功，清理备份
-    rm -f "$backup_bin"
-    echo ">> 升级成功，所有实例运行正常。"
-
-    for port in "${ports[@]}"; do
-        if systemctl is-active --quiet "snell-${port}"; then
-            echo ">> 端口 ${port} 升级并恢复成功。"
-        else
-            echo "[错误] 端口 ${port} 状态异常，请手动排查！"
-        fi
-    done
-    echo ">> 存量实例滚动更新流程处理完毕。"
-}
-
-# 7. 实时巡检服务运行状态
-view_service_status() {
-    mapfile -t files < <(list_instance_configs)
-
-    if [ ${#files[@]} -eq 0 ]; then
-        echo ">> 系统中未发现任何活跃的 Snell 服务实例。"
-        return
-    fi
-
-    echo "=================================================="
-    echo "            Snell 实例运行状态全局仪表盘"
-    echo "=================================================="
-    printf "%-10s %-18s %-15s\n" "端口" "Systemd服务名" "当前运行状态"
-    echo "--------------------------------------------------"
-
-    for f in "${files[@]}"; do
-        local port
-        port=$(get_port_from_config "$f")
-        local status_str
-        if systemctl is-active --quiet "snell-${port}"; then
-            status_str="🟢 运行中 (Active)"
-        else
-            status_str="🔴 已停止 (Inactive)"
-        fi
-        printf "%-10s %-18s %-15s\n" "${port}" "snell-${port}" "${status_str}"
-    done
-    echo "=================================================="
-
-    echo ""
-    read -p "是否需要直接追溯某端口的实时底层日志？(输入端口号/直接回车跳过): " check_port
-    if [[ "$check_port" =~ ^[0-9]+$ ]] && [ -f "${SNELL_DIR}/snell-server-${check_port}.conf" ]; then
-        echo -e "\n---------------- [ 端口 ${check_port} 最近 20 行日志 ] ----------------"
-        journalctl -u "snell-${check_port}" -n 20 --no-pager
-        echo "------------------------------------------------------------------"
-    fi
-}
-
-# ======================================
-# 交互主循环菜单
-# ======================================
-while true; do
-    echo "======================================"
-    echo " Snell "
-    echo "======================================"
-    echo "  1. 新增端口实例"
-    echo "  2. 删除端口实例"
-    echo "  3. 查看配置明细"
-    echo "  4. 查看代理url "
-    echo "  5. 重启特定或全量实例"
-    echo "  6. 检查升级程序"
-    echo "  7.（Status)"
-    echo "  0. 安全退出"
-    echo "======================================"
-    read -p "请输入您要执行的操作选项 [0-7]: " OPT
-    case $OPT in
-        1) add_ports ;;
-        2) delete_ports ;;
-        3) view_config ;;
-        4) view_credentials ;;
-        5) restart_instances ;;
-        6) upgrade_snell_binary ;;
-        7) view_service_status ;;
-        0) echo "脚本安全退出。"; exit 0 ;;
-        *) echo "无效指令，请在 0 到 7 之间重新输入！" ;;
-    esac
-    echo ""
 done
