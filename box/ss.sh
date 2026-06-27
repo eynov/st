@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # ========================================================
-#  Shadowsocks-Rust 
+#  Shadowsocks-Rust 安全增强与健壮性重构版
 # ========================================================
 
 # ========== 全局变量与目录配置 ==========
@@ -14,6 +14,9 @@ QR_DIR="${SS_DIR}/qrcodes"
 LOCK_FILE="/tmp/ss.lock"
 LOG_DIR="/var/log/shadowsocks"
 
+# 【Diff 2 落地】显式导出全局路径，防止跨进程/Python 空间状态漂移
+export INSTANCES_JSON
+
 # ========== 1. 核心防御：全局进程互斥锁 ==========
 exec 200>"$LOCK_FILE"
 flock -n 200 || {
@@ -21,8 +24,16 @@ flock -n 200 || {
   exit 1
 }
 
-# 确保核心目录存在
+# 确保核心目录存在并调整属主以适配 Systemd 安全沙箱
 sudo mkdir -p "${SS_DIR}" "${QR_DIR}" "${LOG_DIR}"
+sudo chown -R nobody:nogroup "${LOG_DIR}"
+
+# ========== 【Diff 5 落地】IPv6 自动安全绑定检测 ==========
+if ip -6 addr | grep -q "global"; then
+  IPV6_BIND=', "::"'
+else
+  IPV6_BIND=''
+fi
 
 # ========== 2. 初始化中央状态机 ==========
 init_json() {
@@ -40,7 +51,7 @@ EOF
   fi
 }
 
-# ========== 3. 读写工具（环境变量传参 + fcntl 文件锁） ==========
+# ========== 3. 读写工具（环境变量传参 + fcntl 文件锁 + Diff 1 失败感知） ==========
 update_json_core() {
   local cur_v=$1
   local bak_v=$2
@@ -48,7 +59,7 @@ update_json_core() {
 
   CUR_V="$cur_v" BAK_V="$bak_v" TIME_STR="$time_str" \
   python3 - << 'PYEOF'
-import json, fcntl, os
+import json, fcntl, os, sys
 cur_v    = os.environ.get('CUR_V', '')
 bak_v    = os.environ.get('BAK_V', '')
 time_str = os.environ.get('TIME_STR', '')
@@ -63,8 +74,14 @@ try:
         f.seek(0); json.dump(d, f, indent=2); f.truncate()
         fcntl.flock(f, fcntl.LOCK_UN)
 except Exception as e:
-    print(f'❌ JSON 读写异常: {e}')
+    print(f'❌ JSON 读写异常: {e}', file=sys.stderr)
+    sys.exit(1)
 PYEOF
+  
+  if [ $? -ne 0 ]; then
+    echo "❌ 核心状态写入失败，终止操作。"
+    return 1
+  fi
 }
 
 update_json_port() {
@@ -75,9 +92,8 @@ update_json_port() {
   local sub_state=$5
 
   PORT="$port" PROTO="$proto" METHOD="$method" STATE="$state" SUB_STATE="$sub_state" \
-  INSTANCES_JSON="$INSTANCES_JSON" \
   python3 - << 'PYEOF'
-import json, datetime, fcntl, os
+import json, datetime, fcntl, os, sys
 port      = os.environ['PORT']
 proto     = os.environ['PROTO']
 method    = os.environ['METHOD']
@@ -98,16 +114,22 @@ try:
         f.seek(0); json.dump(d, f, indent=2); f.truncate()
         fcntl.flock(f, fcntl.LOCK_UN)
 except Exception as e:
-    print(f'❌ 端口标记异常: {e}')
+    print(f'❌ 端口标记异常: {e}', file=sys.stderr)
+    sys.exit(1)
 PYEOF
+
+  if [ $? -ne 0 ]; then
+    echo "❌ 端口状态注册失败，终止操作。"
+    return 1
+  fi
 }
 
 delete_json_port() {
   local port=$1
 
-  PORT="$port" INSTANCES_JSON="$INSTANCES_JSON" \
+  PORT="$port" \
   python3 - << 'PYEOF'
-import json, fcntl, os
+import json, fcntl, os, sys
 port = os.environ['PORT']
 path = os.environ['INSTANCES_JSON']
 try:
@@ -119,8 +141,14 @@ try:
         f.seek(0); json.dump(d, f, indent=2); f.truncate()
         fcntl.flock(f, fcntl.LOCK_UN)
 except Exception as e:
-    print(f'❌ 注销端口异常: {e}')
+    print(f'❌ 注销端口异常: {e}', file=sys.stderr)
+    sys.exit(1)
 PYEOF
+
+  if [ $? -ne 0 ]; then
+    echo "❌ 端口状态注销失败。"
+    return 1
+  fi
 }
 
 # ========== 4. 高级原子升级 ==========
@@ -129,11 +157,11 @@ upgrade_core() {
   init_json
 
   local OLD_VERSION
-  OLD_VERSION=$(INSTANCES_JSON="$INSTANCES_JSON" python3 - << 'PYEOF'
-import json, os
+  OLD_VERSION=$(python3 - << 'PYEOF'
+import json, os, sys
 try:
     print(json.load(open(os.environ['INSTANCES_JSON']))['core']['current_version'])
-except:
+except Exception as e:
     print('none')
 PYEOF
 )
@@ -158,11 +186,18 @@ PYEOF
   }
 
   local URL LATEST_VERSION
-  URL=$(echo "$LATEST_DATA" | grep browser_download_url | grep x86_64-unknown-linux-gnu.tar.xz | grep -v sha256 | cut -d '"' -f4)
-  LATEST_VERSION=$(echo "$LATEST_DATA" | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/')
+  # 【Diff 4 落地】改用 jq 解析，大幅增强复杂/格式多变架构下的稳定性
+  URL=$(echo "$LATEST_DATA" | jq -r '.assets[].browser_download_url' 2>/dev/null | grep x86_64-unknown-linux-gnu.tar.xz | grep -v sha256 | head -n 1)
+  LATEST_VERSION=$(echo "$LATEST_DATA" | jq -r '.tag_name' 2>/dev/null)
+
+  if [ -z "$URL" ] || [ "$URL" = "null" ] || [ -z "$LATEST_VERSION" ] || [ "$LATEST_VERSION" = "null" ]; then
+    echo "❌ 使用 jq 从 Release 信息中解析下载链接失败，退回正则兜底模式"
+    URL=$(echo "$LATEST_DATA" | grep browser_download_url | grep x86_64-unknown-linux-gnu.tar.xz | grep -v sha256 | cut -d '"' -f4 | head -n 1)
+    LATEST_VERSION=$(echo "$LATEST_DATA" | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/')
+  fi
 
   if [ -z "$URL" ]; then
-    echo "❌ 无法从 Release 信息中提取下载链接"
+    echo "❌ 无法提取下载链接"
     return 1
   fi
 
@@ -208,11 +243,6 @@ PYEOF
     return 1
   }
 
-  file "$TMP_FILE" | grep -q "XZ compressed data" || {
-    echo "❌ 下载文件损坏（非标准 XZ 压缩数据），终止操作"
-    return 1
-  }
-
   tar -xJf "$TMP_FILE" -C "$TMP_UNPACK" || {
     echo "❌ 解压失败"
     return 1
@@ -234,7 +264,7 @@ PYEOF
       echo "❌ 备份旧版本失败"
       return 1
     }
-    update_json_core "" "$OLD_VERSION" ""
+    update_json_core "" "$OLD_VERSION" "" || return 1
   fi
 
   sudo mv "${TMP_UNPACK}/ssserver" "$SS_EXEC" || {
@@ -244,8 +274,8 @@ PYEOF
   sudo chmod +x "$SS_EXEC"
 
   echo ">> 正在安全热重启所有预期状态为 active 的实例..."
-  INSTANCES_JSON="$INSTANCES_JSON" python3 - << 'PYEOF'
-import json, subprocess, os
+  python3 - << 'PYEOF'
+import json, subprocess, os, sys
 path = os.environ['INSTANCES_JSON']
 try:
     d = json.load(open(path))
@@ -255,10 +285,17 @@ try:
             status = '✅' if r.returncode == 0 else '⚠️'
             print(f'{status} 端口 {port} 重启{"成功" if r.returncode == 0 else "失败（请手动检查）"}')
 except Exception as e:
-    print(f'❌ 批量重启异常: {e}')
+    print(f'❌ 批量重启异常: {e}', file=sys.stderr)
+    sys.exit(1)
 PYEOF
+  
+  # 【Diff 1 落地】捕获 Python 空间异常中断
+  if [ $? -ne 0 ]; then
+    echo "❌ 热重启中继失败，请使用状态盘点手动恢复。"
+    return 1
+  fi
 
-  update_json_core "$LATEST_VERSION" "" "$(date +"%Y-%m-%d %H:%M:%S")"
+  update_json_core "$LATEST_VERSION" "" "$(date +"%Y-%m-%d %H:%M:%S")" || return 1
   echo "✅ 原子替换升级圆满完成。当前在线版本: $LATEST_VERSION"
   rm -rf "$TMP_FILE" "$TMP_UNPACK"
 }
@@ -269,10 +306,8 @@ rollback_core() {
 
   local cur_v
   local bak_v
-  cur_v=$(INSTANCES_JSON="$INSTANCES_JSON" python3 -c \
-    "import json,os; print(json.load(open(os.environ['INSTANCES_JSON']))['core']['current_version'])" 2>/dev/null)
-  bak_v=$(INSTANCES_JSON="$INSTANCES_JSON" python3 -c \
-    "import json,os; print(json.load(open(os.environ['INSTANCES_JSON']))['core']['backup_version'])" 2>/dev/null)
+  cur_v=$(python3 -c "import json,os; print(json.load(open(os.environ['INSTANCES_JSON']))['core']['current_version'])" 2>/dev/null)
+  bak_v=$(python3 -c "import json,os; print(json.load(open(os.environ['INSTANCES_JSON']))['core']['backup_version'])" 2>/dev/null)
 
   [ -f "$SS_BACKUP" ] || {
     echo "❌ 无本地 backup binary，无法回滚"
@@ -288,8 +323,8 @@ rollback_core() {
   sudo chmod +x "$SS_EXEC"
 
   echo ">> 正在重启受控节点实例..."
-  INSTANCES_JSON="$INSTANCES_JSON" python3 - << 'PYEOF'
-import json, subprocess, os
+  python3 - << 'PYEOF'
+import json, subprocess, os, sys
 path = os.environ['INSTANCES_JSON']
 try:
     d = json.load(open(path))
@@ -299,11 +334,16 @@ try:
             status = '✅' if r.returncode == 0 else '⚠️'
             print(f'{status} 端口 {port} 重启{"成功" if r.returncode == 0 else "失败"}')
 except Exception as e:
-    print(f'❌ JSON 损坏或重启异常: {e}')
-    exit(1)
+    print(f'❌ JSON 损坏或重启异常: {e}', file=sys.stderr)
+    sys.exit(1)
 PYEOF
 
-  update_json_core "$bak_v" "$cur_v" "$(date +"%Y-%m-%d %H:%M:%S")"
+  if [ $? -ne 0 ]; then
+    echo "❌ 灾备重组失败。"
+    return 1
+  fi
+
+  update_json_core "$bak_v" "$cur_v" "$(date +"%Y-%m-%d %H:%M:%S")" || return 1
   echo "✅ 灾备状态回滚成功！当前激活版本: $bak_v"
 }
 
@@ -333,10 +373,10 @@ import_existing() {
       [ -f "$CONF" ] || continue
 
       CONF="$CONF" python3 - << 'PYEOF'
-import json, os, subprocess, sys
+import json, os, subprocess, sys, fcntl, datetime
 
 conf_path = os.environ['CONF']
-inst_path = os.environ.get('INSTANCES_JSON', '/etc/shadowsocks/instances.json')
+inst_path = os.environ['INSTANCES_JSON']
 
 try:
     with open(conf_path) as f:
@@ -359,7 +399,6 @@ res = subprocess.run(['systemctl', 'is-active', svc], capture_output=True, text=
 real_state = 'running' if res.returncode == 0 else 'stopped'
 expect_state = 'active' if real_state == 'running' else 'inactive'
 
-import fcntl, datetime
 try:
     with open(inst_path, 'r+') as f:
         fcntl.flock(f, fcntl.LOCK_EX)
@@ -380,8 +419,14 @@ try:
         fcntl.flock(f, fcntl.LOCK_UN)
     print(f'  ✅ 端口 {port} | 协议: {proto} | 算法: {method} | 物理状态: {real_state} → 已接管')
 except Exception as e:
-    print(f'  ❌ 端口 {port} 写入状态机失败: {e}')
+    print(f'  ❌ 端口 {port} 写入状态机失败: {e}', file=sys.stderr)
+    sys.exit(1)
 PYEOF
+      
+      if [ $? -ne 0 ]; then
+        echo "❌ 扫描流程在处理 $CONF 时遭遇非正常异常退出。"
+        return 1
+      fi
       found=$((found + 1))
     done
   done
@@ -394,7 +439,7 @@ PYEOF
       conf=$(echo "$cmdline" | grep -oP '(?<=-c )\S+' || true)
       if [ -n "$conf" ] && [ -f "$conf" ]; then
         echo "  >> 进程 $pid 使用配置: $conf"
-        CONF="$conf" INSTANCES_JSON="$INSTANCES_JSON" python3 - << 'PYEOF'
+        CONF="$conf" python3 - << 'PYEOF'
 import json, os, fcntl, datetime, sys
 conf_path = os.environ['CONF']
 inst_path = os.environ['INSTANCES_JSON']
@@ -421,8 +466,10 @@ try:
             print(f'  ✅ 进程兜底接管：端口 {port} | 算法: {method}')
         fcntl.flock(f, fcntl.LOCK_UN)
 except Exception as e:
-    print(f'  ⚠️  进程兜底失败: {e}')
+    print(f'  ⚠️  进程兜底失败: {e}', file=sys.stderr)
+    sys.exit(1)
 PYEOF
+        if [ $? -ne 0 ]; then return 1; fi
       fi
     done
   fi
@@ -433,7 +480,7 @@ PYEOF
     echo ""
     echo "✅ 扫描接管完成，当前状态机快照："
     echo "--------------------------------------------------"
-    INSTANCES_JSON="$INSTANCES_JSON" python3 - << 'PYEOF'
+    python3 - << 'PYEOF'
 import json, os
 path = os.environ['INSTANCES_JSON']
 d = json.load(open(path))
@@ -441,7 +488,6 @@ for port, info in d.get('ports', {}).items():
     print(f"端口: {port} | 协议: {info.get('protocol')} | 算法: {info.get('method')} | 状态: {info.get('state')} / {info.get('sub_state')}")
 PYEOF
     echo "--------------------------------------------------"
-    echo ">> 现在可使用菜单选项 4 执行内核升级，升级后所有 active 节点将自动热重启。"
   fi
 }
 
@@ -453,8 +499,8 @@ node_control() {
 
   echo "当前节点列表："
   echo "--------------------------------------------------"
-  INSTANCES_JSON="$INSTANCES_JSON" python3 - << 'PYEOF'
-import json, subprocess, os
+  python3 - << 'PYEOF'
+import json, subprocess, os, sys
 path = os.environ['INSTANCES_JSON']
 try:
     d = json.load(open(path))
@@ -468,8 +514,11 @@ try:
         real = '🟢 运行中' if res.returncode == 0 else '🔴 已停止'
         print(f"  端口: {port} | 算法: {info.get('method')} | {real}")
 except Exception as e:
-    print(f'❌ 读取状态机失败: {e}')
+    print(f'❌ 读取状态机失败: {e}', file=sys.stderr)
+    sys.exit(1)
 PYEOF
+  
+  if [ $? -ne 0 ]; then return 1; fi
   echo "--------------------------------------------------"
 
   echo ""
@@ -481,8 +530,7 @@ PYEOF
   if [ "$TARGET_OPT" = "2" ]; then
     read -rp "请输入端口号（空格分隔多个）: " TARGET_PORTS
   else
-    TARGET_PORTS=$(INSTANCES_JSON="$INSTANCES_JSON" python3 -c \
-      "import json,os; d=json.load(open(os.environ['INSTANCES_JSON'])); print(' '.join(d.get('ports',{}).keys()))" 2>/dev/null)
+    TARGET_PORTS=$(python3 -c "import json,os; d=json.load(open(os.environ['INSTANCES_JSON'])); print(' '.join(d.get('ports',{}).keys()))" 2>/dev/null)
     if [ -z "$TARGET_PORTS" ]; then
       echo "❌ 状态机中无已注册节点"
       return 1
@@ -520,13 +568,10 @@ PYEOF
 
     if $ok; then
       echo "  ✅ 端口 ${PORT} ${ACTION} 成功"
-      # 读取当前 proto 和 method 更新状态机
       local CUR_PROTO CUR_METHOD
-      CUR_PROTO=$(INSTANCES_JSON="$INSTANCES_JSON" python3 -c \
-        "import json,os; print(json.load(open(os.environ['INSTANCES_JSON']))['ports'].get('${PORT}',{}).get('protocol','ss'))" 2>/dev/null)
-      CUR_METHOD=$(INSTANCES_JSON="$INSTANCES_JSON" python3 -c \
-        "import json,os; print(json.load(open(os.environ['INSTANCES_JSON']))['ports'].get('${PORT}',{}).get('method','unknown'))" 2>/dev/null)
-      update_json_port "$PORT" "$CUR_PROTO" "$CUR_METHOD" "$NEW_STATE" "$NEW_SUB"
+      CUR_PROTO=$(python3 -c "import json,os; print(json.load(open(os.environ['INSTANCES_JSON']))['ports'].get('${PORT}',{}).get('protocol','ss'))" 2>/dev/null)
+      CUR_METHOD=$(python3 -c "import json,os; print(json.load(open(os.environ['INSTANCES_JSON']))['ports'].get('${PORT}',{}).get('method','unknown'))" 2>/dev/null)
+      update_json_port "$PORT" "$CUR_PROTO" "$CUR_METHOD" "$NEW_STATE" "$NEW_SUB" || return 1
     else
       echo "  ⚠️  端口 ${PORT} ${ACTION} 失败 → journalctl -u ss${PORT} -n 20"
     fi
@@ -538,12 +583,13 @@ PYEOF
 # ========== 初始化动作 ==========
 init_json
 
-# ========== 启动前依赖补全 ==========
+# ========== 【Diff 4 变更】合并依赖补全与安装工具自动化 ==========
 if ! command -v file >/dev/null 2>&1 || \
    ! command -v xz >/dev/null 2>&1 || \
    ! command -v qrencode >/dev/null 2>&1 || \
+   ! command -v jq >/dev/null 2>&1 || \
    ! command -v xxd >/dev/null 2>&1; then
-  sudo apt update -qq >/dev/null 2>&1 && sudo apt install -y file xz-utils qrencode xxd >/dev/null 2>&1
+  sudo apt update -qq >/dev/null 2>&1 && sudo apt install -y file xz-utils qrencode jq xxd >/dev/null 2>&1
 fi
 
 # ========== 启动前自愈自检 ==========
@@ -587,14 +633,6 @@ while true; do
     upgrade_core || { echo "❌ 初始化运行环境失败"; continue; }
   fi
 
-  if ! dpkg -l qrencode file xz-utils >/dev/null 2>&1 || \
-     ! command -v qrencode >/dev/null 2>&1 || \
-     ! command -v file >/dev/null 2>&1 || \
-     ! command -v xz >/dev/null 2>&1 || \
-     ! command -v xxd >/dev/null 2>&1; then
-    sudo apt update -qq && sudo apt install -y qrencode file xz-utils xxd >/dev/null 2>&1
-  fi
-
   # ========== 功能模块：删除节点 ==========
   if [ "$MODE" = "2" ]; then
     read -rp "请输入需要安全下线的端口号（空格分隔）: " PORTS
@@ -603,29 +641,32 @@ while true; do
       sudo systemctl disable "ss${PORT}" 2>/dev/null || true
       sudo rm -f "/etc/systemd/system/ss${PORT}.service"
       sudo rm -f "${SS_DIR}/config${PORT}.json"
-      delete_json_port "$PORT"
+      delete_json_port "$PORT" || true
       echo "🗑 端口 ${PORT} 已彻底执行下线隔离并注销。"
     done
     sudo systemctl daemon-reload
     continue
   fi
 
-  # ========== 功能模块：状态盘点 ==========
+  # ========== 功能模块：状态盘点 + 端口详情查询 ==========
   if [ "$MODE" = "3" ]; then
     echo "=================================================="
-    CURRENT_VER=$(INSTANCES_JSON="$INSTANCES_JSON" python3 -c \
-      "import json,os; print(json.load(open(os.environ['INSTANCES_JSON']))['core']['current_version'])" 2>/dev/null)
+    CURRENT_VER=$(python3 -c "import json,os; print(json.load(open(os.environ['INSTANCES_JSON']))['core']['current_version'])" 2>/dev/null)
     echo "  Core 状态  | 运行内核: ${CURRENT_VER}"
     echo "=================================================="
     echo " 实例清单 (State Matrix) ："
     echo "--------------------------------------------------"
 
-    INSTANCES_JSON="$INSTANCES_JSON" python3 - << 'PYEOF'
-import json, subprocess, os
+    python3 - << 'PYEOF'
+import json, subprocess, os, sys
 path = os.environ['INSTANCES_JSON']
 try:
     d = json.load(open(path))
-    for port, info in d.get('ports', {}).items():
+    ports = sorted(list(d.get('ports', {}).keys()), key=lambda x: int(x) if x.isdigit() else 0)
+    if not ports:
+        print("  ℹ️  中央状态机中暂无已注册的节点。")
+    for port in ports:
+        info = d['ports'][port]
         res = subprocess.run(['systemctl', 'is-active', f'ss{port}'],
                              capture_output=True, text=True)
         real_sub = 'running' if res.returncode == 0 else 'stopped'
@@ -633,9 +674,81 @@ try:
         print(f"预期状态(State): {info.get('state')} | 物理状态(Sub-state): {real_sub}")
         print('-' * 50)
 except Exception as e:
-    print(f'❌ JSON 损坏: {e}')
-    exit(1)
+    print(f'❌ JSON 损坏: {e}', file=sys.stderr)
+    sys.exit(1)
 PYEOF
+    
+    if [ $? -ne 0 ]; then continue; fi
+
+    echo ""
+    read -rp "🔍 是否要查看特定节点的详细连接信息(密码/URI/二维码)？请输入端口号（直接回车跳过）: " QUERY_PORTS
+    if [ -n "$QUERY_PORTS" ]; then
+      LOCAL_IP=$(curl --max-time 5 -s -4 ifconfig.me)
+      [ -n "$LOCAL_IP" ] || LOCAL_IP="你的VPS_IP"
+
+      for Q_PORT in $QUERY_PORTS; do
+        echo ""
+        echo "==================== [ 端口 $Q_PORT 详情 ] ===================="
+        CONF_PATH="${SS_DIR}/config${Q_PORT}.json"
+        
+        if [ ! -f "$CONF_PATH" ]; then
+          CONF_PATH=$(python3 -c "import json,os; d=json.load(open(os.environ['INSTANCES_JSON'])); print(d['ports'].get('${Q_PORT}', {}).get('conf_path', ''))" 2>/dev/null)
+        fi
+
+        if [ -z "$CONF_PATH" ] || [ ! -f "$CONF_PATH" ]; then
+          echo "❌ 找不到端口 ${Q_PORT} 的配置文件，请确认端口是否正确或节点是否已删除。"
+          continue
+        fi
+
+        CONF_PATH="$CONF_PATH" LOCAL_IP="$LOCAL_IP" Q_PORT="$Q_PORT" python3 - << 'PYEOF'
+import json, os, subprocess, sys
+
+conf_path = os.environ['CONF_PATH']
+ip        = os.environ['LOCAL_IP']
+port      = os.environ['Q_PORT']
+
+try:
+    with open(conf_path) as f:
+        c = json.load(f)
+except Exception as e:
+    print(f"❌ 配置文件解析失败: {e}", file=sys.stderr)
+    sys.exit(1)
+
+method = c.get('method', 'unknown')
+users  = c.get('users', [])
+is_ss2022 = len(users) > 0 or '2022' in method
+
+if is_ss2022:
+    password = users[0].get('password', c.get('password', '')) if users else c.get('password', '')
+    tag = f"SS2022_{port}"
+else:
+    password = c.get('password', '')
+    tag = f"SS_{port}"
+
+try:
+    import base64
+    userinfo = base64.b64encode(f"{method}:{password}".encode('utf-8')).decode('utf-8')
+    ss_uri = f"ss://{userinfo}@{ip}:{port}#{tag}"
+    surge_line = f"{tag} = ss, {ip}, {port}, encrypt-method={method}, password={password}, udp-relay=true"
+    
+    print(f"🔹 协议族类型: {'Shadowsocks 2022' if is_ss2022 else 'Shadowsocks Legacy'}")
+    print(f"🔹 加密算法  : {method}")
+    print(f"🔹 密钥/密码 : {password}")
+    print(f"\n📋 Surge 代理配置行:")
+    print(f"--------------------------------------------------\n{surge_line}\n--------------------------------------------------")
+    print(f"\n🔗 标准 ss:// URI:")
+    print(f"--------------------------------------------------\n{ss_uri}\n--------------------------------------------------")
+    print(f"\n📱 客户端节点二维码:")
+    print(f"--------------------------------------------------")
+    subprocess.run(['qrencode', '-t', 'UTF8', ss_uri])
+    print(f"--------------------------------------------------")
+except Exception as e:
+    print(f"❌ 数据串转换异常: {e}", file=sys.stderr)
+    sys.exit(1)
+PYEOF
+        if [ $? -ne 0 ]; then echo "⚠️ 该端口详情加载失败。"; fi
+      done
+    fi
     continue
   fi
 
@@ -679,9 +792,10 @@ PYEOF
       esac
       PASSWORD=$(openssl rand -hex 16)
 
+      # 【Diff 5 落地】利用自愈表达式完美渲染安全的 IPv6 / IPv4 多重单双栈混联绑定
       sudo tee "${SS_CONF}" > /dev/null << EOL
 {
-  "server": ["0.0.0.0", "::"],
+  "server": ["0.0.0.0"${IPV6_BIND}],
   "server_port": ${PORT},
   "password": "${PASSWORD}",
   "method": "${METHOD}",
@@ -711,9 +825,10 @@ EOL
       MASTER_KEY_B64=$(echo -n "$MASTER_KEY" | xxd -r -p | base64 -w0)
       SUB_KEY_B64=$(echo -n "$SUB_KEY"    | xxd -r -p | base64 -w0)
 
+      # 【Diff 5 落地】2022 架构同步支持单双栈绑定
       sudo tee "${SS_CONF}" > /dev/null << EOL
 {
-  "server": ["0.0.0.0", "::"],
+  "server": ["0.0.0.0"${IPV6_BIND}],
   "server_port": ${PORT},
   "method": "${METHOD}",
   "password": "${MASTER_KEY_B64}",
@@ -730,6 +845,7 @@ EOL
       SS_URI=$(gen_ss_uri "$METHOD" "$SUB_KEY_B64" "$SERVER_IP" "$PORT" "SS2022_${PORT}")
     fi
 
+    # 【Diff 3 落地】Systemd 生产级高强度沙箱配置（拒绝 Root 逃逸，限缩写权限至指定 Log 目录）
     sudo tee "${SYSTEMD_SERVICE}" > /dev/null << EOL
 [Unit]
 Description=Shadowsocks Declarative Node Service on Port ${PORT}
@@ -742,6 +858,15 @@ StandardError=append:${LOG_DIR}/ss${PORT}.log
 Restart=on-failure
 RestartSec=5s
 
+User=nobody
+Group=nogroup
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=${LOG_DIR}
+LimitNOFILE=1048576
+
 [Install]
 WantedBy=multi-user.target
 EOL
@@ -750,7 +875,7 @@ EOL
     sudo systemctl enable "ss${PORT}" >/dev/null 2>&1
     sudo systemctl restart "ss${PORT}"
 
-    update_json_port "$PORT" "$PROTO" "$METHOD" "active" "running"
+    update_json_port "$PORT" "$PROTO" "$METHOD" "active" "running" || continue
 
     echo "✅ 端口 ${PORT} 已成功上线。"
     echo "$SURGE_LINK" >> "$SURGE_FILE"
