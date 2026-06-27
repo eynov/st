@@ -649,15 +649,9 @@ except Exception as e:
     sys.exit(1)
 
 method = c.get('method', 'unknown')
-users  = c.get('users', [])
-is_ss2022 = len(users) > 0 or '2022' in method
-
-if is_ss2022:
-    password = users[0].get('password', c.get('password', '')) if users else c.get('password', '')
-    tag = f"SS2022_{port}"
-else:
-    password = c.get('password', '')
-    tag = f"SS_{port}"
+is_ss2022 = '2022' in method
+password = c.get('password', '')
+tag = f"SS2022_{port}" if is_ss2022 else f"SS_{port}"
 
 try:
     import base64
@@ -766,10 +760,7 @@ EOL
     esac
 
     MASTER_KEY=$(openssl rand -hex "$KEY_SIZE")
-    SUB_KEY=$(openssl rand -hex "$KEY_SIZE")
-
     MASTER_KEY_B64=$(echo -n "$MASTER_KEY" | xxd -r -p | base64 -w0)
-    SUB_KEY_B64=$(echo -n "$SUB_KEY"    | xxd -r -p | base64 -w0)
 
     sudo tee "${SS_CONF}" > /dev/null << EOL
 {
@@ -777,17 +768,13 @@ EOL
   "server_port": ${PORT},
   "method": "${METHOD}",
   "password": "${MASTER_KEY_B64}",
-  "users": [
-    {
-      "name": "user1",
-      "password": "${SUB_KEY_B64}"
-    }
-  ]
+  "timeout": 300,
+  "mode": "tcp_and_udp"
 }
 EOL
 
-    SURGE_LINK="SS2022_${PORT} = ss, ${SERVER_IP}, ${PORT}, encrypt-method=${METHOD}, password=${SUB_KEY_B64}, udp-relay=true"
-    SS_URI=$(gen_ss_uri "$METHOD" "$SUB_KEY_B64" "$SERVER_IP" "$PORT" "SS2022_${PORT}")
+    SURGE_LINK="SS2022_${PORT} = ss, ${SERVER_IP}, ${PORT}, encrypt-method=${METHOD}, password=${MASTER_KEY_B64}, udp-relay=true"
+    SS_URI=$(gen_ss_uri "$METHOD" "$MASTER_KEY_B64" "$SERVER_IP" "$PORT" "SS2022_${PORT}")
   fi
 
   sudo tee "${SYSTEMD_SERVICE}" > /dev/null << EOL
