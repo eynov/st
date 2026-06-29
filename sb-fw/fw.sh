@@ -1,5 +1,5 @@
 #!/bin/bash
-# --- fw.sh (原汁原味架构 + 纯净主菜单版) ---
+# --- fw.sh  ---
 
 if [ -L "${BASH_SOURCE[0]}" ]; then
     REAL_SCRIPT_PATH=$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || echo "")
