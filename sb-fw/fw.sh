@@ -40,17 +40,38 @@ trigger_render() {
 }
 
 add_forward() {
-    read -p "🔹 请输入目标落地 IP 或域名: " dest_addr
-    if [[ ! "$dest_addr" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-        dip=$(dig +short "$dest_addr" | tail -n1)
-        if [ -z "$dip" ]; then echo "❌ 域名解析失败！"; return; fi
+    read -p "🔹 请输入目标落地 IP 或域名 (可带端口如 127.0.0.1:443): " dest_addr
+
+    # 解析是否带端口（格式 ip:port 或 domain:port，排除纯 IPv6）
+    if [[ "$dest_addr" =~ ^([^:]+):([0-9]+)$ ]]; then
+        raw_host="${BASH_REMATCH[1]}"
+        dest_port_default="${BASH_REMATCH[2]}"
     else
-        dip="$dest_addr"
+        raw_host="$dest_addr"
+        dest_port_default=""
     fi
-    
+
+    # 域名/IP 解析
+    if [[ "$raw_host" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+        dip="$raw_host"
+    else
+        dip=$(dig +short "$raw_host" | tail -n1)
+        if [ -z "$dip" ]; then echo "❌ 域名解析失败！"; return; fi
+    fi
+
     read -p "🔹 请输入起始端口: " sport
     read -p "🔹 请输入结束端口 (若单端口直接回车): " dport
     [ -z "$dport" ] && dport="$sport"
+
+    # 目标端口：优先用 IP 里带的，否则询问，回车默认起始端口
+    if [ -n "$dest_port_default" ]; then
+        dest_port="$dest_port_default"
+        echo "ℹ️  目标端口自动使用: $dest_port"
+    else
+        read -p "🔹 请输入目标端口 (直接回车默认与起始端口相同): " dest_port
+        [ -z "$dest_port" ] && dest_port="$sport"
+    fi
+
     read -p "🔹 请输入协议 (tcp/udp/both, 默认 both): " proto
     [ -z "$proto" ] && proto="both"
 
@@ -62,8 +83,10 @@ add_forward() {
         exists=$(jq --arg sport "$sport" --arg dport "$dport" --arg proto "$p" \
             '.forwards[]? | select(.sport==$sport and .dport==$dport and .proto==$proto)' "$STATE_FILE" 2>/dev/null)
         if [ -z "$exists" ]; then
-            jq --arg sport "$sport" --arg dport "$dport" --arg dip "$dip" --arg proto "$p" \
-               '.forwards += [{"sport":$sport, "dport":$dport, "dip":$dip, "proto":$proto}]' "$STATE_FILE" > "${STATE_FILE}.tmp" && mv "${STATE_FILE}.tmp" "$STATE_FILE"
+            jq --arg sport "$sport" --arg dport "$dport" --arg dip "$dip" \
+               --arg proto "$p" --arg dest_port "$dest_port" \
+               '.forwards += [{"sport":$sport,"dport":$dport,"dip":$dip,"proto":$proto,"dest_port":$dest_port}]' \
+               "$STATE_FILE" > "${STATE_FILE}.tmp" && mv "${STATE_FILE}.tmp" "$STATE_FILE"
         fi
     done
     trigger_render
@@ -82,7 +105,7 @@ show_forward() {
     echo -e "\n=== 📍 当前端口转发规则列表 ==="
     echo -e "Index\t协议\t本地端口\t目标映射"
     echo -e "-----------------------------------------------"
-    jq -r '.forwards | to_entries[] | "\(.key)\t\(.value.proto)\t\(.value.sport)-\(.value.dport)\t-> \(.value.dip)"' "$STATE_FILE" 2>/dev/null
+    jq -r '.forwards | to_entries[] | "\(.key)\t\(.value.proto)\t\(.value.sport)-\(.value.dport)\t-> \(.value.dip):\(.value.dest_port)"' "$STATE_FILE" 2>/dev/null
     echo ""
 }
 
@@ -140,7 +163,6 @@ while true; do
     echo "========================="
     echo "   SB Firewall Manager   "
     echo "========================="
-    # ✅ 完美剔除：这里不再自动加载并运行 show_ports，保持纯洁的菜单面板
     echo "1. 添加端口转发    2. 删除端口转发    3. 查看端口转发"
     echo "-------------------------------------------------"
     echo "4. 放行端口        5. 删除放行端口    6. 查看放行端口"
@@ -159,7 +181,7 @@ while true; do
         3) show_forward ;;
         4) add_port ;;
         5) del_port ;;
-        6) show_ports ;;  # 👈 只有当手动选择 6 时才精准触发打印
+        6) show_ports ;;
         7) add_blacklist ;;
         8) del_blacklist ;;
         9) show_blacklist ;;
