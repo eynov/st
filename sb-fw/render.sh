@@ -1,5 +1,5 @@
 #!/bin/bash
-# --- render.sh (绝对路径加固 + 锁与Schema防御完全体) ---
+# --- render.sh ---
 
 # ── 1. 更加健壮的文件锁熔断机制（防止子 Shell 嵌套锁死） ──────────────────
 LOCKFILE="/var/lock/sb_fw_render.lock"
@@ -42,7 +42,6 @@ fi
 sysctl -w net.ipv4.ip_forward=1 > /dev/null
 echo "net.ipv4.ip_forward=1" > /etc/sysctl.d/99-forward.conf
 
-# 💡 优化点：增强 IP 获取成功率（多加 2 个备用 API，且将超时宽限到 5 秒）
 SRC_IP=$(curl -s4 -m 5 https://api.ip.sb/ip || \
          curl -s4 -m 5 https://ifconfig.me || \
          curl -s4 -m 5 https://api.ipify.org || \
@@ -55,7 +54,7 @@ fi
 
 SSH_PORT=$(ss -tlnp | grep -E 'sshd|listen' | grep -oP '(?<=:)\d+(?=\s)' | head -n1)
 [ -z "$SSH_PORT" ] && SSH_PORT=$(awk '/^Port/ {print $2}' /etc/ssh/sshd_config | head -n1)
-[ -z "$SSH_PORT" ] && SSH_PORT="22" 
+[ -z "$SSH_PORT" ] && SSH_PORT="22"
 
 BLACKLIST=$(jq -r '.blacklist | join(", ")' "$STATE_FILE" 2>/dev/null)
 [ -z "$BLACKLIST" ] && BLACKLIST="127.0.0.2"
@@ -75,18 +74,20 @@ while read -r row; do
     dport=$(echo "$row" | jq -r '.dport')
     dip=$(echo "$row" | jq -r '.dip')
     proto=$(echo "$row" | jq -r '.proto')
+    # dest_port：优先用字段值，若无则回退到起始端口（兼容旧规则）
+    dest_port=$(echo "$row" | jq -r '.dest_port // empty')
+    [ -z "$dest_port" ] && dest_port="$sport"
 
     port_range="$sport"
     [ "$sport" != "$dport" ] && port_range="$sport-$dport"
 
-    DNAT_RULES="${DNAT_RULES}        $proto dport $port_range dnat to $dip\n"
-    SNAT_RULES="${SNAT_RULES}        ip daddr $dip $proto dport $port_range snat to $SRC_IP\n"
+    DNAT_RULES="${DNAT_RULES}        $proto dport $port_range dnat to $dip:$dest_port\n"
+    SNAT_RULES="${SNAT_RULES}        ip daddr $dip $proto dport $dest_port snat to $SRC_IP\n"
 done < <(jq -c '.forwards[]?' "$STATE_FILE" 2>/dev/null)
 
 # ── 4. 模版渲染与应用 ──────────────────────────────────────
 echo "flush ruleset" > "$BUILD_CONF"
 
-# 🛡️ 路径纠偏防御：确保模版读取时使用绝对路径，绝不迷路
 cat "$BASE_DIR/rules/filter.nft.tpl" >> "$BUILD_CONF"
 sed -i "s/#BLACKLIST#/$BLACKLIST/g" "$BUILD_CONF"
 sed -i "s/#TCP_PORTS#/$TCP_PORTS/g" "$BUILD_CONF"
