@@ -1,6 +1,6 @@
 #!/bin/bash
 # ==============================================================================
-# sing-box 核心资产安装 / 升级 + 快捷命令 sb 软链接注册
+# 安装器：sing-box 核心安装 / 升级 + 目录初始化
 # ==============================================================================
 
 BASE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -8,7 +8,11 @@ source "$BASE_DIR/core/common.sh"
 
 check_and_install_core() {
     echo "🔄 正在核验 sing-box 核心资产与依赖链..."
-    apt-get update -qq && apt-get install -y curl jq tar gzip openssl wget qrencode >/dev/null 2>&1
+    apt-get update -qq
+    apt-get install -y curl jq tar gzip openssl wget qrencode >/dev/null 2>&1
+
+    # 初始化目录结构
+    ensure_dirs
 
     # 注册快捷命令 sb
     if [ ! -L "/usr/local/bin/sb" ]; then
@@ -19,32 +23,24 @@ check_and_install_core() {
 
     # 获取上游最新版本
     local http_code latest_ver
-    http_code=$(curl -s -o /tmp/sb.json -w "%{http_code}" \
+    http_code=$(curl -s -o /tmp/sb_release.json -w "%{http_code}" \
         https://api.github.com/repos/SagerNet/sing-box/releases/latest)
     latest_ver="1.11.0"  # 离线 fallback
 
-    if [ "$http_code" == "200" ] && jq -e .tag_name /tmp/sb.json >/dev/null 2>&1; then
-        latest_ver=$(jq -r .tag_name /tmp/sb.json | sed 's/^v//')
+    if [ "$http_code" = "200" ] && jq -e .tag_name /tmp/sb_release.json >/dev/null 2>&1; then
+        latest_ver=$(jq -r .tag_name /tmp/sb_release.json | sed 's/^v//')
     fi
-    rm -f /tmp/sb.json
+    rm -f /tmp/sb_release.json
 
     # 版本比对
     if [ -f "$SB_BIN" ]; then
         local current_ver
         current_ver=$($SB_BIN version 2>/dev/null | awk '{print $3}' | sed 's/^v//')
-        if command -v dpkg >/dev/null 2>&1; then
-            if dpkg --compare-versions "$current_ver" ge "$latest_ver" 2>/dev/null; then
-                ok "sing-box 已是最新版本 v${current_ver}，跳过安装。"
-                return
-            fi
-        else
-            # 非 Debian 系：直接用字符串比对
-            if [ "$current_ver" == "$latest_ver" ]; then
-                ok "sing-box 已是最新版本 v${current_ver}，跳过安装。"
-                return
-            fi
+        if dpkg --compare-versions "$current_ver" ge "$latest_ver" 2>/dev/null; then
+            ok "sing-box 已是最新版本 v${current_ver}，跳过安装。"
+            return
         fi
-        echo "🔄 检测到上游新版本 v${latest_ver}，正在下发平滑升级..."
+        echo "🔄 检测到上游新版本 v${latest_ver}，正在升级..."
     fi
 
     # 架构映射
@@ -54,7 +50,7 @@ check_and_install_core() {
         x86_64)  arch="linux-amd64" ;;
         aarch64) arch="linux-arm64" ;;
         *)
-            err "架构不兼容：不支持的 CPU 架构 ${arch}"
+            err "不支持的 CPU 架构: ${arch}"
             exit 1
             ;;
     esac

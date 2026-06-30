@@ -1,261 +1,427 @@
 #!/bin/bash
 # ==============================================================================
-# sing-box 模块化容器多实例微服务集群管理面板
-# 快捷命令: sb
+# sb - sing-box 管理工具
 # ==============================================================================
-set -e
 
-if [ "$EUID" -ne 0 ]; then
-    echo "❌ 错误：请以 root 权限运行此面板！"
-    exit 1
-fi
+REAL_SOURCE="$(readlink -f "${BASH_SOURCE[0]}")"
+BASE_DIR="$(cd "$(dirname "${REAL_SOURCE}")" && pwd)"
 
-# 🔥 动态获取脚本真实物理路径（自动追踪软链接）
-BASE_DIR="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")"
-
-# 引入核心模块
 source "$BASE_DIR/core/common.sh"
 source "$BASE_DIR/core/state.sh"
-source "$BASE_DIR/core/install.sh"
-source "$BASE_DIR/core/service.sh"
+source "$BASE_DIR/core/registry.sh"
 source "$BASE_DIR/core/runtime.sh"
+source "$BASE_DIR/core/service.sh"
+source "$BASE_DIR/core/install.sh"
+load_protocols
 
-# 🔥 动态加载所有协议插件（协议自注册，主脚本零感知）
-for f in "$BASE_DIR/protocols"/*.sh; do
-    [ -f "$f" ] && source "$f"
-done
+[[ "$EUID" -ne 0 ]] && { err "请以 root 权限运行"; exit 1; }
 
-# 初始化运行时资产目录
-mkdir -p "$INST_DIR" "$CERT_DIR"
-state_init
-state_sync_from_instances
+ensure_dirs
+
+# ------------------------------------------------------------------------------
+# 内部：修改 state 后自动 compile + reload
+# ------------------------------------------------------------------------------
+_commit() {
+    compile_all && service_reload
+}
+
+# ------------------------------------------------------------------------------
+# 内部：解析实例参数 → id，失败则 exit
+# 用法: _resolve <arg1> [arg2]
+# ------------------------------------------------------------------------------
+_resolve() {
+    local id
+    id=$(resolve_id "$@") || exit 1
+    echo "$id"
+}
+
+# ------------------------------------------------------------------------------
+# 交互菜单：无参数运行 sb 时进入
+# ------------------------------------------------------------------------------
+interactive_menu() {
+    while true; do
+        echo ""
+        echo "┌─────────────────────────────────┐"
+        echo "│         sb 管理菜单             │"
+        echo "├─────────────────────────────────┤"
+        echo "│  1) 添加节点                    │"
+        echo "│  2) 查看节点列表                │"
+        echo "│  3) 编辑节点                    │"
+        echo "│  4) 删除节点                    │"
+        echo "│  5) 启用节点                    │"
+        echo "│  6) 停用节点                    │"
+        echo "│  7) 重启单个节点                │"
+        echo "│  8) 查看节点详情 / 分享链接     │"
+        echo "├─────────────────────────────────┤"
+        echo "│  9) 服务管理（启动/停止/状态）  │"
+        echo "│ 10) 查看订阅                    │"
+        echo "│ 11) 安装 / 升级 sing-box        │"
+        echo "├─────────────────────────────────┤"
+        echo "│  0) 退出                        │"
+        echo "└─────────────────────────────────┘"
+        read -rp "请输入编号: " choice
+
+        case "$choice" in
+            1)
+                "$0" add
+                ;;
+            2)
+                "$0" list
+                ;;
+            3)
+                read -rp "实例 id（如 is01）: " mid
+                "$0" edit "$mid"
+                ;;
+            4)
+                read -rp "实例 id（如 is01）: " mid
+                "$0" remove "$mid"
+                ;;
+            5)
+                read -rp "实例 id（如 is01）: " mid
+                "$0" enable "$mid"
+                ;;
+            6)
+                read -rp "实例 id（如 is01）: " mid
+                "$0" disable "$mid"
+                ;;
+            7)
+                read -rp "实例 id（如 is01）: " mid
+                "$0" restart "$mid"
+                ;;
+            8)
+                read -rp "实例 id（如 is01）: " mid
+                "$0" info "$mid"
+                ;;
+            9)
+                echo ""
+                echo "  1) 启动   2) 停止   3) 状态   4) 日志"
+                read -rp "请选择: " sc
+                case "$sc" in
+                    1) "$0" start  ;;
+                    2) "$0" stop   ;;
+                    3) "$0" status ;;
+                    4) "$0" logs   ;;
+                    *) warn "无效选择" ;;
+                esac
+                ;;
+            10)
+                "$0" sub
+                ;;
+            11)
+                "$0" install
+                ;;
+            0)
+                echo "已退出"
+                exit 0
+                ;;
+            *)
+                warn "无效选择"
+                ;;
+        esac
+
+        echo ""
+        read -rp "按回车键返回菜单..." _
+    done
+}
 
 # ==============================================================================
-# 新增实例
-# 升级点：菜单动态从 PROTO_MENU 生成，去除硬编码 case
+# 命令路由
 # ==============================================================================
-add_instance() {
+
+# 无参数运行 → 进入交互菜单
+if [ $# -eq 0 ]; then
+    interactive_menu
+    exit 0
+fi
+
+CMD="${1:-help}"
+shift || true
+
+case "$CMD" in
+
+# ------------------------------------------------------------------------------
+# sb install
+# ------------------------------------------------------------------------------
+install)
     check_and_install_core
+    gen_service
+    ;;
 
-    echo "======================================"
-    echo " 🚀 选择服务挂载协议"
+# ------------------------------------------------------------------------------
+# sb add [proto] [port]
+# ------------------------------------------------------------------------------
+add)
+    proto="${1:-}"
+    port="${2:-}"
 
-    # 动态生成编号菜单（按 PROTO_KEYS 注册顺序，顺序固定）
-    local i=1
-    declare -A PROTO_INDEX
-    for key in "${PROTO_KEYS[@]}"; do
-        echo " $i) ${PROTO_MENU[$key]}"
-        PROTO_INDEX[$i]="$key"
-        ((i++))
-    done
-    echo "======================================"
-    read -p ">> " proto_choice
-
-    local selected_key="${PROTO_INDEX[$proto_choice]}"
-    if [ -z "$selected_key" ]; then
-        err "非法输入"; return
-    fi
-
-    read -p "输入挂载端口: " port
-    if [ -z "$port" ]; then
-        err "端口不能为空"; return
-    fi
-    if port_used "$port"; then
-        err "端口 [${port}] 已被内核套接字占用！"; return
-    fi
-
-    mkdir -p "${INST_DIR}/${port}"
-
-    # 🔥 动态调用协议 build 函数，无需 case
-    local build_fn="${PROTO_BUILD[$selected_key]}"
-    if ! "$build_fn" "$port"; then
-        err "协议构建失败，正在回滚..."
-        rm -rf "${INST_DIR}/${port}"
-        return
-    fi
-
-    # 配置合规性校验
-    if ! $SB_BIN check -c "${INST_DIR}/${port}/config.json" 2>/dev/null; then
-        err "内核检测到 JSON 配置存在语法错误，正在回滚..."
-        rm -rf "${INST_DIR}/${port}"
-        state_del "$port"
-        return
-    fi
-
-    gen_service "$port"
-    systemctl daemon-reload
-    systemctl enable "sb-${port}" >/dev/null 2>&1
-    systemctl restart "sb-${port}"
-
-    sleep 2
-    if systemctl is-active --quiet "sb-${port}"; then
-        ok "实例 [${port}] 部署挂载上线成功！"
-        local dynamic_uri surge_format
-        dynamic_uri=$(generate_dynamic_uri "${INST_DIR}/${port}" "uri")
-        surge_format=$(generate_dynamic_uri "${INST_DIR}/${port}" "surge")
-
-        echo -e "\n📋 【标准通用链接】:\n\033[36m${dynamic_uri}\033[0m"
-        echo -e "\n📋 【Surge 托管配置格式】:\n\033[32m${surge_format}\033[0m"
-        show_qr "$dynamic_uri"
-    else
-        err "内核进程启动失败，捕获 Systemd 错误日志..."
-        journalctl -u "sb-${port}" -n 10 --no-pager
-        # 启动失败：软停用，保留数据供排查
-        state_disable "$port"
-    fi
-}
-
-# ==============================================================================
-# 删除实例
-# 升级点：同步调用 state_del 清除 State Store 记录，集成 Runtime 强一致性清理层
-# ==============================================================================
-delete_instance() {
-    read -p "请输入欲卸载删除的端口实例: " port
-    if [ -z "$(state_get "$port")" ] && [ ! -d "${INST_DIR}/${port}" ]; then
-        err "指定的实例在数据库中不存在"
-        return
-    fi
-
-    read -p "⚠️  警告：彻底清除端口 [${port}] 的所有配置与资产吗？输入 YES 确认: " confirm
-    if [ "$confirm" != "YES" ]; then
-        echo "安全退出，未做改动"; return
-    fi
-
-    systemctl stop "sb-${port}" 2>/dev/null || true
-    systemctl disable "sb-${port}" 2>/dev/null || true
-    rm -f "/etc/systemd/system/sb-${port}.service"
-
-    # =========================================
-    # 🧨 强一致性修复：Runtime 强制清理层
-    # =========================================
-
-    # 1️⃣ 杀 systemd 未完全回收的残留进程
-    pkill -9 -f "sing-box.*${port}" 2>/dev/null || true
-    pkill -9 -f "ss-server.*${port}" 2>/dev/null || true
-    pkill -9 sing-box 2>/dev/null || true
-
-    sleep 1
-
-    # 2️⃣ 二次确认是否仍有监听（防 ghost port）
-    if ss -tulnp | grep -q ":${port}"; then
-        warn "⚠️ 端口仍在监听（可能存在 systemd socket / orphan process）"
-        ss -tulnp | grep ":${port}" || true
-
-        # 再次强杀所有相关进程
-        fuser -k "${port}/tcp" 2>/dev/null || true
-        fuser -k "${port}/udp" 2>/dev/null || true
-    fi
-
-    rm -rf "${INST_DIR}/${port}"
-    rm -f "${CERT_DIR}/cert_${port}.crt" "${CERT_DIR}/private_${port}.key"
-
-    # 同步清除 State Store
-    state_del "$port"
-
-    systemctl daemon-reload
-    systemctl reset-failed "sb-${port}" 2>/dev/null || true
-    ok "端口 [${port}] 联动底层安全抹除完毕。"
-}
-
-# ==============================================================================
-# 查看实例详情
-# 升级点：从 state_list 读取端口列表，不再遍历目录
-# ==============================================================================
-show_instance_detail() {
-    echo "=========================================================="
-    echo " 🔍 全局实例状态拓扑树"
-    echo "=========================================================="
-
-    local ports
-    mapfile -t ports < <(state_list)
-
-    if [ "${#ports[@]}" -eq 0 ]; then
-        warn "当前 State Store 中无任何实例记录。"
-        return
-    fi
-
-    printf "%-10s | %-10s | %-10s | %-22s | %-14s\n" \
-        "监听端口" "协议" "状态标记" "部署时间" "Systemd"
-    echo "----------------------------------------------------------"
-
-    for p in "${ports[@]}"; do
-        local proto created enabled sys_status enabled_label
-        proto=$(state_get_field "$p" "protocol")
-        created=$(state_get_field "$p" "created_at")
-        enabled=$(state_get_field "$p" "enabled")
-
-        [ "$enabled" == "true" ] && enabled_label="✅ on" || enabled_label="⛔ off"
-
-        if systemctl is-active --quiet "sb-${p}" 2>/dev/null; then
-            sys_status="🟢 Running"
+    # 选择协议
+    if [ -z "$proto" ] || [ -z "${PROTO_BUILD[$proto]+x}" ]; then
+        echo ""
+        echo "可用协议："
+        i=1
+        for k in "${PROTO_KEYS[@]}"; do
+            printf "  %d) %-10s %s\n" "$i" "$k" "${PROTO_MENU[$k]}"
+            (( i++ ))
+        done
+        echo ""
+        read -rp "输入编号或协议名: " choice
+        if [[ "$choice" =~ ^[0-9]+$ ]]; then
+            proto="${PROTO_KEYS[$((choice-1))]}"
         else
-            sys_status="🔴 Stopped"
+            proto="${choice^^}"
         fi
-
-        printf "%-10s | %-10s | %-10s | %-22s | %-14s\n" \
-            "$p" "$proto" "$enabled_label" "$created" "$sys_status"
-    done
-    echo "=========================================================="
-
-    read -p "请输入要查看凭证详情的端口 (回车返回): " sel_port
-    [ -z "$sel_port" ] && return
-
-    local target_dir="${INST_DIR}/${sel_port}"
-    if [ -z "$(state_get "$sel_port")" ]; then
-        err "该端口在 State Store 中不存在！"
-        return
+    else
+        proto="${proto^^}"
     fi
 
-    echo -e "\n=================================================="
-    echo "     sing-box 端口 [${sel_port}] 动态运行期资产明细"
-    echo "=================================================="
-
-    local active_uri surge_format
-    active_uri=$(generate_dynamic_uri "$target_dir" "uri")
-    surge_format=$(generate_dynamic_uri "$target_dir" "surge")
-
-    echo -e "📌 协议:       $(state_get_field "$sel_port" "protocol")"
-    echo -e "📌 加密方式:   $(state_get_field "$sel_port" "method" || echo "无")"
-    echo -e "📌 密钥:       $(state_get_field "$sel_port" "password")"
-
-    local proto
-    proto=$(state_get_field "$sel_port" "protocol")
-    if [ "$proto" == "HY2" ]; then
-        echo -e "📌 SNI:        $(state_get_field "$sel_port" "sni")"
+    if [ -z "${PROTO_BUILD[$proto]+x}" ]; then
+        err "未知协议: ${proto}"
+        exit 1
     fi
 
-    echo -e "📌 URI:        \033[36m${active_uri}\033[0m"
-    echo -e "📌 Surge:      \033[32m${surge_format}\033[0m"
+    # 输入端口
+    if [ -z "$port" ]; then
+        read -rp "端口号: " port
+    fi
 
-    show_qr "$active_uri"
+    port_valid "$port" || { err "端口号非法: ${port}"; exit 1; }
 
-    echo -e "\n⚙️  端口监听状态:"
-    ss -tulnp | grep -E ":${sel_port}\s" || warn "内核当前未对该端口开放监听！"
-    echo "=================================================="
-}
+    # 调用协议 build
+    "${PROTO_BUILD[$proto]}" "$port" || exit 1
 
-# ==============================================================================
-# 主菜单循环
-# ==============================================================================
-while true; do
+    _commit
+    ;;
+
+# ------------------------------------------------------------------------------
+# sb edit <id|proto port>
+# ------------------------------------------------------------------------------
+edit)
+    id=$(_resolve "$@")
+    payload=$(state_get "$id")
+    proto=$(echo "$payload" | jq -r '.protocol')
+
+    fn="${PROTO_EDIT[$proto]}"
+    if [ -z "$fn" ] || ! declare -F "$fn" >/dev/null 2>&1; then
+        err "协议 [${proto}] 未实现 edit 接口"
+        exit 1
+    fi
+
+    "$fn" "$id" "$payload" || exit 1
+    _commit
+    ;;
+
+# ------------------------------------------------------------------------------
+# sb remove <id|proto port>
+# ------------------------------------------------------------------------------
+remove)
+    id=$(_resolve "$@")
+    payload=$(state_get "$id")
+    proto=$(echo "$payload" | jq -r '.protocol')
+    port=$(echo "$payload"  | jq -r '.port')
+
+    read -rp "⚠️  确认删除 [${id}] ${proto}:${port}？(y/N): " confirm
+    [[ "$confirm" != "y" && "$confirm" != "Y" ]] && { info "已取消"; exit 0; }
+
+    state_del "$id"
+    ok "[${id}] 已删除"
+    _commit
+    ;;
+
+# ------------------------------------------------------------------------------
+# sb enable <id|proto port>
+# ------------------------------------------------------------------------------
+enable)
+    id=$(_resolve "$@")
+    state_enable "$id"
+    ok "[${id}] 已启用"
+    _commit
+    ;;
+
+# ------------------------------------------------------------------------------
+# sb disable <id|proto port>
+# ------------------------------------------------------------------------------
+disable)
+    id=$(_resolve "$@")
+    state_disable "$id"
+    ok "[${id}] 已停用"
+    _commit
+    ;;
+
+# ------------------------------------------------------------------------------
+# sb restart <id|proto port>
+# 仅重启单个实例（disable → compile → reload → enable → compile → reload）
+# ------------------------------------------------------------------------------
+restart)
+    id=$(_resolve "$@")
+    payload=$(state_get "$id")
+    proto=$(echo "$payload" | jq -r '.protocol')
+    port=$(echo "$payload"  | jq -r '.port')
+
+    info "[${id}] ${proto}:${port} 正在重启..."
+    state_disable "$id"
+    compile_all
+    service_reload
+    sleep 1
+    state_enable "$id"
+    compile_all
+    service_reload
+    ok "[${id}] ${proto}:${port} 已重启"
+    ;;
+
+# ------------------------------------------------------------------------------
+# sb info <id|proto port>
+# ------------------------------------------------------------------------------
+info)
+    id=$(_resolve "$@")
+    payload=$(state_get "$id")
+    proto=$(echo "$payload" | jq -r '.protocol')
+
+    fn="${PROTO_INFO[$proto]}"
+    if [ -z "$fn" ] || ! declare -F "$fn" >/dev/null 2>&1; then
+        err "协议 [${proto}] 未实现 info 接口"
+        exit 1
+    fi
+
+    ipv4=$(get_ipv4)
+    "$fn" "$payload" "$ipv4"
     echo ""
-    echo "========================================="
-    echo " sing-box "
-    echo "========================================="
-    echo " 1. 新增 端口协议实例"
-    echo " 2. 删除 指定端口实例"
-    echo " 3. 查看 实例全局状态及凭证详情"
-    echo " 4. 重启 全部运行中的端口实例"
-    echo " 0. 退出管理面板"
-    echo "========================================="
-    read -p "请输入调度指令 >> " opt
+    echo "📋 分享链接："
+    uri_fn="${PROTO_URI[$proto]}"
+    [ -n "$uri_fn" ] && "$uri_fn" "$payload" "$ipv4"
+    echo ""
+    uri_fn="${PROTO_URI[$proto]}"
+    [ -n "$uri_fn" ] && show_qr "$("$uri_fn" "$payload" "$ipv4")"
+    ;;
 
-    case $opt in
-        1) add_instance ;;
-        2) delete_instance ;;
-        3) show_instance_detail ;;
-        4) restart_all ;;
-        0) echo "服务安全退出。"; exit 0 ;;
-        *) echo "❌ 非法输入" ;;
-    esac
-done
+# ------------------------------------------------------------------------------
+# sb list
+# ------------------------------------------------------------------------------
+list)
+    echo ""
+    printf "%-6s %-8s %-10s %-6s %-8s %-20s\n" \
+        "ID" "协议" "状态" "端口" "传输" "创建时间"
+    echo "────────────────────────────────────────────────────────────"
+
+    while IFS= read -r id; do
+        payload=$(state_get "$id")
+        proto=$(echo "$payload"   | jq -r '.protocol')
+        port=$(echo "$payload"    | jq -r '.port')
+        enabled=$(echo "$payload" | jq -r '.enabled')
+        created=$(echo "$payload" | jq -r '.created_at')
+        transport="${PROTO_TRANSPORT[$proto]:-?}"
+
+        [ "$enabled" = "true" ] && status="🟢 启用" || status="🔴 停用"
+
+        printf "%-6s %-8s %-10s %-6s %-8s %-20s\n" \
+            "$id" "$proto" "$status" "$port" "$transport" "$created"
+    done < <(state_list)
+    echo ""
+    ;;
+
+# ------------------------------------------------------------------------------
+# sb uri <id|proto port>
+# ------------------------------------------------------------------------------
+uri)
+    id=$(_resolve "$@")
+    payload=$(state_get "$id")
+    proto=$(echo "$payload" | jq -r '.protocol')
+    ipv4=$(get_ipv4)
+
+    fn="${PROTO_URI[$proto]}"
+    [ -z "$fn" ] && { err "协议 [${proto}] 未注册 URI 函数"; exit 1; }
+
+    uri=$("$fn" "$payload" "$ipv4")
+    echo ""
+    echo "📋 $uri"
+    echo ""
+    show_qr "$uri"
+    ;;
+
+# ------------------------------------------------------------------------------
+# sb sub
+# ------------------------------------------------------------------------------
+sub)
+    compile_sub
+    echo ""
+    cat "$OUTPUT_SUB"
+    ;;
+
+# ------------------------------------------------------------------------------
+# sb compile
+# ------------------------------------------------------------------------------
+compile)
+    compile_all
+    ;;
+
+# ------------------------------------------------------------------------------
+# sb reload
+# ------------------------------------------------------------------------------
+reload)
+    compile_all && service_reload
+    ;;
+
+# ------------------------------------------------------------------------------
+# 服务控制
+# ------------------------------------------------------------------------------
+start)   service_start   ;;
+stop)    service_stop    ;;
+status)  service_status  ;;
+logs)    service_logs    ;;
+
+# ------------------------------------------------------------------------------
+# sb version
+# ------------------------------------------------------------------------------
+version)
+    local ver=""
+    [ -f "$SB_BIN" ] && ver=$($SB_BIN version 2>/dev/null | awk '{print $3}')
+    echo "sb manager  v2.0"
+    echo "sing-box    ${ver:-未安装}"
+    ;;
+
+# ------------------------------------------------------------------------------
+# sb help
+# ------------------------------------------------------------------------------
+help|--help|-h)
+    echo ""
+    echo "用法: sb <命令> [id | 协议 端口]"
+    echo ""
+    echo "实例管理:"
+    printf "  %-28s %s\n" "sb add [协议] [端口]"      "新建实例（自动 compile + reload）"
+    printf "  %-28s %s\n" "sb edit <id|协议 端口>"    "编辑实例"
+    printf "  %-28s %s\n" "sb remove <id|协议 端口>"  "删除实例"
+    printf "  %-28s %s\n" "sb enable <id|协议 端口>"  "启用实例"
+    printf "  %-28s %s\n" "sb disable <id|协议 端口>" "停用实例"
+    printf "  %-28s %s\n" "sb restart <id|协议 端口>" "重启单个实例"
+    printf "  %-28s %s\n" "sb info <id|协议 端口>"    "查看实例详情 + URI"
+    printf "  %-28s %s\n" "sb list"                   "列出所有实例"
+    printf "  %-28s %s\n" "sb uri <id|协议 端口>"     "打印分享链接 + 二维码"
+    echo ""
+    echo "服务控制:"
+    printf "  %-28s %s\n" "sb start"   "启动 sing-box"
+    printf "  %-28s %s\n" "sb stop"    "停止 sing-box"
+    printf "  %-28s %s\n" "sb reload"  "重编译 + 热重载"
+    printf "  %-28s %s\n" "sb status"  "查看运行状态"
+    printf "  %-28s %s\n" "sb logs"    "实时日志"
+    echo ""
+    echo "订阅 / 配置:"
+    printf "  %-28s %s\n" "sb sub"     "生成并打印订阅"
+    printf "  %-28s %s\n" "sb compile" "手动重编译（高级）"
+    echo ""
+    echo "其他:"
+    printf "  %-28s %s\n" "sb install" "安装 / 升级 sing-box"
+    printf "  %-28s %s\n" "sb version" "版本信息"
+    echo ""
+    echo "已注册协议:"
+    for k in "${PROTO_KEYS[@]}"; do
+        printf "  %-10s %s\n" "$k" "${PROTO_MENU[$k]}"
+    done
+    echo ""
+    ;;
+
+*)
+    err "未知命令: ${CMD}"
+    echo "执行 'sb help' 查看帮助"
+    exit 1
+    ;;
+
+esac

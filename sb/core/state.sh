@@ -1,89 +1,141 @@
 #!/bin/bash
 # ==============================================================================
-# State Store：instances.json 全局状态索引读写引擎
+# State Store：instances.json 唯一状态层
+#
+# 数据结构：
+# {
+#   "instances": {
+#     "is01": { "id": "is01", "protocol": "VLESS", "port": 443, ... },
+#     "is02": { "id": "is02", "protocol": "HY2",   "port": 443, ... }
+#   }
+# }
+#
+# 所有操作以 id 为主键。
+# 支持 proto:port → id 反查。
 # ==============================================================================
-# 依赖 common.sh 已被引入：
-# - STATE_FILE
-# - INST_DIR
-# - err()
-# - warn()
 
-# ------------------------------------------------------------------------------
-# 初始化 state 文件（不存在则创建空结构）
-# ------------------------------------------------------------------------------
 state_init() {
-    if [ ! -f "$STATE_FILE" ]; then
-        echo '{"instances":{}}' > "$STATE_FILE"
-    fi
+    [ -f "$STATE_FILE" ] || echo '{"instances":{}}' > "$STATE_FILE"
 }
 
 # ------------------------------------------------------------------------------
-# 写入 / 更新一个实例记录
-# 用法: state_set <port> <json_payload>
-# 示例: state_set 8388 '{"protocol":"SS","enabled":true,...}'
+# ID 生成：递增 is01 is02 ...
+# ------------------------------------------------------------------------------
+state_next_id() {
+    state_init
+    local max
+    max=$(jq -r '.instances | keys[] | select(test("^is[0-9]+$")) | ltrimstr("is") | tonumber' \
+        "$STATE_FILE" 2>/dev/null | sort -n | tail -1)
+    local next=$(( ${max:-0} + 1 ))
+    printf "is%02d" "$next"
+}
+
+# ------------------------------------------------------------------------------
+# 写入 / 更新实例（以 id 为 key）
+# 用法: state_set <id> <json_payload>
 # ------------------------------------------------------------------------------
 state_set() {
-    local port="$1"
+    local id="$1"
     local payload="$2"
     state_init
 
     local tmp
     tmp=$(mktemp)
-    if jq --arg p "$port" --argjson v "$payload" \
-        '.instances[$p] = $v' "$STATE_FILE" > "$tmp"; then
+    if jq --arg id "$id" --argjson v "$payload" \
+        '.instances[$id] = $v' "$STATE_FILE" > "$tmp"; then
         mv "$tmp" "$STATE_FILE"
     else
         rm -f "$tmp"
-        err "state_set: 写入端口 [${port}] 失败，JSON 格式异常"
+        err "state_set: 写入 [${id}] 失败"
         return 1
     fi
 }
 
 # ------------------------------------------------------------------------------
-# 读取一个实例的完整 JSON 对象
-# 用法: state_get <port>
+# 读取实例（by id）
 # ------------------------------------------------------------------------------
 state_get() {
-    local port="$1"
+    local id="$1"
     state_init
-    jq -r --arg p "$port" '.instances[$p] // empty' "$STATE_FILE"
+    jq -r --arg id "$id" '.instances[$id] // empty' "$STATE_FILE"
 }
 
 # ------------------------------------------------------------------------------
-# 读取一个实例的单个字段值
-# 用法: state_get_field <port> <field>
-# 示例: state_get_field 8388 protocol
+# 读取单个字段（by id）
 # ------------------------------------------------------------------------------
 state_get_field() {
-    local port="$1"
+    local id="$1"
     local field="$2"
     state_init
-    jq -r --arg p "$port" --arg f "$field" \
-        '.instances[$p][$f] // empty' "$STATE_FILE"
+    jq -r --arg id "$id" --arg f "$field" \
+        '.instances[$id][$f] // empty' "$STATE_FILE"
 }
 
 # ------------------------------------------------------------------------------
-# 删除一个实例记录（硬删除）
-# 用法: state_del <port>
+# proto:port → id 反查
+# 用法: state_find <VLESS> <443>  → is01
+# ------------------------------------------------------------------------------
+state_find() {
+    local proto="${1^^}"
+    local port="$2"
+    state_init
+    jq -r --arg proto "$proto" --argjson port "$port" \
+        '.instances | to_entries[]
+         | select(.value.protocol == $proto and .value.port == $port)
+         | .key' "$STATE_FILE" 2>/dev/null | head -1
+}
+
+# ------------------------------------------------------------------------------
+# 解析用户输入 → id
+# 支持：is01 | VLESS 443 | hy2 443
+# 用法: resolve_id <arg1> [arg2]
+# ------------------------------------------------------------------------------
+resolve_id() {
+    local arg1="${1:-}"
+    local arg2="${2:-}"
+
+    # 直接是 id
+    if [[ "$arg1" =~ ^is[0-9]+$ ]]; then
+        echo "$arg1"
+        return
+    fi
+
+    # proto port
+    if [ -n "$arg2" ]; then
+        local id
+        id=$(state_find "$arg1" "$arg2")
+        if [ -z "$id" ]; then
+            err "找不到实例 [${arg1^^}:${arg2}]"
+            return 1
+        fi
+        echo "$id"
+        return
+    fi
+
+    err "无法识别实例标识: ${arg1}"
+    return 1
+}
+
+# ------------------------------------------------------------------------------
+# 删除实例
 # ------------------------------------------------------------------------------
 state_del() {
-    local port="$1"
+    local id="$1"
     state_init
 
     local tmp
     tmp=$(mktemp)
-    if jq --arg p "$port" 'del(.instances[$p])' "$STATE_FILE" > "$tmp"; then
+    if jq --arg id "$id" 'del(.instances[$id])' "$STATE_FILE" > "$tmp"; then
         mv "$tmp" "$STATE_FILE"
     else
         rm -f "$tmp"
-        err "state_del: 删除端口 [${port}] 失败"
+        err "state_del: 删除 [${id}] 失败"
         return 1
     fi
 }
 
 # ------------------------------------------------------------------------------
-# 列出所有实例的端口号
-# 用法: state_list
+# 列出所有实例 id
 # ------------------------------------------------------------------------------
 state_list() {
     state_init
@@ -91,102 +143,78 @@ state_list() {
 }
 
 # ------------------------------------------------------------------------------
-# 列出所有 enabled=true 的实例端口号
-# 用法: state_list_enabled
+# 列出所有 enabled=true 的实例 id
 # ------------------------------------------------------------------------------
 state_list_enabled() {
     state_init
-    jq -r '.instances | to_entries[] | select(.value.enabled == true) | .key' \
-        "$STATE_FILE" 2>/dev/null
+    jq -r '.instances | to_entries[]
+        | select(.value.enabled == true)
+        | .key' "$STATE_FILE" 2>/dev/null
 }
 
 # ------------------------------------------------------------------------------
-# 软停用：保留数据，标记 enabled=false
-# 用法: state_disable <port>
+# 软停用 / 软启用
 # ------------------------------------------------------------------------------
 state_disable() {
-    local port="$1"
-    state_init
-
-    local tmp
-    tmp=$(mktemp)
-    if jq --arg p "$port" '.instances[$p].enabled = false' \
-        "$STATE_FILE" > "$tmp"; then
-        mv "$tmp" "$STATE_FILE"
-    else
-        rm -f "$tmp"
-        err "state_disable: 操作失败"
-        return 1
-    fi
+    local id="$1"
+    _state_set_enabled "$id" false
 }
 
-# ------------------------------------------------------------------------------
-# 软启用：标记 enabled=true
-# 用法: state_enable <port>
-# ------------------------------------------------------------------------------
 state_enable() {
-    local port="$1"
+    local id="$1"
+    _state_set_enabled "$id" true
+}
+
+_state_set_enabled() {
+    local id="$1"
+    local val="$2"
     state_init
 
     local tmp
     tmp=$(mktemp)
-    if jq --arg p "$port" '.instances[$p].enabled = true' \
+    if jq --arg id "$id" --argjson v "$val" \
+        '.instances[$id].enabled = $v
+         | .instances[$id].updated_at = (now | strftime("%Y-%m-%d %H:%M:%S"))' \
         "$STATE_FILE" > "$tmp"; then
         mv "$tmp" "$STATE_FILE"
     else
         rm -f "$tmp"
-        err "state_enable: 操作失败"
+        err "_state_set_enabled: 操作失败"
         return 1
     fi
 }
 
 # ------------------------------------------------------------------------------
-# 从 instances/*/meta.json 自动同步到 State Store
-# 用于兼容旧版本目录实例，防止 instances.json 丢失后面板看不到实例
-#
-# 规则：
-# 1. instances.json 没有的实例：从 meta.json 导入
-# 2. instances.json 已有的实例：刷新字段，但保留原 enabled 状态
-# 3. meta.json 无 enabled 字段：默认 enabled=true
+# 更新任意字段（patch）
+# 用法: state_patch <id> <jq_filter>
+# 示例: state_patch is01 '.port = 8443'
 # ------------------------------------------------------------------------------
-state_sync_from_instances() {
+state_patch() {
+    local id="$1"
+    local filter="$2"
     state_init
 
-    local meta port payload old_enabled
+    local tmp
+    tmp=$(mktemp)
+    if jq --arg id "$id" \
+        "(.instances[\$id]) |= ( ${filter} )
+         | .instances[\$id].updated_at = (now | strftime(\"%Y-%m-%d %H:%M:%S\"))" \
+        "$STATE_FILE" > "$tmp"; then
+        mv "$tmp" "$STATE_FILE"
+    else
+        rm -f "$tmp"
+        err "state_patch: 更新 [${id}] 失败"
+        return 1
+    fi
+}
 
-    for meta in "$INST_DIR"/*/meta.json; do
-        [ -f "$meta" ] || continue
-
-        if ! port=$(jq -r '.port // empty' "$meta" 2>/dev/null); then
-            warn "跳过异常 meta 文件: $meta"
-            continue
-        fi
-
-        if [ -z "$port" ] || [ "$port" = "null" ]; then
-            port=$(basename "$(dirname "$meta")")
-        fi
-
-        if [ -z "$port" ]; then
-            warn "跳过无法识别端口的 meta 文件: $meta"
-            continue
-        fi
-
-        # 如果 State Store 里已有 enabled 状态，则保留它，避免被 meta.json 覆盖
-        old_enabled=$(state_get_field "$port" "enabled")
-
-        if [ "$old_enabled" = "true" ] || [ "$old_enabled" = "false" ]; then
-            if ! payload=$(jq --argjson enabled "$old_enabled" \
-                '.enabled = $enabled' "$meta" 2>/dev/null); then
-                warn "跳过异常 meta 文件: $meta"
-                continue
-            fi
-        else
-            if ! payload=$(jq '.enabled = (.enabled // true)' "$meta" 2>/dev/null); then
-                warn "跳过异常 meta 文件: $meta"
-                continue
-            fi
-        fi
-
-        state_set "$port" "$payload"
-    done
+# ------------------------------------------------------------------------------
+# 检查 id 是否存在
+# ------------------------------------------------------------------------------
+state_exists() {
+    local id="$1"
+    state_init
+    local val
+    val=$(jq -r --arg id "$id" '.instances[$id] // empty' "$STATE_FILE")
+    [ -n "$val" ]
 }

@@ -1,68 +1,398 @@
-#!/bin/bash
-# ==============================================================================
-# Protocol Plugin: NEW Protocol
-# ==============================================================================
+你是一个 sing-box 协议插件生成器。你的任务是根据我提供的协议信息，生成一个可以直接放入 protocols/ 目录使用的 bash 协议插件文件。
 
-proto_register "NEW" "New Protocol" "build_new" "uri_new" "surge_new"
+严格执行以下要求：
+- 只输出最终完整 .sh 文件内容
+- 不要解释
+- 不要省略代码
+- 不要输出 markdown 代码块
+- 不要输出伪代码
+- 如果我提供的信息不足以生成真实可用配置，先停止输出代码，并只输出：缺少必要协议信息：...
+- 不允许臆造 sing-box、Surge、Clash 的字段名
+- 所有配置字段必须基于我提供的协议 schema 信息生成
+- 如果某客户端不支持该协议，返回合理占位内容，并在代码注释中明确说明
+- 如果我提供了现有协议文件风格或参考函数命名，你必须优先保持风格一致
 
-build_new() {
-    local port="$1"
+====================================================================
+【任务目标】
 
-    local password
-    password=$(openssl rand -hex 16)
+请为以下协议生成一个 sing-box 多协议管理工具的协议插件文件：
 
-    cat > "${INST_DIR}/${port}/config.json" <<JSONEOF
-{
-  "log": {
-    "level": "info",
-    "timestamp": true
-  },
-  "inbounds": [{
-    "type": "your-protocol-type",
-    "listen": "::",
-    "listen_port": ${port},
-    "password": "${password}"
-  }],
-  "outbounds": [{
-    "type": "direct"
-  }]
-}
-JSONEOF
+协议名称：{{PROTO_NAME}}
+协议 KEY（大写唯一标识）：{{PROTO_KEY}}
+菜单显示名：{{MENU_NAME}}
+文件名：protocols/{{PROTO_FILE}}.sh
+sing-box inbound type：{{INBOUND_TYPE}}
+传输层：{{TRANSPORT}}              # tcp 或 udp
+是否需要 TLS：{{NEED_TLS}}         # 是 / 否
+是否需要域名/SNI/伪装：{{NEED_SNI}} # 是 / 否
 
-    cat > "${INST_DIR}/${port}/meta.json" <<JSONEOF
-{
-  "port": ${port},
-  "protocol": "NEW",
-  "password": "${password}",
-  "created_at": "$(date '+%Y-%m-%d %H:%M:%S')",
-  "enabled": true
-}
-JSONEOF
+====================================================================
+【协议事实定义】
 
-    state_set "$port" "$(cat "${INST_DIR}/${port}/meta.json")"
-}
+以下内容是生成代码时唯一可信的协议事实来源，必须严格遵守。
+如果某项为空，说明我没有提供，你不能自行猜测、脑补或替换成“看起来合理”的字段。
 
-uri_new() {
-    local meta_file="$1"
-    local current_ip="$2"
+【1. sing-box inbound schema】
+{{SINGBOX_INBOUND_SCHEMA}}
 
-    local port password tag
+【2. 该协议需要采集的用户输入字段】
+请只采集必要字段，并给出合理默认值：
+{{USER_INPUT_FIELDS}}
 
-    port=$(jq -r '.port' "$meta_file")
-    password=$(jq -r '.password' "$meta_file")
-    tag=$(urlencode "NEW_${port}")
+【3. 自动生成字段】
+请列出创建实例时需要自动生成的字段，如密码、uuid、token、密钥、证书路径等：
+{{AUTO_GENERATED_FIELDS}}
 
-    echo "new://${password}@${current_ip}:${port}#${tag}"
-}
+【4. meta JSON 建议字段】
+除以下基础字段外：
+- id
+- protocol
+- port
+- created_at
+- updated_at
+- enabled
+请列出还需要持久化到 meta 的协议字段：
+{{META_FIELDS}}
 
-surge_new() {
-    local meta_file="$1"
-    local current_ip="$2"
+【5. 分享链接规则】
+如果该协议有标准 URI，请按以下规则生成：
+{{URI_RULES}}
 
-    local port password
+如果没有标准 URI，输出空字符串。
 
-    port=$(jq -r '.port' "$meta_file")
-    password=$(jq -r '.password' "$meta_file")
+【6. Surge 映射规则】
+如果 Surge 支持该协议，请按以下规则生成节点行：
+{{SURGE_RULES}}
 
-    echo "NEW_${port} = new, ${current_ip}, ${port}, password=${password}"
-}
+如果不支持，请返回空字符串，并在代码注释中说明：
+Surge 暂不支持该协议
+
+【7. Clash Meta / Mihomo 映射规则】
+如果 Clash Meta / Mihomo 支持该协议，请按以下规则生成 proxy JSON：
+{{CLASH_RULES}}
+
+如果不支持，请返回一个最小占位 JSON，并在代码注释中说明：
+Clash Meta / Mihomo 暂不支持该协议
+
+====================================================================
+【运行环境约束】
+
+1. 这是 sing-box 多协议管理工具的协议插件层，文件放在 protocols/*.sh，
+   由 core/registry.sh 的 load_protocols() 自动 source 加载，不需要任何
+   额外 require、import、source。
+
+2. 以下函数和变量已存在，可以直接调用，不要重新定义：
+   - proto_register
+   - err()/ok()/warn()/info()
+   - port_valid <port>
+   - port_used_tcp <port>
+   - port_used_udp <port>
+   - urlencode <string>
+   - get_ipv4
+   - get_ipv6
+   - state_set <id> <json>
+   - state_get <id>
+   - state_get_field <id> <field>
+   - state_next_id
+   - state_patch <id> <jq_filter>
+   - CERT_DIR
+
+3. 不允许写任何文件到 instances/ 目录。
+   所有实例数据只能通过 state_set / state_patch 写入 instances.json。
+
+4. 个人单用户场景，不需要生成或处理 multi-user / user 列表等逻辑。
+   但如果协议 schema 强制要求存在认证对象、users 数组、password 结构、
+   uuid 结构等，则只生成单用户最小结构，不要扩展成多用户管理。
+
+5. 允许使用的外部命令只有：
+   - jq
+   - openssl
+   - sing-box（如确有必要，但通常不应依赖）
+   不要依赖 grep/sed/awk/curl/python/node/date/uuidgen/systemctl 等其他命令。
+
+6. 时间字段 created_at / updated_at 不要调用外部 date 命令。
+   请直接用 shell 可用方式或由已有环境兼容方式处理；如果环境未明确提供时间函数，
+   则使用占位实现时必须保持 build/edit 风格一致，且不能额外引入未声明依赖。
+
+7. 不能假设网络可用，不能在线查询文档。
+   只能依据我给出的 schema / 规则生成。
+
+====================================================================
+【必须实现的接口】
+
+文件顶部必须先调用：
+
+proto_register "{{PROTO_KEY}}" "{{MENU_NAME}}" "{{TRANSPORT}}" \
+    "build_{{PROTO_FILE}}" "edit_{{PROTO_FILE}}" "info_{{PROTO_FILE}}" \
+    "inbound_{{PROTO_FILE}}" "uri_{{PROTO_FILE}}" "surge_{{PROTO_FILE}}" "clash_{{PROTO_FILE}}"
+
+参数必须正好 10 个，顺序严格固定，不允许增减。
+
+────────────────────────────────────────────────
+1) build_{{PROTO_FILE}} <port>
+────────────────────────────────────────────────
+要求：
+- 参数1是端口
+- 所有变量先 local 声明
+- 第一步先校验端口是否为空
+- 然后调用 `port_valid "$port"` 做合法性校验，非法则 err 并 return 1
+- 再做端口冲突检测：
+  - 若传输层是 tcp，用 `port_used_tcp "$port"`
+  - 若传输层是 udp，用 `port_used_udp "$port"`
+  冲突则 err 并 return 1
+- 用 read -p 交互式收集必要参数，全部给默认值，允许直接回车
+- 如果某字段有推荐默认值，必须直接体现在提示中
+- 自动生成凭据时优先使用 openssl rand
+- 如果要生成随机字符串，优先生成 URL/JSON 安全、易存储的值
+- 如需自签证书：
+  - crt 路径：`${CERT_DIR}/{{PROTO_FILE}}_${port}.crt`
+  - key 路径：`${CERT_DIR}/{{PROTO_FILE}}_${port}.key`
+  - 使用 openssl req -x509 生成
+  - 证书 CN 使用域名/SNI
+  - 失败必须 err 并 return 1
+- 用 `state_next_id` 生成 id
+- 用 jq -n 构造 meta JSON
+- meta JSON 必须至少包含字段：
+  - id
+  - protocol
+  - port
+  - created_at
+  - updated_at
+  - enabled
+- 以及协议所需的全部附加字段
+- enabled 默认为 true
+- 成功写入：
+  `state_set "$id" "$meta"`
+- 成功后输出：
+  `ok "{{MENU_NAME}} [${id}] 端口 ${port} 已创建"`
+- 任一路径失败都必须 err 并 return 1，不能 exit
+
+────────────────────────────────────────────────
+2) edit_{{PROTO_FILE}} <id> <payload_json>
+────────────────────────────────────────────────
+要求：
+- 参数1是实例 id
+- 参数2是完整 meta JSON 字符串
+- 所有变量先 local 声明
+- 用 `echo "$payload" | jq -r '.field'` 读取当前值
+- 至少支持修改最常用的 2~4 个字段
+- read -p 时必须展示当前值
+- 回车保留原值
+- 如果修改端口，必须重新校验 `port_valid`
+- 如果修改端口，必须重新做端口冲突检测
+- 如果支持“重新生成密码/密钥/uuid/token”等，必须让用户明确确认
+- 将所有变更拼接为 jq filter，例如：
+  `.port = 8443 | .server_name = "example.com" | .updated_at = "xxx"`
+- 如果没有任何变更：
+  info "无变更"
+  return 0
+- 最终调用：
+  `state_patch "$id" "$filter"`
+- 成功后输出：
+  `ok "{{MENU_NAME}} [${id}] 已更新"`
+- 失败必须 err 并 return 1
+
+────────────────────────────────────────────────
+3) info_{{PROTO_FILE}} <payload_json> [ipv4]
+────────────────────────────────────────────────
+要求：
+- 参数1是完整 meta JSON
+- 参数2可选，为 ipv4；如果没传，不要强依赖
+- 所有变量先 local 声明
+- 用 jq -r 提取字段
+- enabled=true 显示 “🟢 启用”，否则显示 “🔴 停用”
+- 用固定宽度 printf / echo 输出简洁方框表格
+- 必须显示：
+  - id
+  - protocol
+  - port
+  - enabled
+  - created_at
+  - updated_at
+- 以及协议关键字段
+- 不要在这里调用 uri 函数
+- 不要在这里打印多余解释
+
+────────────────────────────────────────────────
+4) inbound_{{PROTO_FILE}} <meta_json>
+────────────────────────────────────────────────
+要求：
+- 参数1是完整 meta JSON
+- 所有变量先 local 声明
+- 返回 sing-box config.json 中 inbounds 数组的一个元素
+- 必须是合法 JSON
+- 必须使用 jq -n 构造
+- listen 固定为 "::"
+- listen_port 固定取 meta.port
+- 所有协议字段都必须严格来自我提供的 sing-box schema
+- 所有值都从 meta_json 提取，使用 --arg / --argjson 传入 jq
+- 不允许编造不存在字段
+- 布尔值、数字、数组、对象必须正确使用 --argjson
+- 如果协议需要 tls / reality / transport / multiplex / masquerade /
+  obfs / users / auth 等子结构，必须按我提供的 schema 真实输出
+
+────────────────────────────────────────────────
+5) uri_{{PROTO_FILE}} <meta_json> <ipv4>
+────────────────────────────────────────────────
+要求：
+- 参数1是完整 meta JSON
+- 参数2是 ipv4 地址
+- 所有变量先 local 声明
+- 如果该协议存在标准分享链接，严格按我提供的 URI 规则输出
+- 节点备注统一命名为：`{{PROTO_KEY}}-<id>`
+- 备注必须 urlencode
+- 如果协议无标准 URI，返回空字符串
+- 不要输出额外换行说明
+- 生成 URI 时不要遗漏必要查询参数或 fragment
+
+────────────────────────────────────────────────
+6) surge_{{PROTO_FILE}} <meta_json> <ipv4>
+────────────────────────────────────────────────
+要求：
+- 参数1是完整 meta JSON
+- 参数2是 ipv4 地址
+- 所有变量先 local 声明
+- 如果 Surge 支持，返回单行节点配置
+- 格式参考：
+  `"{{PROTO_KEY}}-<id> = <type>, <ip>, <port>, k1=v1, k2=v2"`
+- 如果不支持，返回空字符串
+- 代码注释必须说明不支持原因
+- 不要输出多行文本
+
+────────────────────────────────────────────────
+7) clash_{{PROTO_FILE}} <meta_json> <ipv4>
+────────────────────────────────────────────────
+要求：
+- 参数1是完整 meta JSON
+- 参数2是 ipv4 地址
+- 所有变量先 local 声明
+- 如果 Clash Meta / Mihomo 支持，返回一个 jq -n 构造的 proxy JSON 对象
+- 如果不支持，返回最小占位 JSON，例如：
+  `{"name":"{{PROTO_KEY}}-<id>","type":"direct"}`
+- 字段必须严格依据我提供的映射规则
+- 不要臆造字段
+- 如不支持，代码注释必须说明原因
+
+====================================================================
+【元数据与字段处理要求】
+
+1. meta JSON 必须是完整实例状态，至少包含：
+- id
+- protocol
+- port
+- created_at
+- updated_at
+- enabled
+
+2. 除基础字段外，其余字段必须来自我提供的协议规则，例如：
+- password
+- uuid
+- token
+- server_name
+- sni
+- alpn
+- congestion_control
+- cert_path
+- key_path
+- insecure
+- flow
+- obfs_password
+等
+
+3. 读取 JSON 字段时，统一使用：
+`echo "$json" | jq -r '.field'`
+
+4. 写 JSON 时统一使用 jq -n 构造，不要手写拼接 JSON 字符串。
+
+5. edit 函数中构造 jq filter 时：
+- 字符串值必须正确转义
+- 布尔值与数字必须按正确类型写入
+- 不要生成非法 jq 表达式
+- 最终传给 `state_patch "$id" "$filter"` 的 filter 不能以 `|` 开头
+
+====================================================================
+【代码风格要求】
+
+- 纯 bash
+- 所有变量必须先 `local`
+- 不要使用未声明 helper
+- 不要覆盖已有公共函数名
+- 缩进 4 个空格
+- 使用 `# -----` 风格注释分隔函数
+- 文件开头必须有协议说明注释块
+- 代码应尽量保持简洁清晰，避免无意义复杂封装
+- 可以定义当前协议私有小工具函数，但只能在本文件内部使用，且必须确有必要
+- 不能使用数组高级特性去制造兼容性风险，除非 bash 基础语法可稳定运行
+- 不能使用 exit
+- 只能输出唯一一个完整 .sh 文件内容
+
+====================================================================
+【生成前自检要求】
+
+在真正输出代码前，你必须先在内部完成以下检查，但不要把检查过程输出出来：
+
+1. proto_register 参数是否正好 10 个且顺序正确
+2. build/edit/info/inbound/uri/surge/clash 七个函数是否全部实现
+3. build 是否先做端口为空、合法性、冲突检测
+4. edit 修改端口时是否重新检测
+5. inbound JSON 是否完全符合我提供的 schema
+6. uri / surge / clash 是否严格基于我提供的规则
+7. 是否没有引用不存在的 helper
+8. 是否没有写入 instances/ 目录
+9. 是否没有使用未允许的外部命令
+10. 是否只输出纯 .sh 文件内容
+
+如果任一项无法满足，不要输出代码，只输出：
+缺少必要协议信息：<具体缺失项列表>
+
+====================================================================
+【建议输入格式】
+
+你接下来会收到我补充的协议信息。我建议我按以下格式填写，你必须以此为准：
+
+协议名称：...
+协议 KEY：...
+菜单显示名：...
+文件名：protocols/... .sh
+sing-box inbound type：...
+传输层：tcp/udp
+是否需要 TLS：是/否
+是否需要域名/SNI/伪装：是/否
+
+sing-box inbound schema：
+...
+
+需要采集的用户输入字段：
+...
+
+自动生成字段：
+...
+
+meta JSON 建议字段：
+...
+
+分享链接规则：
+...
+
+Surge 映射规则：
+...
+
+Clash Meta / Mihomo 映射规则：
+...
+
+====================================================================
+【输出规则】
+
+- 如果信息完整：直接输出完整 .sh 文件内容
+- 如果信息不完整：只输出
+  缺少必要协议信息：...
+- 不要输出解释
+- 不要输出分析
+- 不要输出 markdown 代码块
+
+====================================================================
+【现在开始生成】
+
+如果信息完整，直接输出完整 .sh 文件内容。
+如果信息不完整，只输出：
+缺少必要协议信息：...
