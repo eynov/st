@@ -754,13 +754,10 @@ EOL
     echo "  3) 2022-blake3-chacha20-poly1305"
     read -rp "算法指引 (1-3, 默认 1): " METHOD_OPT
     case "$METHOD_OPT" in
-      2) METHOD="2022-blake3-aes-256-gcm";       KEY_SIZE=32 ;;
-      3) METHOD="2022-blake3-chacha20-poly1305";  KEY_SIZE=32 ;;
-      *) METHOD="2022-blake3-aes-128-gcm";        KEY_SIZE=16 ;;
+      2) METHOD="2022-blake3-aes-256-gcm";       MASTER_KEY_B64=$(openssl rand -base64 32 | tr -d '\n') ;;
+      3) METHOD="2022-blake3-chacha20-poly1305";  MASTER_KEY_B64=$(openssl rand -base64 32 | tr -d '\n') ;;
+      *) METHOD="2022-blake3-aes-128-gcm";        MASTER_KEY_B64=$(openssl rand -base64 16 | tr -d '\n') ;;
     esac
-
-    MASTER_KEY=$(openssl rand -hex "$KEY_SIZE")
-    MASTER_KEY_B64=$(echo -n "$MASTER_KEY" | xxd -r -p | base64 -w0)
 
     sudo tee "${SS_CONF}" > /dev/null << EOL
 {
