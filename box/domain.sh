@@ -383,6 +383,30 @@ function sync_to_cloudflare() {
     fi
 }
 
+# 根据域名+记录类型查询并删除对应的 Cloudflare DNS 记录（记录不存在则跳过，不报错）
+function delete_from_cloudflare() {
+    local domain="$1"
+    local rtype="$2"
+    local query_result record_id response success errors
+
+    query_result=$(cf_api "GET" "/zones/${CF_ZONE_ID}/dns_records?type=${rtype}&name=${domain}")
+    record_id=$(echo "$query_result" | jq -r '.result[0].id // empty')
+
+    if [[ -z "$record_id" ]]; then
+        log_warn "${domain} 的 ${rtype} 记录在 Cloudflare 中不存在，跳过"
+        return 0
+    fi
+
+    response=$(cf_api "DELETE" "/zones/${CF_ZONE_ID}/dns_records/${record_id}")
+    success=$(echo "$response" | jq -r '.success')
+    if [[ "$success" == "true" ]]; then
+        log_ok "${domain} (${rtype}) 的 Cloudflare 记录已删除"
+    else
+        errors=$(echo "$response" | jq -c '.errors')
+        log_error "${domain} (${rtype}) 的 Cloudflare 记录删除失败: ${errors}"
+    fi
+}
+
 # ========== 添加域名 ==========
 function add_domain() {
     local SUBDOMAIN BACKEND USE_HTTPS_BACKEND BACKEND_SCHEME EMBY_OPT PROXY_CHOICE PROXIED
@@ -621,6 +645,7 @@ EOF
 # ========== 删除域名 ==========
 function delete_domain() {
     local SUBDOMAIN CONF_FILE LOCAL_SERVICE_DELETED BACKEND_LINE PORT
+    local DELETE_CF CF_DEL_CHOICE
     read -p "请输入要删除的域名 : " SUBDOMAIN
     SUBDOMAIN=$(trim "$SUBDOMAIN")
     if [[ -z "$SUBDOMAIN" ]]; then
@@ -655,6 +680,16 @@ function delete_domain() {
         [[ "$LOCAL_SERVICE_DELETED" == true ]] && log_ok "同步深度清理了本地静态服务：local_static_${PORT}.conf"
     else
         log_warn "配置文件已删，但 Nginx 存在其他冲突组件，请运行 nginx -t 检查"
+    fi
+
+    read -p "是否同时删除 Cloudflare 上对应的 DNS 记录？[y/N]: " DELETE_CF
+    if [[ "$DELETE_CF" == "y" || "$DELETE_CF" == "Y" ]]; then
+        read -p "请选择要删除的记录类型 [1] 仅 A  [2] 仅 AAAA  [3] 同时删除(A+AAAA)（默认 3）: " CF_DEL_CHOICE
+        CF_DEL_CHOICE=${CF_DEL_CHOICE:-3}
+        [[ "$CF_DEL_CHOICE" == "1" || "$CF_DEL_CHOICE" == "3" ]] && delete_from_cloudflare "$SUBDOMAIN" "A"
+        [[ "$CF_DEL_CHOICE" == "2" || "$CF_DEL_CHOICE" == "3" ]] && delete_from_cloudflare "$SUBDOMAIN" "AAAA"
+    else
+        log_warn "已跳过 Cloudflare DNS 记录删除，如需清理请登录 Cloudflare 控制台手动处理"
     fi
 }
 
