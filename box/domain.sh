@@ -386,7 +386,7 @@ function sync_to_cloudflare() {
 # ========== 添加域名 ==========
 function add_domain() {
     local SUBDOMAIN BACKEND USE_HTTPS_BACKEND BACKEND_SCHEME EMBY_OPT PROXY_CHOICE PROXIED
-    local SYNC_CHOICE SERVER_IPV4 SERVER_IPV6 IP PORT ENABLE_CHOICE
+    local SYNC_CHOICE SERVER_IPV4 SERVER_IPV6 IP PORT ENABLE_CHOICE HTTPS_PORT REDIRECT_TARGET
     local CONF_PATH EXTRA_PROXY_SSL EXTRA_PROXY_OPT STAPLING_BLOCK LISTEN_LINE HTTP3_BLOCK RESOLVER_LIST
     local LOCAL_STATIC_CONF
 
@@ -416,6 +416,13 @@ function add_domain() {
 
     read -p "后端是否为 HTTPS 服务？ [y/N]: " USE_HTTPS_BACKEND
     [[ "$USE_HTTPS_BACKEND" == "y" || "$USE_HTTPS_BACKEND" == "Y" ]] && BACKEND_SCHEME="https" || BACKEND_SCHEME="http"
+
+    read -p "请输入本站点 HTTPS 监听端口（默认 443，如与 VLESS 等其他服务冲突可自定义）: " HTTPS_PORT
+    HTTPS_PORT=${HTTPS_PORT:-443}
+    if ! validate_port "$HTTPS_PORT"; then
+        log_error "端口号不合法：${HTTPS_PORT}（应为 1-65535）"
+        return 1
+    fi
 
     read -p "是否为 Emby 站点，需要启用视频流优化？ [y/N]: " EMBY_OPT
     read -p "是否启用 Cloudflare CDN？[y/N]: " PROXY_CHOICE
@@ -513,24 +520,24 @@ EOT
 )
     fi
 
-    # 【修复1】完美解决 LISTEN_LINE 换行配置生成错误的问题
+    # 【修复1】完美解决 LISTEN_LINE 换行配置生成错误的问题（端口改为可自定义，默认 443）
     if [[ "$USE_NEW_HTTP2" == true ]]; then
-        LISTEN_LINE=$(cat << 'EOF'
-    listen 443 ssl;
+        LISTEN_LINE=$(cat << EOF
+    listen ${HTTPS_PORT} ssl;
     http2 on;
 EOF
 )
     else
-        LISTEN_LINE="    listen 443 ssl http2;"
+        LISTEN_LINE="    listen ${HTTPS_PORT} ssl http2;"
     fi
 
-    # 新增：HTTP/3（QUIC）支持，仅当 nginx -V 检测到 http_v3_module 时生效，不影响旧版本 nginx
+    # 新增：HTTP/3（QUIC）支持，仅当 nginx -V 检测到 http_v3_module 时生效，不影响旧版本 nginx；端口跟随自定义 HTTPS_PORT
     HTTP3_BLOCK=""
     if [[ "$(detect_http3)" == "true" ]]; then
-        HTTP3_BLOCK=$(cat <<'EOT'
-    listen 443 quic reuseport;
+        HTTP3_BLOCK=$(cat <<EOT
+    listen ${HTTPS_PORT} quic reuseport;
     http3 on;
-    add_header Alt-Svc 'h3=":443"; ma=86400' always;
+    add_header Alt-Svc 'h3=":${HTTPS_PORT}"; ma=86400' always;
 EOT
 )
     fi
@@ -574,12 +581,19 @@ $STAPLING_BLOCK
 }
 EOF
 
+    # 跳转目标端口跟随自定义 HTTPS_PORT：默认 443 时保持原有简洁写法，非默认端口时显式带上端口号
+    if [[ "$HTTPS_PORT" == "443" ]]; then
+        REDIRECT_TARGET="https://\$host\$request_uri"
+    else
+        REDIRECT_TARGET="https://\$host:${HTTPS_PORT}\$request_uri"
+    fi
+
     cat > "${AVAILABLE_DIR}/${SUBDOMAIN}_redirect.conf" <<EOF
 server {
     listen 80;
     server_name ${SUBDOMAIN};
 
-    return 301 https://\$host\$request_uri;
+    return 301 ${REDIRECT_TARGET};
 }
 EOF
 
