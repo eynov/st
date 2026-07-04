@@ -312,6 +312,8 @@ function setup_ssl_config() {
         echo "CERT_PATH=\"$CERT_PATH\"" > "$CONFIG_FILE"
         echo "KEY_PATH=\"$KEY_PATH\"" >> "$CONFIG_FILE"
         echo "TRUSTED_CERT=\"$TRUSTED_CERT\"" >> "$CONFIG_FILE"
+        chmod 600 "$CONFIG_FILE"
+        chown root:root "$CONFIG_FILE"
         log_ok "证书路径已保存到 $CONFIG_FILE"
     fi
 }
@@ -370,6 +372,8 @@ function modify_stapling() {
     echo "CERT_PATH=\"$CERT_PATH\"" > "$CONFIG_FILE"
     echo "KEY_PATH=\"$KEY_PATH\"" >> "$CONFIG_FILE"
     echo "TRUSTED_CERT=\"$TRUSTED_CERT\"" >> "$CONFIG_FILE"
+    chmod 600 "$CONFIG_FILE"
+    chown root:root "$CONFIG_FILE"
     log_ok "配置已更新到 $CONFIG_FILE"
     log_warn "注意：此项修改只影响【之后新增】的域名配置，已存在的域名配置不受影响。"
 }
