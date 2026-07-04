@@ -94,10 +94,13 @@ function load_env() {
         exit 1
     fi
 
-    if [[ -z "$CF_API_TOKEN" || -z "$CF_ZONE_ID" ]]; then
-        log_error "Cloudflare 环境变量未设置（CF_API_TOKEN 或 CF_ZONE_ID 缺失）"
+    if [[ -z "$CF_API_TOKEN" ]]; then
+        log_error "Cloudflare 环境变量未设置（CF_API_TOKEN 缺失）"
         exit 1
     fi
+    # 说明：CF_ZONE_ID 不再作为必需变量强制校验。
+    # 所有 Cloudflare 操作（DNS 同步/删除、源规则管理）均改为根据域名自动识别所属 Zone，
+    # 以支持一个 Token 下同时管理多个根域名（Token 权限需为 All Zones 或覆盖相关 Zone）。
 }
 
 # 检测是否以 root 身份运行，非 root 直接退出
@@ -129,10 +132,19 @@ function reload_nginx() {
     fi
 
     local reload_output
-    if ! reload_output=$(systemctl reload nginx 2>&1); then
-        log_error "Nginx reload 失败："
-        echo "$reload_output"
-        return 1
+    if systemctl is-active --quiet nginx; then
+        if ! reload_output=$(systemctl reload nginx 2>&1); then
+            log_error "Nginx reload 失败："
+            echo "$reload_output"
+            return 1
+        fi
+    else
+        log_warn "检测到 Nginx 当前未处于运行状态，将改为启动 Nginx"
+        if ! reload_output=$(systemctl start nginx 2>&1); then
+            log_error "Nginx start 失败："
+            echo "$reload_output"
+            return 1
+        fi
     fi
 
     log_ok "Nginx 已重新加载"
@@ -190,11 +202,17 @@ function detect_http2() {
 # 优先读取 /etc/resolv.conf 中的 nameserver，若为空则回退默认值
 function detect_resolver() {
     local servers=()
-    local line
+    local line addr
     if [[ -f /etc/resolv.conf ]]; then
         while read -r line; do
             if [[ "$line" =~ ^nameserver[[:space:]]+([0-9A-Fa-f:.]+) ]]; then
-                servers+=("${BASH_REMATCH[1]}")
+                addr="${BASH_REMATCH[1]}"
+                case "$addr" in
+                    127.*|::1|localhost)
+                        continue
+                        ;;
+                esac
+                servers+=("$addr")
             fi
         done < /etc/resolv.conf
     fi
@@ -214,12 +232,12 @@ function cf_api() {
     local url="https://api.cloudflare.com/client/v4${endpoint}"
 
     if [[ -n "$data" ]]; then
-        curl --fail --silent --show-error -X "$method" "$url" \
+        curl --fail --silent --show-error --connect-timeout 5 --max-time 20 -X "$method" "$url" \
             -H "Authorization: Bearer ${CF_API_TOKEN}" \
             -H "Content-Type: application/json" \
             --data "$data"
     else
-        curl --fail --silent --show-error -X "$method" "$url" \
+        curl --fail --silent --show-error --connect-timeout 5 --max-time 20 -X "$method" "$url" \
             -H "Authorization: Bearer ${CF_API_TOKEN}" \
             -H "Content-Type: application/json"
     fi
@@ -228,7 +246,13 @@ function cf_api() {
 # ========== 证书配置（路径仍询问，缺失即终止；根证书可选+自动下载） ==========
 function setup_ssl_config() {
     if [[ -f "$CONFIG_FILE" ]]; then
-        source "$CONFIG_FILE"
+        set -a
+        if ! source "$CONFIG_FILE" 2>/dev/null; then
+            set +a
+            log_error "证书配置文件损坏，请删除后重新配置：$CONFIG_FILE"
+            exit 1
+        fi
+        set +a
         log_ok "已加载证书配置："
         echo "CERT_PATH=$CERT_PATH"
         echo "KEY_PATH=$KEY_PATH"
@@ -358,10 +382,17 @@ function sync_to_cloudflare() {
     local proxied="$3"
     local rtype="${4:-A}"
 
-    log_info "正在同步 ${domain} (${rtype}) 到 Cloudflare..."
+    local zone_id
+    zone_id=$(cf_resolve_zone_id "$domain")
+    if [[ -z "$zone_id" ]]; then
+        log_error "未能自动识别 ${domain} 所属的 Cloudflare Zone，同步已中止"
+        return 1
+    fi
+
+    log_info "正在同步 ${domain} (${rtype}) 到 Cloudflare（Zone: ${zone_id}）..."
 
     local query_result record_id payload response success errors
-    query_result=$(cf_api "GET" "/zones/${CF_ZONE_ID}/dns_records?type=${rtype}&name=${domain}")
+    query_result=$(cf_api "GET" "/zones/${zone_id}/dns_records?type=${rtype}&name=${domain}")
     record_id=$(echo "$query_result" | jq -r '.result[0].id // empty')
 
     payload=$(jq -n --arg type "$rtype" --arg name "$domain" --arg content "$ip" \
@@ -369,9 +400,14 @@ function sync_to_cloudflare() {
         '{type:$type,name:$name,content:$content,ttl:$ttl,proxied:$proxied}')
 
     if [[ -z "$record_id" ]]; then
-        response=$(cf_api "POST" "/zones/${CF_ZONE_ID}/dns_records" "$payload")
+        response=$(cf_api "POST" "/zones/${zone_id}/dns_records" "$payload")
     else
-        response=$(cf_api "PATCH" "/zones/${CF_ZONE_ID}/dns_records/${record_id}" "$payload")
+        response=$(cf_api "PATCH" "/zones/${zone_id}/dns_records/${record_id}" "$payload")
+    fi
+
+    if [[ -z "$response" ]]; then
+        log_error "Cloudflare API 请求失败（网络超时或连接失败）"
+        return 1
     fi
 
     success=$(echo "$response" | jq -r '.success')
@@ -387,9 +423,15 @@ function sync_to_cloudflare() {
 function delete_from_cloudflare() {
     local domain="$1"
     local rtype="$2"
-    local query_result record_id response success errors
+    local zone_id query_result record_id response success errors
 
-    query_result=$(cf_api "GET" "/zones/${CF_ZONE_ID}/dns_records?type=${rtype}&name=${domain}")
+    zone_id=$(cf_resolve_zone_id "$domain")
+    if [[ -z "$zone_id" ]]; then
+        log_error "未能自动识别 ${domain} 所属的 Cloudflare Zone，删除已中止"
+        return 1
+    fi
+
+    query_result=$(cf_api "GET" "/zones/${zone_id}/dns_records?type=${rtype}&name=${domain}")
     record_id=$(echo "$query_result" | jq -r '.result[0].id // empty')
 
     if [[ -z "$record_id" ]]; then
@@ -397,7 +439,12 @@ function delete_from_cloudflare() {
         return 0
     fi
 
-    response=$(cf_api "DELETE" "/zones/${CF_ZONE_ID}/dns_records/${record_id}")
+    response=$(cf_api "DELETE" "/zones/${zone_id}/dns_records/${record_id}")
+    if [[ -z "$response" ]]; then
+        log_error "Cloudflare API 请求失败（网络超时或连接失败）"
+        return 1
+    fi
+
     success=$(echo "$response" | jq -r '.success')
     if [[ "$success" == "true" ]]; then
         log_ok "${domain} (${rtype}) 的 Cloudflare 记录已删除"
@@ -407,12 +454,230 @@ function delete_from_cloudflare() {
     fi
 }
 
+# ========== Cloudflare 源规则（Origin Rules）：目标端口重写，支持多 Zone 自动识别 ==========
+
+# 根据完整域名自动识别其所属的 Cloudflare Zone ID
+# 做法：从完整域名开始，逐级剥离最左边的子域名标签去匹配 Zone，直到命中或用尽
+# 例如 sub.a.example.com 依次尝试： sub.a.example.com -> a.example.com -> example.com
+function cf_resolve_zone_id() {
+    local domain="$1"
+    local candidate query_result zone_id
+
+    candidate="$domain"
+    while [[ "$candidate" == *.* ]]; do
+        query_result=$(cf_api "GET" "/zones?name=${candidate}" 2>/dev/null)
+        zone_id=$(echo "$query_result" | jq -r '.result[0].id // empty' 2>/dev/null)
+        if [[ -n "$zone_id" ]]; then
+            echo "$zone_id"
+            return 0
+        fi
+        candidate="${candidate#*.}"
+    done
+
+    return 1
+}
+
+# 获取指定 Zone 下 Origin Rules 的入口规则集（不存在时返回空结果，不视为错误）
+function cf_get_origin_ruleset() {
+    local zone_id="$1"
+    cf_api "GET" "/zones/${zone_id}/rulesets/phases/http_request_origin/entrypoint" 2>/dev/null
+}
+
+# 为指定域名创建"目标端口重写"源规则；自动识别域名所属 Zone；规则集不存在则自动创建
+function cf_add_origin_rule() {
+    local domain="$1"
+    local port="$2"
+    local zone_id ruleset_json ruleset_id rule_payload response success errors
+
+    zone_id=$(cf_resolve_zone_id "$domain")
+    if [[ -z "$zone_id" ]]; then
+        log_error "未能自动识别 ${domain} 所属的 Cloudflare Zone（请确认该域名已在此 Token 权限范围内的 Cloudflare 账号中）"
+        return 1
+    fi
+    log_info "已识别 ${domain} 所属 Zone ID: ${zone_id}"
+
+    ruleset_json=$(cf_get_origin_ruleset "$zone_id")
+    ruleset_id=$(echo "$ruleset_json" | jq -r '.result.id // empty' 2>/dev/null)
+
+    rule_payload=$(jq -n --arg domain "$domain" --argjson port "$port" \
+        '{
+            action: "route",
+            action_parameters: { origin: { port: $port } },
+            expression: ("(http.host eq \"" + $domain + "\")"),
+            description: ($domain + " 源端口重写 -> " + ($port|tostring)),
+            enabled: true
+        }')
+
+    if [[ -z "$ruleset_id" ]]; then
+        # 该 Zone 下尚无 Origin Rules 规则集，创建入口规则集并写入第一条规则
+        response=$(cf_api "PUT" "/zones/${zone_id}/rulesets/phases/http_request_origin/entrypoint" \
+            "$(jq -n --argjson rule "$rule_payload" '{rules: [$rule]}')")
+    else
+        # 规则集已存在，追加一条规则，不影响该 Zone 下其他已有的源规则
+        response=$(cf_api "POST" "/zones/${zone_id}/rulesets/${ruleset_id}/rules" "$rule_payload")
+    fi
+
+    if [[ -z "$response" ]]; then
+        log_error "Cloudflare API 请求失败（网络超时或连接失败）"
+        return 1
+    fi
+
+    success=$(echo "$response" | jq -r '.success' 2>/dev/null)
+    if [[ "$success" == "true" ]]; then
+        log_ok "${domain} 的源规则已创建（目标端口重写 -> ${port}）"
+    else
+        errors=$(echo "$response" | jq -c '.errors' 2>/dev/null)
+        log_error "${domain} 源规则创建失败: ${errors}"
+        log_warn "提示：请确认 CF_API_TOKEN 拥有对应 Zone 的 'Zone Ruleset: Edit' 权限"
+    fi
+}
+
+# 列出指定 Zone 下所有源规则，编号展示
+# 结果通过全局数组 ORIGIN_RULE_IDS 传出（下标 0 对应编号 1），成功找到规则返回 0，否则返回 1
+function cf_list_origin_rules() {
+    local zone_id="$1"
+    local ruleset_json
+
+    ORIGIN_RULE_IDS=()
+    ORIGIN_RULESET_ID=""
+
+    ruleset_json=$(cf_get_origin_ruleset "$zone_id")
+    ORIGIN_RULESET_ID=$(echo "$ruleset_json" | jq -r '.result.id // empty' 2>/dev/null)
+
+    if [[ -z "$ORIGIN_RULESET_ID" ]]; then
+        echo "（该 Zone 下暂无任何源规则）"
+        return 1
+    fi
+
+    local count=0
+    local id desc port enabled expr
+    while IFS=$'\t' read -r id desc port enabled expr; do
+        [[ -z "$id" ]] && continue
+        ((count++))
+        ORIGIN_RULE_IDS+=("$id")
+        printf "  [%d] %-30s 端口->%-6s 状态:%-6s (%s)\n" \
+            "$count" "$desc" "$port" "$([[ "$enabled" == "true" ]] && echo 启用 || echo 停用)" "$expr"
+    done < <(echo "$ruleset_json" | jq -r '.result.rules[]? | [.id, (.description // "(无描述)"), (.action_parameters.origin.port // "-"), (.enabled|tostring), .expression] | @tsv')
+
+    if [[ $count -eq 0 ]]; then
+        echo "（该 Zone 下暂无任何源规则）"
+        return 1
+    fi
+    return 0
+}
+
+# 修改指定源规则的目标端口
+function cf_update_origin_rule_port() {
+    local zone_id="$1"
+    local ruleset_id="$2"
+    local rule_id="$3"
+    local new_port="$4"
+    local payload response success errors
+
+    payload=$(jq -n --argjson port "$new_port" '{action_parameters: {origin: {port: $port}}}')
+    response=$(cf_api "PATCH" "/zones/${zone_id}/rulesets/${ruleset_id}/rules/${rule_id}" "$payload")
+
+    if [[ -z "$response" ]]; then
+        log_error "Cloudflare API 请求失败（网络超时或连接失败）"
+        return 1
+    fi
+
+    success=$(echo "$response" | jq -r '.success' 2>/dev/null)
+    if [[ "$success" == "true" ]]; then
+        log_ok "源规则端口已更新为 ${new_port}"
+    else
+        errors=$(echo "$response" | jq -c '.errors' 2>/dev/null)
+        log_error "源规则更新失败: ${errors}"
+    fi
+}
+
+# 删除指定源规则
+function cf_delete_origin_rule() {
+    local zone_id="$1"
+    local ruleset_id="$2"
+    local rule_id="$3"
+    local response success errors
+
+    response=$(cf_api "DELETE" "/zones/${zone_id}/rulesets/${ruleset_id}/rules/${rule_id}")
+    if [[ -z "$response" ]]; then
+        log_error "Cloudflare API 请求失败（网络超时或连接失败）"
+        return 1
+    fi
+
+    success=$(echo "$response" | jq -r '.success' 2>/dev/null)
+    if [[ "$success" == "true" ]]; then
+        log_ok "源规则已删除"
+    else
+        errors=$(echo "$response" | jq -c '.errors' 2>/dev/null)
+        log_error "源规则删除失败: ${errors}"
+    fi
+}
+
+# 查看 / 管理源规则 菜单（先按域名定位 Zone，再列出该 Zone 下所有源规则）
+function manage_origin_rules() {
+    local QDOMAIN zone_id SEL ACTION NEW_PORT CONFIRM_DEL rule_id
+
+    read -p "请输入要查看/管理源规则的域名（用于自动定位所属 Cloudflare Zone）: " QDOMAIN
+    QDOMAIN=$(trim "$QDOMAIN")
+    if [[ -z "$QDOMAIN" ]]; then
+        log_error "域名不能为空"
+        return
+    fi
+
+    zone_id=$(cf_resolve_zone_id "$QDOMAIN")
+    if [[ -z "$zone_id" ]]; then
+        log_error "未能自动识别 ${QDOMAIN} 所属的 Cloudflare Zone"
+        return
+    fi
+
+    echo "📄 Zone: ${QDOMAIN}（Zone ID: ${zone_id}）下的源规则列表："
+    if ! cf_list_origin_rules "$zone_id"; then
+        return
+    fi
+
+    read -p "输入编号进行修改/删除，直接回车返回主菜单: " SEL
+    SEL=$(trim "$SEL")
+    [[ -z "$SEL" ]] && return
+
+    if ! [[ "$SEL" =~ ^[0-9]+$ ]] || (( SEL < 1 || SEL > ${#ORIGIN_RULE_IDS[@]} )); then
+        log_error "无效编号"
+        return
+    fi
+
+    rule_id="${ORIGIN_RULE_IDS[$((SEL-1))]}"
+
+    echo "1. 修改目标端口"
+    echo "2. 删除该规则"
+    echo "0. 取消"
+    read -p "请选择操作 [0-2]: " ACTION
+
+    case "$ACTION" in
+        1)
+            read -p "请输入新的目标端口: " NEW_PORT
+            if ! validate_port "$NEW_PORT"; then
+                log_error "端口号不合法"
+                return
+            fi
+            cf_update_origin_rule_port "$zone_id" "$ORIGIN_RULESET_ID" "$rule_id" "$NEW_PORT"
+            ;;
+        2)
+            read -p "确认删除该源规则？[y/N]: " CONFIRM_DEL
+            if [[ "$CONFIRM_DEL" == "y" || "$CONFIRM_DEL" == "Y" ]]; then
+                cf_delete_origin_rule "$zone_id" "$ORIGIN_RULESET_ID" "$rule_id"
+            fi
+            ;;
+        *)
+            log_warn "已取消"
+            ;;
+    esac
+}
+
 # ========== 添加域名 ==========
 function add_domain() {
     local SUBDOMAIN BACKEND USE_HTTPS_BACKEND BACKEND_SCHEME EMBY_OPT PROXY_CHOICE PROXIED
     local SYNC_CHOICE SERVER_IPV4 SERVER_IPV6 IP PORT ENABLE_CHOICE HTTPS_PORT REDIRECT_TARGET
     local CONF_PATH EXTRA_PROXY_SSL EXTRA_PROXY_OPT STAPLING_BLOCK LISTEN_LINE HTTP3_BLOCK RESOLVER_LIST
-    local LOCAL_STATIC_CONF
+    local LOCAL_STATIC_CONF ADD_ORIGIN_RULE
 
     read -p "请输入域名 : " SUBDOMAIN
     SUBDOMAIN=$(trim "$SUBDOMAIN")
@@ -562,6 +827,7 @@ EOF
     listen ${HTTPS_PORT} quic reuseport;
     http3 on;
     add_header Alt-Svc 'h3=":${HTTPS_PORT}"; ma=86400' always;
+    add_header QUIC-Status \$http3 always;
 EOT
 )
     fi
@@ -640,12 +906,24 @@ EOF
     if [[ -n "$SERVER_IPV6" ]]; then
         sync_to_cloudflare "$SUBDOMAIN" "$SERVER_IPV6" "$PROXIED" "AAAA"
     fi
+
+    # 若 HTTPS 监听端口不是标准 443（例如与 VLESS 等服务冲突而自定义），
+    # 询问是否自动创建 Cloudflare 源规则（Origin Rule），把回源端口固定重写为 HTTPS_PORT，
+    # 这样访客访问时无需在网址中携带端口号。自动根据域名识别所属 Zone，支持一个 Token 下管理多个域名。
+    read -p "是否为 ${SUBDOMAIN} 自动创建 Cloudflare 源规则（将回源端口重写为 ${HTTPS_PORT}，避免访问时必须带端口号）？[y/N]: " ADD_ORIGIN_RULE
+    ADD_ORIGIN_RULE=${ADD_ORIGIN_RULE:-N}
+    if [[ "$ADD_ORIGIN_RULE" == "y" || "$ADD_ORIGIN_RULE" == "Y" ]]; then
+        cf_add_origin_rule "$SUBDOMAIN" "$HTTPS_PORT"
+    else
+        log_warn "已跳过源规则创建，如需要可稍后在主菜单「查看/管理源规则」中手动添加"
+    fi
 }
 
 # ========== 删除域名 ==========
 function delete_domain() {
     local SUBDOMAIN CONF_FILE LOCAL_SERVICE_DELETED BACKEND_LINE PORT
     local DELETE_CF CF_DEL_CHOICE
+    local DELETE_ORIGIN_RULE ORIGIN_ZONE_ID ORIGIN_RULESET_JSON ORIGIN_RULESET_ID_LOCAL ORIGIN_RULE_ID_LOCAL
     read -p "请输入要删除的域名 : " SUBDOMAIN
     SUBDOMAIN=$(trim "$SUBDOMAIN")
     if [[ -z "$SUBDOMAIN" ]]; then
@@ -691,6 +969,30 @@ function delete_domain() {
     else
         log_warn "已跳过 Cloudflare DNS 记录删除，如需清理请登录 Cloudflare 控制台手动处理"
     fi
+
+    read -p "是否同时删除 Cloudflare Origin Rule？[y/N]: " DELETE_ORIGIN_RULE
+    if [[ "$DELETE_ORIGIN_RULE" == "y" || "$DELETE_ORIGIN_RULE" == "Y" ]]; then
+        ORIGIN_ZONE_ID=$(cf_resolve_zone_id "$SUBDOMAIN")
+        if [[ -z "$ORIGIN_ZONE_ID" ]]; then
+            log_error "未能自动识别 ${SUBDOMAIN} 所属的 Cloudflare Zone，Origin Rule 删除已中止"
+        else
+            ORIGIN_RULESET_JSON=$(cf_get_origin_ruleset "$ORIGIN_ZONE_ID")
+            ORIGIN_RULESET_ID_LOCAL=$(echo "$ORIGIN_RULESET_JSON" | jq -r '.result.id // empty' 2>/dev/null)
+            ORIGIN_RULE_ID_LOCAL=""
+            if [[ -n "$ORIGIN_RULESET_ID_LOCAL" ]]; then
+                ORIGIN_RULE_ID_LOCAL=$(echo "$ORIGIN_RULESET_JSON" | jq -r --arg d "$SUBDOMAIN" \
+                    '.result.rules[]? | select(.expression | contains($d)) | .id' 2>/dev/null | head -n1)
+            fi
+
+            if [[ -z "$ORIGIN_RULE_ID_LOCAL" ]]; then
+                log_warn "该域名不存在 Origin Rule。"
+            else
+                cf_delete_origin_rule "$ORIGIN_ZONE_ID" "$ORIGIN_RULESET_ID_LOCAL" "$ORIGIN_RULE_ID_LOCAL"
+            fi
+        fi
+    else
+        log_warn "已跳过 Cloudflare Origin Rule 删除"
+    fi
 }
 
 # ========== 批量推送 (Cloudflare) ==========
@@ -704,8 +1006,24 @@ function batch_add() {
     read -p "请输入批量配置文件路径（格式: 子域名 IP [proxied]）: " FILE
     FILE=$(trim "$FILE")
     if [[ ! -f "$FILE" ]]; then
-        log_error "文件不存在"
-        return
+        log_warn "文件不存在，将自动创建：$FILE"
+
+        mkdir -p -- "$(dirname "$FILE")"
+
+        cat > "$FILE" <<'EOF'
+# 格式：
+# 域名 IP [proxied]
+# proxied 可选：true 或 false
+#
+# 示例：
+
+api.example.com 1.2.3.4 true
+blog.example.com 1.2.3.5 false
+EOF
+
+        ${EDITOR:-nano} "$FILE"
+
+        read -p "编辑完成后按 Enter 继续..."
     fi
 
     read -p "是否启用 Cloudflare CDN（橙色云，用于未在文件中指定第三列的行）？[y/N]: " PROXY_CHOICE
@@ -713,9 +1031,7 @@ function batch_add() {
 
     while read -r line; do
         [[ -z "$line" || "$line" =~ ^# ]] && continue
-        sub=$(echo "$line" | awk '{print $1}')
-        ip=$(echo "$line" | awk '{print $2}')
-        proxied_field=$(echo "$line" | awk '{print $3}')
+        read -r sub ip proxied_field <<< "$line"
         [[ -z "$sub" || -z "$ip" ]] && continue
 
         if [[ -n "$proxied_field" ]]; then
@@ -810,15 +1126,16 @@ USE_NEW_HTTP2=$(detect_http2)
 while true; do
     echo -e "\n====== Nginx 子域名管理 ======"
     echo "1. 添加域名"
-    echo "2. 批量添加子域名到"
+    echo "2. 批量添加子域名到 Cloudflare"
     echo "3. 删除域名"
     echo "4. 启用已配置但未启用的域名"
     echo "5. 禁用正在启用的域名"
     echo "6. 列出已启用域名"
     echo "7. 修改证书 / OCSP Stapling 配置"
+    echo "8. 查看/管理 Cloudflare 源规则（Origin Rules）"
     echo "0. 退出"
     echo "==========================================="
-    read -p "请选择操作 [0-7]: " CHOICE
+    read -p "请选择操作 [0-8]: " CHOICE
 
     case $CHOICE in
         1) add_domain ;;
@@ -828,6 +1145,7 @@ while true; do
         5) disable_site ;;
         6) list_domains ;;
         7) modify_stapling ;;
+        8) manage_origin_rules ;;
         0) exit 0 ;;
         *) echo "❌ 无效选择，请重新输入。" ;;
     esac
