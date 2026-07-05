@@ -2,7 +2,7 @@
 # --- render.sh ---
 
 # ── 1. 更加健壮的文件锁熔断机制（防止子 Shell 嵌套锁死） ──────────────────
-LOCKFILE="/var/lock/sb_fw_render.lock"
+LOCKFILE="/var/lock/fwctl_render.lock"
 exec 200>"$LOCKFILE"
 if ! flock -n 200; then
     echo "❌ render 正在执行，跳过"
