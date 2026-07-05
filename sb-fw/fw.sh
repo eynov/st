@@ -1,18 +1,29 @@
 #!/bin/bash
-# --- fw.sh  ---
+# --- fw.sh (路径自动识别版，改名/换目录无需改代码) ---
 
+# ── 🔎 路径自动识别：永远通过软链接/真实文件位置反查项目目录 ──
 if [ -L "${BASH_SOURCE[0]}" ]; then
     REAL_SCRIPT_PATH=$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || echo "")
     if [ -z "$REAL_SCRIPT_PATH" ]; then
         REAL_SCRIPT_PATH=$(ls -l "${BASH_SOURCE[0]}" | awk -F '-> ' '{print $2}')
     fi
 else
-    REAL_SCRIPT_PATH="${BASH_SOURCE[0]}"
+    REAL_SCRIPT_PATH="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SOURCE[0]}")"
 fi
 
 BASE_DIR="$(cd "$(dirname "$REAL_SCRIPT_PATH")" 2>/dev/null && pwd)"
-if [[ "$BASE_DIR" == "/usr/local/bin" || -z "$BASE_DIR" ]]; then
-    BASE_DIR="/opt/sb-fw"
+
+# ── 🛟 锚点校验：确认这确实是项目目录（render.sh 必须存在）──
+if [ -z "$BASE_DIR" ] || [ ! -f "$BASE_DIR/render.sh" ]; then
+    # 兜底：脚本可能被复制而非软链接调用，自动在 /opt 下搜索一次
+    FOUND=$(find /opt -maxdepth 2 -name "render.sh" 2>/dev/null | head -n1)
+    if [ -n "$FOUND" ]; then
+        BASE_DIR="$(cd "$(dirname "$FOUND")" && pwd)"
+    else
+        echo "❌ 无法定位项目目录（找不到 render.sh）"
+        echo "   请通过 install.sh 安装，或直接用完整路径运行本脚本"
+        exit 1
+    fi
 fi
 
 STATE_FILE="$BASE_DIR/state.json"
@@ -42,7 +53,6 @@ trigger_render() {
 add_forward() {
     read -p "🔹 请输入目标落地 IP 或域名 (可带端口如 127.0.0.1:443): " dest_addr
 
-    # 解析是否带端口（格式 ip:port 或 domain:port，排除纯 IPv6）
     if [[ "$dest_addr" =~ ^([^:]+):([0-9]+)$ ]]; then
         raw_host="${BASH_REMATCH[1]}"
         dest_port_default="${BASH_REMATCH[2]}"
@@ -51,7 +61,6 @@ add_forward() {
         dest_port_default=""
     fi
 
-    # 域名/IP 解析
     if [[ "$raw_host" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
         dip="$raw_host"
     else
@@ -63,7 +72,6 @@ add_forward() {
     read -p "🔹 请输入结束端口 (若单端口直接回车): " dport
     [ -z "$dport" ] && dport="$sport"
 
-    # 目标端口：优先用 IP 里带的，否则询问，回车默认起始端口
     if [ -n "$dest_port_default" ]; then
         dest_port="$dest_port_default"
         echo "ℹ️  目标端口自动使用: $dest_port"
@@ -161,7 +169,7 @@ show_blacklist() {
 # ── 🔄 纯净循环控制台 ──────────────────────────────────────────
 while true; do
     echo "========================="
-    echo "   SB Firewall Manager   "
+    echo "   Firewall Manager   "
     echo "========================="
     echo "1. 添加端口转发    2. 删除端口转发    3. 查看端口转发"
     echo "-------------------------------------------------"
