@@ -1,0 +1,8 @@
+{
+  "forwards": [],
+  "open_ports": {
+    "tcp": [],
+    "udp": []
+  },
+  "blacklist": []
+}
