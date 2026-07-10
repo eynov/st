@@ -47,10 +47,14 @@ SRC_IP=$(curl -s4 -m 5 https://api.ip.sb/ip || \
          curl -s4 -m 5 https://api.ipify.org || \
          curl -s4 -m 5 https://ip4.seeip.org)
 
+# 内网/NAT 环境回退：拿不到公网 IP 时，使用本机主网卡内网 IP
+# （SRC_IP 仅用于端口转发的 SNAT，家庭内网主机用内网 IP 即可）
 if [ -z "$SRC_IP" ]; then
-    echo "❌ 无法获取本机公网 IP，中断编译。"
-    exit 1
+    SRC_IP=$(ip -4 route get 1.1.1.1 2>/dev/null | grep -oP '(?<=src )\S+' | head -n1)
+    [ -z "$SRC_IP" ] && SRC_IP=$(hostname -I | awk '{print $1}')
+    echo "ℹ️ 未获取到公网 IP，回退使用内网 IP：$SRC_IP"
 fi
+
 
 SSH_PORT=$(ss -tlnp | grep -E 'sshd|listen' | grep -oP '(?<=:)\d+(?=\s)' | head -n1)
 [ -z "$SSH_PORT" ] && SSH_PORT=$(awk '/^Port/ {print $2}' /etc/ssh/sshd_config | head -n1)
