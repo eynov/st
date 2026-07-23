@@ -25,11 +25,11 @@ table ip sb_filter {
 
         ip saddr @blacklist drop
 
-        tcp flags syn limit rate over 50/second burst 5 packets drop
         tcp dport #SSH_PORT# accept
-
         tcp dport @allowed_ports_tcp accept
         udp dport @allowed_ports_udp accept
+
+        tcp flags syn limit rate over 50/second burst 5 packets drop
     }
 
     chain forward {

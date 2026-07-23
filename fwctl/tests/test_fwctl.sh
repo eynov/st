@@ -133,4 +133,10 @@ grep -q 'elements = { 443 }' "$CLI_ROOT/build/nft.conf" || fail "port disappeare
 ! grep -q 'elements = { 65535 }' "$CLI_ROOT/build/nft.conf" || fail "placeholder returned"
 ok "ports persist and two renders are byte-identical"
 
+ssh_line=$(grep -n 'tcp dport 37091 accept' "$CLI_ROOT/build/nft.conf" | cut -d: -f1)
+allowed_line=$(grep -n 'tcp dport @allowed_ports_tcp accept' "$CLI_ROOT/build/nft.conf" | cut -d: -f1)
+limit_line=$(grep -n 'tcp flags syn limit rate over' "$CLI_ROOT/build/nft.conf" | cut -d: -f1)
+((ssh_line < limit_line && allowed_line < limit_line)) || fail "SYN limiter precedes allowed TCP ports"
+ok "SSH and allowed TCP ports precede the global SYN limiter"
+
 echo "1..$pass"
