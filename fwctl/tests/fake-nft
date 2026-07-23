@@ -1,0 +1,17 @@
+#!/bin/bash
+set -euo pipefail
+
+[[ "${1:-}" == "-c" && "${2:-}" == "-f" && -f "${3:-}" ]] || {
+    echo "fake-nft only supports: -c -f FILE" >&2
+    exit 2
+}
+
+if grep -Eq '#(BLACKLIST|TCP_PORTS|UDP_PORTS|SSH_PORT|DNAT_RULES|SNAT_RULES)#' "$3"; then
+    echo "unexpanded template placeholder" >&2
+    exit 1
+fi
+
+awk '
+    { opens += gsub(/\{/, "{"); closes += gsub(/\}/, "}") }
+    END { exit opens == closes ? 0 : 1 }
+' "$3"

@@ -36,7 +36,7 @@ fi
 
 # ── 🛡️ 状态文件合规性防御 ──
 if [ ! -f "$STATE_FILE" ] || [ ! -s "$STATE_FILE" ] || ! jq empty "$STATE_FILE" >/dev/null 2>&1; then
-    echo '{"forwards":[],"open_ports":{"tcp":[],"udp":[]},"blacklist":[]}' > "$STATE_FILE"
+    echo '{"nat_mode":"auto","snat_address":null,"forwards":[],"open_ports":{"tcp":[],"udp":[]},"blacklist":[]}' > "$STATE_FILE"
     chmod 644 "$STATE_FILE"
 fi
 
@@ -46,9 +46,122 @@ trigger_render() {
     if [ $? -eq 0 ]; then
         echo "✅ 编译成功，规则已实时应用！"
     else
-        echo "❌ 编译失败，内核已安全回滚到上一次可用状态。"
+        echo "❌ 编译或加载失败；上一份运行配置和持久配置保持不变。"
+        return 1
     fi
 }
+
+validate_protocol() {
+    case "$1" in
+        tcp|udp) ;;
+        *)
+            echo "❌ 非法协议 '$1'；只允许 tcp 或 udp" >&2
+            return 1
+            ;;
+    esac
+}
+
+validate_port() {
+    local port=$1
+    if [[ ! "$port" =~ ^[0-9]+$ ]] || ((10#$port < 1 || 10#$port > 65535)); then
+        echo "❌ 非法端口 '$port'；必须是 1-65535 的整数" >&2
+        return 1
+    fi
+}
+
+port_list() {
+    echo "TCP: $(jq -r '.open_ports.tcp | map(tonumber) | unique | sort | join(", ")' "$STATE_FILE")"
+    echo "UDP: $(jq -r '.open_ports.udp | map(tonumber) | unique | sort | join(", ")' "$STATE_FILE")"
+}
+
+port_update() {
+    local action=$1 proto=$2 port=$3 candidate action_label
+    validate_protocol "$proto" || return 1
+    validate_port "$port" || return 1
+
+    if [[ "$action" == add ]] && jq -e --arg proto "$proto" --arg port "$port" \
+        '.open_ports[$proto] | index($port) != null' "$STATE_FILE" >/dev/null; then
+        echo "ℹ️ $proto/$port 已存在，无需重复添加"
+        return 0
+    fi
+    if [[ "$action" == remove ]] && ! jq -e --arg proto "$proto" --arg port "$port" \
+        '.open_ports[$proto] | index($port) != null' "$STATE_FILE" >/dev/null; then
+        echo "ℹ️ $proto/$port 不存在，未做修改"
+        return 0
+    fi
+
+    candidate=$(mktemp "$(dirname "$STATE_FILE")/.state.json.XXXXXX")
+    if [[ "$action" == add ]]; then
+        jq --arg proto "$proto" --arg port "$port" \
+            '.open_ports[$proto] += [$port]
+             | .open_ports[$proto] |= (map(tonumber) | unique | sort | map(tostring))' \
+            "$STATE_FILE" > "$candidate"
+    else
+        jq --arg proto "$proto" --arg port "$port" \
+            '.open_ports[$proto] -= [$port]
+             | .open_ports[$proto] |= (map(tonumber) | unique | sort | map(tostring))' \
+            "$STATE_FILE" > "$candidate"
+    fi
+    chmod 0644 "$candidate"
+
+    if FWCTL_STATE_FILE="$candidate" bash "$RENDER_BIN"; then
+        mv -f "$candidate" "$STATE_FILE"
+        [[ "$action" == add ]] && action_label=添加 || action_label=删除
+        echo "✅ 已${action_label} ${proto}/${port}"
+    else
+        rm -f "$candidate"
+        echo "❌ 端口变更未保存" >&2
+        return 1
+    fi
+}
+
+cli_usage() {
+    local command_name
+    command_name=$(basename "${BASH_SOURCE[0]}" .sh)
+    cat <<'EOF'
+用法：
+EOF
+    echo "  $command_name port add tcp|udp PORT"
+    echo "  $command_name port remove tcp|udp PORT"
+    echo "  $command_name port list"
+    echo "  $command_name render"
+}
+
+if [[ $# -gt 0 ]]; then
+    case "${1:-}" in
+        port)
+            case "${2:-}" in
+                add|remove)
+                    [[ $# -eq 4 ]] || { cli_usage >&2; exit 2; }
+                    port_update "$2" "$3" "$4"
+                    exit $?
+                    ;;
+                list)
+                    [[ $# -eq 2 ]] || { cli_usage >&2; exit 2; }
+                    port_list
+                    exit 0
+                    ;;
+                *)
+                    cli_usage >&2
+                    exit 2
+                    ;;
+            esac
+            ;;
+        render)
+            [[ $# -eq 1 ]] || { cli_usage >&2; exit 2; }
+            trigger_render
+            exit $?
+            ;;
+        -h|--help|help)
+            cli_usage
+            exit 0
+            ;;
+        *)
+            cli_usage >&2
+            exit 2
+            ;;
+    esac
+fi
 
 add_forward() {
     read -p "🔹 请输入目标落地 IP 或域名 (可带端口如 127.0.0.1:443): " dest_addr
@@ -118,27 +231,15 @@ show_forward() {
 }
 
 add_port() {
-    read -p "🔹 请输入放行端口或段 (例如 80 或 80-90): " port
-    read -p "🔹 协议类型 (tcp/udp/both): " proto
-    if [ "$proto" == "tcp" ] || [ "$proto" == "both" ]; then
-        jq --arg port "$port" '.open_ports.tcp += [$port] | .open_ports.tcp |= unique' "$STATE_FILE" > "${STATE_FILE}.tmp" && mv "${STATE_FILE}.tmp" "$STATE_FILE"
-    fi
-    if [ "$proto" == "udp" ] || [ "$proto" == "both" ]; then
-        jq --arg port "$port" '.open_ports.udp += [$port] | .open_ports.udp |= unique' "$STATE_FILE" > "${STATE_FILE}.tmp" && mv "${STATE_FILE}.tmp" "$STATE_FILE"
-    fi
-    trigger_render
+    read -p "🔹 请输入放行端口 (1-65535): " port
+    read -p "🔹 协议类型 (tcp/udp): " proto
+    port_update add "$proto" "$port"
 }
 
 del_port() {
     read -p "❌ 请输入要取消放行的端口: " port
-    read -p "🔹 协议类型 (tcp/udp/both): " proto
-    if [ "$proto" == "tcp" ] || [ "$proto" == "both" ]; then
-        jq --arg port "$port" '.open_ports.tcp -= [$port]' "$STATE_FILE" > "${STATE_FILE}.tmp" && mv "${STATE_FILE}.tmp" "$STATE_FILE"
-    fi
-    if [ "$proto" == "udp" ] || [ "$proto" == "both" ]; then
-        jq --arg port "$port" '.open_ports.udp -= [$port]' "$STATE_FILE" > "${STATE_FILE}.tmp" && mv "${STATE_FILE}.tmp" "$STATE_FILE"
-    fi
-    trigger_render
+    read -p "🔹 协议类型 (tcp/udp): " proto
+    port_update remove "$proto" "$port"
 }
 
 show_ports() {

@@ -1,4 +1,6 @@
 {
+  "nat_mode": "auto",
+  "snat_address": null,
   "forwards": [],
   "open_ports": {
     "tcp": [],
