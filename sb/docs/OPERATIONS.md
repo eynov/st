@@ -2,7 +2,7 @@
 
 > 本文描述预期运维契约。app/current 链接切换的失败传播与回滚阻断已经修复，但整个
 > 变更集尚未通过独立只读复审，也尚未做过真实 systemd 验收，因此仍不允许用于生产安装
-> 或升级；以 [`AI_HANDOFF.md`](AI_HANDOFF.md) 的当前状态为准。
+> 或升级；以 [`AI_HANDOFF.md`](internal/AI_HANDOFF.md) 的当前状态为准。
 
 ## 安装分层
 
@@ -28,7 +28,7 @@ sb upgrade --source /path/to/reviewed/sb --yes
 语法、版本元数据和 self-check，随后写入新 release 并原子切换 app；新版本应再次
 执行完整 install 验收，失败时恢复 app 链接和 unit，并删除失败 release。当前
 manager 链接失败传播与首次 CLI link 失败恢复尚未满足此契约，详见
-[`AI_HANDOFF.md`](AI_HANDOFF.md)。升级流程不会整体删除 `/opt/sb`。
+[`AI_HANDOFF.md`](internal/AI_HANDOFF.md)。升级流程不会整体删除 `/opt/sb`。
 
 ## sing-box 核心
 

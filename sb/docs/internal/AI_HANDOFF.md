@@ -1,21 +1,32 @@
 # sb 开发交接
 
 本文档是 sb 当前开发阶段、阻断项和下一步工作的唯一事实来源。稳定的用户说明见
-[`../README.md`](../README.md)，完整修复证据见
+[`../../README.md`](../../README.md)，完整修复证据见
 [`FINAL_REVIEW_PACK.md`](FINAL_REVIEW_PACK.md)。
 
-## 当前 Git 状态
+## Git 状态沿革
 
-第二轮修复、第二次与第三次独立复审整改，均完成于 2026-07-25/26：
+本节记录的是**历史事件**，不是对当前工作树的断言。当前状态必须每次用
+`AGENTS.md` 指定的 Git 检查重新确认。
 
-- 分支：`main`，已在用户明确授权后 commit 并推送到 Gitea `origin/main`
-- 工作树：clean
+### 收尾提交 `51c7b341b9cef8551019e57b10106834bab980a2`
+
+第二轮修复、第二次与第三次独立复审整改，均完成于 2026-07-25/26，并在用户明确授权后
+提交、推送到 Gitea `origin/main`。**在该提交完成时**：
+
+- 分支：`main`
+- 本地 `HEAD` 与 `origin/main` 一致
+- 工作树 clean
 - 上一基线提交：`aaa7de7`（`docs: record development snapshot status`）
-- 改动范围：第二轮 17 个代码/测试文件，叠加第二次复审整改后见 `git diff --stat`；
-  另新增 `sb/tests/errexit-audit.sh` 与文档更新
+- 改动范围：24 个文件，+2669 / −468，其中新增 `sb/tests/errexit-audit.sh`
 - 未执行任何 VPS、部署或防火墙操作
 
-开始新任务时必须重新执行 `AGENTS.md` 指定的 Git 检查；本节不是永久不变的仓库状态快照。
+### 后续维护变更
+
+收尾提交之后另有一次**纯文档整理**：把 `AI_HANDOFF.md`、`FINAL_REVIEW_PACK.md`、
+`KNOWN_LIMITATIONS.md`、`PRODUCTION_CHECKLIST.md` 移入 `sb/docs/internal/`，并更新受影响
+的相对链接与仓库根 `README.md` 的状态描述。该变更不涉及任何代码、脚本、测试或同仓库
+其他项目；其提交 SHA 见 `git log`（本文件写作时该提交尚未产生）。
 
 ## 当前开发阶段
 
@@ -113,7 +124,7 @@ git diff --check
 ```
 
 故障注入通过 `SB_TEST_FAULTS`（冒号分隔）配合 `SB_TEST_MODE=true` 启用；注入点清单见
-[`TESTING.md`](TESTING.md)。
+[`TESTING.md`](../TESTING.md)。
 
 ## 尚未验证边界
 

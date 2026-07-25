@@ -1,7 +1,7 @@
 # 架构与目录
 
 本文档描述已接受的目标架构。当前实现与目标之间的已知阻断只维护在
-[`AI_HANDOFF.md`](AI_HANDOFF.md)；在阻断清零前，不得把下述事务模型视为已经达到
+[`AI_HANDOFF.md`](internal/AI_HANDOFF.md)；在阻断清零前，不得把下述事务模型视为已经达到
 Production Ready。
 
 ## 事实来源

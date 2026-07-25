@@ -34,7 +34,7 @@ xfail=0
 ```
 
 这个 pass 数不覆盖当前已知的两个 High；它说明现有断言通过，不等于所有安全关键
-失败路径已被正确建模。当前准入状态见 [`AI_HANDOFF.md`](AI_HANDOFF.md)。
+失败路径已被正确建模。当前准入状态见 [`AI_HANDOFF.md`](internal/AI_HANDOFF.md)。
 
 ## 静态检查
 

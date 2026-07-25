@@ -10,7 +10,7 @@ nftables/iptables 示例，绝不默认执行防火墙命令。
 > 当前状态：**Repository Production Candidate — Not Production Ready**。三轮独立只读复审
 > 提出的全部阻断项均已修复（当前 Critical 0 / High 0 / Medium 0 阻断），但真实 systemd
 > 验收尚未完成，仍有非阻断项开放。请先阅读
-> [AI 交接状态](docs/AI_HANDOFF.md)，不要直接用于生产环境。
+> [AI 交接状态](docs/internal/AI_HANDOFF.md)，不要直接用于生产环境。
 
 ## 支持范围
 
@@ -124,7 +124,7 @@ UDP <hop-start>-<hop-end> → UDP <base-port>
 
 ## 文档
 
-- [当前开发状态与交接](docs/AI_HANDOFF.md)
+- [当前开发状态与交接](docs/internal/AI_HANDOFF.md)
 - [架构与事务模型](docs/ARCHITECTURE.md)
 - [测试体系与真实/mock 边界](docs/TESTING.md)
 - [协议与客户端参数矩阵](docs/PROTOCOLS.md)
@@ -133,6 +133,6 @@ UDP <hop-start>-<hop-end> → UDP <base-port>
 - [TLS 模式与证书轮换](docs/TLS.md)
 - [state/settings schema](docs/STATE_SCHEMA.md)
 - [测试与故障排查](docs/TROUBLESHOOTING.md)
-- [生产灰度检查清单](docs/PRODUCTION_CHECKLIST.md)
-- [当前限制](docs/KNOWN_LIMITATIONS.md)
-- [完整修复证据快照](docs/FINAL_REVIEW_PACK.md)
+- [生产灰度检查清单](docs/internal/PRODUCTION_CHECKLIST.md)
+- [当前限制](docs/internal/KNOWN_LIMITATIONS.md)
+- [完整修复证据快照](docs/internal/FINAL_REVIEW_PACK.md)

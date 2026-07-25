@@ -21,13 +21,15 @@
 ## 文档入口
 
 - sb 用户文档：[`sb/README.md`](sb/README.md)
-- sb 当前开发状态：[`sb/docs/AI_HANDOFF.md`](sb/docs/AI_HANDOFF.md)
+- sb 当前开发状态：[`sb/docs/internal/AI_HANDOFF.md`](sb/docs/internal/AI_HANDOFF.md)
 - sb 架构：[`sb/docs/ARCHITECTURE.md`](sb/docs/ARCHITECTURE.md)
 - sb 测试：[`sb/docs/TESTING.md`](sb/docs/TESTING.md)
 - AI 协作规范：[`AGENTS.md`](AGENTS.md)
 
 ## 开发状态
 
-仓库当前包含尚未提交的 sb 生产化升级。它已完成大部分隔离验证，但最新独立复审
-仍有 High 阻断项；不得将其标记为 Production Ready，也不得直接部署到生产 VPS。
-当前结论和下一步以 [`sb/docs/AI_HANDOFF.md`](sb/docs/AI_HANDOFF.md) 为准。
+sb 生产化升级已提交（`51c7b341b9cef8551019e57b10106834bab980a2`），三轮独立只读
+复审的阻断项全部关闭：Critical 0、High 0、阻断 Medium 0，仓库收尾完成。仍不得标记
+为 Production Ready，也不得直接部署到生产 VPS——真实 systemd/cgroup 灰度验证尚未
+完成。当前结论和下一步以
+[`sb/docs/internal/AI_HANDOFF.md`](sb/docs/internal/AI_HANDOFF.md) 为准。
