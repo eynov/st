@@ -6,15 +6,14 @@
 
 ## 当前 Git 状态
 
-基线建立于 2026-07-25：
+Development Snapshot 建立于 2026-07-25：
 
 - 分支：`main...origin/main`
-- `HEAD`：`ed0a022dbad35c2eb3e69d4f9ee1c5fa6bb482d1`
+- 快照提交：`53acf0835e922ead26315ead3d1d81df11d910ad`
 - `HEAD` 与 `origin/main` 相同
-- sb 生产化升级仍全部未提交，包含 `file.sh`、`sb` 核心、协议、测试和文档变更
-- tracked 实现 diff：15 个文件，约 2680 insertions / 2592 deletions
-- `sb/instances.json` 和 `sb/protocols/xxxx.txt` 已在工作树中删除
-- 新核心模块、元数据、测试和文档仍为 untracked
+- sb 生产化升级、测试、元数据和 Documentation Baseline 已作为同一自洽快照提交
+- `sb/instances.json` 和 `sb/protocols/xxxx.txt` 的预期删除已纳入快照
+- 快照推送后工作树 clean，分支与 Gitea `origin/main` 同步
 
 开始新任务时必须重新执行 `AGENTS.md` 指定的 Git 检查；本节不是永久不变的仓库
 状态快照。
