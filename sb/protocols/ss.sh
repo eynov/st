@@ -1,167 +1,93 @@
-#!/bin/bash
-# ==============================================================================
-# Protocol Plugin: Shadowsocks AEAD
-# ==============================================================================
+#!/usr/bin/env bash
 
-proto_register "SS" "Shadowsocks (AEAD)" "tcp" \
-    "build_ss" "edit_ss" "info_ss" \
-    "inbound_ss" "uri_ss" "surge_ss" "clash_ss"
+proto_register "SS" "Shadowsocks AEAD" "tcp+udp" \
+    "create_ss" "edit_ss" "validate_ss" \
+    "inbound_ss" "uri_ss" "surge_ss" "clash_ss" \
+    "outbound_ss" "firewall_ss" "expected_ss"
 
-build_ss() {
-    local port="$1"
+ss_method_valid() {
+    [[ "${1:-}" =~ ^(aes-128-gcm|aes-256-gcm|chacha20-ietf-poly1305)$ ]]
+}
 
-    if port_used_tcp "$port"; then
-        err "端口 [${port}] TCP 已被占用"
-        return 1
-    fi
+validate_ss() {
+    local meta="$1"
+    jq -e '
+      .protocol == "SS"
+      and (.password | type == "string" and length >= 16)
+      and (.method | type == "string")
+    ' <<<"$meta" >/dev/null &&
+        ss_method_valid "$(jq -r '.method' <<<"$meta")"
+}
 
-    local password method
-    password=$(openssl rand -hex 16)
-    method="aes-256-gcm"
-
-    local now id meta
-    now="$(date '+%Y-%m-%d %H:%M:%S')"
-    id=$(state_next_id)
-
-    meta=$(jq -n \
-        --arg  id        "$id" \
-        --arg  protocol  "SS" \
-        --argjson port   "$port" \
-        --arg  method    "$method" \
-        --arg  password  "$password" \
-        --arg  created_at "$now" \
-        '{
-            id: $id, protocol: $protocol,
-            port: $port, method: $method, password: $password,
-            created_at: $created_at, updated_at: $created_at, enabled: true
-        }')
-
-    state_set "$id" "$meta"
-    ok "Shadowsocks [${id}] 端口 ${port} 已创建"
+create_ss() {
+    local id="$1" options="$2" port method password now
+    port=$(jq -r '.port' <<<"$options")
+    method=$(jq -r '.method // "aes-256-gcm"' <<<"$options")
+    port_valid "$port" && ss_method_valid "$method" || return 1
+    password=$(jq -r '.password // empty' <<<"$options")
+    [[ -n "$password" ]] || password=$(openssl rand -base64 32 | tr -d '\n')
+    now=$(now_iso)
+    jq -n --arg id "$id" --arg protocol "SS" --argjson port "$port" \
+      --arg method "$method" --arg password "$password" --arg now "$now" '
+      {
+        id:$id,protocol:$protocol,port:$port,method:$method,password:$password,
+        enabled:true,created_at:$now,updated_at:$now
+      }'
 }
 
 edit_ss() {
-    local id="$1"
-    local payload="$2"
-
-    local cur_port cur_method cur_password
-    cur_port=$(echo "$payload"     | jq -r '.port')
-    cur_method=$(echo "$payload"   | jq -r '.method')
-    cur_password=$(echo "$payload" | jq -r '.password')
-
-    echo "当前端口:    ${cur_port}"
-    read -p "新端口 [回车保持]: " new_port
-
-    echo "当前加密:    ${cur_method}"
-    echo "  1) aes-256-gcm  2) aes-128-gcm  3) chacha20-ietf-poly1305"
-    read -p "新加密 [回车保持]: " new_method_choice
-
-    read -p "重新生成密码？[y/N]: " regen_pw
-
-    local filter=""
-
-    if [ -n "$new_port" ]; then
-        port_valid "$new_port" || { err "端口号非法"; return 1; }
-        port_used_tcp "$new_port" && { err "端口 [${new_port}] TCP 已被占用"; return 1; }
-        filter+=" | .port = ${new_port}"
-    fi
-
-    case "$new_method_choice" in
-        1) filter+=" | .method = \"aes-256-gcm\"" ;;
-        2) filter+=" | .method = \"aes-128-gcm\"" ;;
-        3) filter+=" | .method = \"chacha20-ietf-poly1305\"" ;;
-    esac
-
-    if [[ "$regen_pw" == "y" || "$regen_pw" == "Y" ]]; then
-        local new_pw
-        new_pw=$(openssl rand -hex 16)
-        filter+=" | .password = \"${new_pw}\""
-    fi
-
-    [ -z "$filter" ] && { info "无变更"; return 0; }
-
-    state_patch "$id" "${filter# | }"
-    ok "SS [${id}] 已更新"
-}
-
-info_ss() {
-    local payload="$1"
-
-    local id port method password enabled created updated
-    id=$(echo "$payload"       | jq -r '.id')
-    port=$(echo "$payload"     | jq -r '.port')
-    method=$(echo "$payload"   | jq -r '.method')
-    password=$(echo "$payload" | jq -r '.password')
-    enabled=$(echo "$payload"  | jq -r '.enabled')
-    created=$(echo "$payload"  | jq -r '.created_at')
-    updated=$(echo "$payload"  | jq -r '.updated_at // "-"')
-
-    local status="🟢 启用"
-    [ "$enabled" = "false" ] && status="🔴 停用"
-
-    echo ""
-    echo "┌─────────────────────────────────────────┐"
-    echo "│  Shadowsocks AEAD                       │"
-    echo "├─────────────────────────────────────────┤"
-    printf "│  %-12s %-26s │\n" "ID"      "$id"
-    printf "│  %-12s %-26s │\n" "状态"    "$status"
-    printf "│  %-12s %-26s │\n" "端口"    "$port"
-    printf "│  %-12s %-26s │\n" "加密"    "$method"
-    printf "│  %-12s %-26s │\n" "密码"    "$password"
-    printf "│  %-12s %-26s │\n" "创建时间" "$created"
-    printf "│  %-12s %-26s │\n" "更新时间" "$updated"
-    echo "└─────────────────────────────────────────┘"
+    local meta="$1" options="$2" updated
+    updated=$(jq -n --argjson old "$meta" --argjson options "$options" --arg now "$(now_iso)" '
+      $old
+      | .port = ($options.port // .port)
+      | .method = ($options.method // .method)
+      | .password = ($options.password // .password)
+      | .updated_at = $now')
+    validate_ss "$updated" || return 1
+    printf '%s\n' "$updated"
 }
 
 inbound_ss() {
-    local meta="$1"
-    jq -n \
-        --argjson port   "$(echo "$meta" | jq -r '.port')" \
-        --arg  method    "$(echo "$meta" | jq -r '.method')" \
-        --arg  password  "$(echo "$meta" | jq -r '.password')" \
-        '{
-            "type": "shadowsocks",
-            "listen": "::",
-            "listen_port": $port,
-            "method": $method,
-            "password": $password
-        }'
+    jq --arg listen "${SB_RENDER_LISTEN:-::}" '{
+      type:"shadowsocks",tag:("in-" + .id),listen:$listen,listen_port:.port,
+      method:.method,password:.password
+    }' <<<"$1"
 }
 
 uri_ss() {
-    local meta="$1" ipv4="$2"
-    local port method password id b64
-    port=$(echo "$meta"     | jq -r '.port')
-    method=$(echo "$meta"   | jq -r '.method')
-    password=$(echo "$meta" | jq -r '.password')
-    id=$(echo "$meta"       | jq -r '.id')
-    b64=$(echo -n "${method}:${password}" | base64 | tr -d '\n')
-    echo "ss://${b64}@${ipv4}:${port}#$(urlencode "SS-${id}")"
+    local meta="$1" endpoint="$2" userinfo
+    userinfo=$(printf '%s' "$(jq -r '"\(.method):\(.password)"' <<<"$meta")" | base64_urlsafe)
+    printf 'ss://%s@%s:%s#%s\n' "$userinfo" "$(endpoint_host "$endpoint")" \
+      "$(jq -r '.port' <<<"$meta")" "$(urlencode "SS-$(jq -r '.id' <<<"$meta")")"
 }
 
 surge_ss() {
-    local meta="$1" ipv4="$2"
-    local port method password id
-    port=$(echo "$meta"     | jq -r '.port')
-    method=$(echo "$meta"   | jq -r '.method')
-    password=$(echo "$meta" | jq -r '.password')
-    id=$(echo "$meta"       | jq -r '.id')
-    echo "SS-${id} = ss, ${ipv4}, ${port}, encrypt-method=${method}, password=${password}"
+    local meta="$1" endpoint="$2"
+    printf 'SS-%s = ss, %s, %s, encrypt-method=%s, password=%s, udp-relay=true\n' \
+      "$(jq -r '.id' <<<"$meta")" "$endpoint" "$(jq -r '.port' <<<"$meta")" \
+      "$(jq -r '.method' <<<"$meta")" "$(jq -r '.password' <<<"$meta")"
 }
 
 clash_ss() {
-    local meta="$1" ipv4="$2"
-    local port method password id
-    port=$(echo "$meta"     | jq -r '.port')
-    method=$(echo "$meta"   | jq -r '.method')
-    password=$(echo "$meta" | jq -r '.password')
-    id=$(echo "$meta"       | jq -r '.id')
-    jq -n \
-        --arg  name     "SS-${id}" \
-        --arg  server   "$ipv4" \
-        --argjson port  "$port" \
-        --arg  cipher   "$method" \
-        --arg  password "$password" \
-        '{ "name": $name, "type": "ss", "server": $server,
-           "port": $port, "cipher": $cipher, "password": $password }'
+    jq -n --argjson meta "$1" --arg server "$2" '
+      {
+        name:("SS-" + $meta.id),type:"ss",server:$server,port:$meta.port,
+        cipher:$meta.method,password:$meta.password,udp:true
+      }'
+}
+
+outbound_ss() {
+    jq -n --argjson meta "$1" --arg server "$2" '
+      {
+        type:"shadowsocks",tag:("SS-" + $meta.id),server:$server,
+        server_port:$meta.port,method:$meta.method,password:$meta.password
+      }'
+}
+
+firewall_ss() {
+    jq '{allow:["tcp:\(.port)","udp:\(.port)"],redirect:null,external_confirmation_required:true}' <<<"$1"
+}
+
+expected_ss() {
+    jq -c '[{network:"tcp",port:.port},{network:"udp",port:.port}]' <<<"$1"
 }

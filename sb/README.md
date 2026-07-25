@@ -1,0 +1,133 @@
+# sb 3.0
+
+`sb` 是面向通用 Linux VPS 的 sing-box 多协议管理器。它以 state 为唯一事实来源，
+统一编译服务端配置与客户端输出，并用原子 generation 切换、固定核心校验、systemd
+验收和失败回滚管理节点生命周期。
+
+本项目不绑定云厂商、控制面板、fwctl 或任何防火墙实现。它只输出端口需求及
+nftables/iptables 示例，绝不默认执行防火墙命令。
+
+> 当前状态：**Repository Production Candidate — Not Production Ready**。最新独立
+> 复审仍有两个 High 阻断项；请先阅读
+> [AI 交接状态](docs/AI_HANDOFF.md)，不要直接用于生产环境。
+
+## 支持范围
+
+- Shadowsocks AEAD
+- Shadowsocks 2022
+- AnyTLS
+- VLESS Reality
+- Hysteria2
+- Hysteria2 显式 Port Hopping
+- sing-box、Mihomo/Clash、标准 URI，以及经过测试的 Surge 子集
+
+完整兼容性见 [协议矩阵](docs/PROTOCOLS.md)。
+
+## 安全边界
+
+- 程序：`/opt/sb/releases/<release>`，`/opt/sb/app` 为原子切换链接
+- 设置入口：`/etc/sb/settings.json`（指向 current generation 内的事务式 settings）
+- 状态、settings 与派生输出：`/var/lib/sb`
+- 证书：`/var/lib/sb/certs`
+- 备份：`/var/backups/sb`
+- 锁：`/run/lock/sb/manager.lock`
+- 核心：固定 sing-box `1.13.14`，按架构校验 SHA256
+
+所有含凭据的文件默认 `0600`，目录默认 `0700`，进程与脚本使用 `umask 077`。
+
+## 安装
+
+复审通过并制作不可变源码归档后：
+
+```bash
+./file.sh sb \
+  --archive-url https://example.invalid/st-3.0.0.tar.gz \
+  --archive-sha256 <64-hex-sha256> \
+  --endpoint node.example.com \
+  --listen-mode dual \
+  --yes
+```
+
+仓库内或隔离环境：
+
+```bash
+./file.sh sb --source-dir ./sb --endpoint node.example.com --yes
+```
+
+安装管理器、安装核心、创建 unit 与添加首个节点是明确分离的步骤。无节点时
+`sb-core` 为 `enabled` 但 `stopped`；首个节点成功发布后才启动。
+
+## 常用命令
+
+```text
+sb install
+sb upgrade --source DIR
+sb core install
+sb core upgrade
+sb endpoint set HOST
+sb listen set dual|ipv4|ipv6
+sb add|edit|delete|enable|disable
+sb list|status|validate|render|doctor
+sb reload|restart
+sb backup|restore
+sb state validate|export
+sb version
+```
+
+全局选项：`--yes`、`--json`、`--dry-run`、`--show-secrets`。节点变更和 endpoint/
+listen 变更支持只读 dry-run；state export 默认脱敏。
+
+## 升级、备份与恢复
+
+管理器升级使用显式来源，不从未固定的 `latest` 隐式更新：
+
+```bash
+sb upgrade --source /path/to/reviewed/sb
+sb core upgrade
+```
+
+核心升级与管理器升级分离。执行任何升级前先运行 `sb validate`、`sb doctor` 和
+`sb backup`。数据恢复入口为：
+
+```bash
+sb backup
+sb restore <backup-id>
+```
+
+`sb restore` 恢复 settings、state、generation 和证书数据；app、systemd unit 与
+sing-box 核心不属于数据恢复范围。完整语义与 rollback 边界见
+[运维文档](docs/OPERATIONS.md)。
+
+## TLS
+
+TLS 协议区分 `trusted`、`provided`、`self-signed` 和显式 `insecure`。正式域名优先
+使用系统 CA 信任的证书；`insecure` 必须由用户明确选择。provided 证书不会被项目
+擅自轮换，self-signed 证书包含 SNI 对应 SAN。详见 [TLS 与证书](docs/TLS.md)。
+
+## HY2 Port Hopping
+
+Port Hopping 默认关闭，启用时必须显式确认。客户端跳跃范围、云侧 UDP 放行范围和
+系统防火墙转发范围必须一致：
+
+```text
+UDP <hop-start>-<hop-end> → UDP <base-port>
+```
+
+仅放行范围不等于已经完成 Port Hopping；还必须把完整跳跃范围转发到基础监听端口。
+项目只输出要求和示例，不执行防火墙操作。详见
+[端口与防火墙](docs/FIREWALL.md)。
+
+## 文档
+
+- [当前开发状态与交接](docs/AI_HANDOFF.md)
+- [架构与事务模型](docs/ARCHITECTURE.md)
+- [测试体系与真实/mock 边界](docs/TESTING.md)
+- [协议与客户端参数矩阵](docs/PROTOCOLS.md)
+- [安装、升级、迁移、备份和恢复](docs/OPERATIONS.md)
+- [端口、防火墙与 HY2 Port Hopping](docs/FIREWALL.md)
+- [TLS 模式与证书轮换](docs/TLS.md)
+- [state/settings schema](docs/STATE_SCHEMA.md)
+- [测试与故障排查](docs/TROUBLESHOOTING.md)
+- [生产灰度检查清单](docs/PRODUCTION_CHECKLIST.md)
+- [当前限制](docs/KNOWN_LIMITATIONS.md)
+- [完整修复证据快照](docs/FINAL_REVIEW_PACK.md)

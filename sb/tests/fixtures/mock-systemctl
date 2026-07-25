@@ -1,0 +1,97 @@
+#!/usr/bin/env bash
+set -u
+
+runtime="${SB_TEST_RUNTIME_DIR:?}"
+mkdir -p "$runtime"
+printf '%s\n' "$*" >>"$runtime/systemctl.log"
+command="${1:-}"
+shift || true
+if [[ "${SB_LOCK_FD:-}" =~ ^[0-9]+$ ]]; then
+    eval "exec ${SB_LOCK_FD}>&-"
+fi
+
+stop_process() {
+    if [[ -f "$runtime/service.pid" ]]; then
+        pid=$(cat "$runtime/service.pid")
+        kill "$pid" 2>/dev/null || true
+        rm -f "$runtime/service.pid"
+    fi
+    rm -f "$runtime/active" "$runtime/sockets.tsv"
+}
+
+start_process() {
+    local output="${SB_TEST_DATA_DIR:?}/current/output" pid address generation
+    [[ -d "$output" ]] || return 1
+    if [[ -f "$runtime/stale-generation" && -f "$runtime/service.pid" ]]; then
+        touch "$runtime/active"
+        return 0
+    fi
+    stop_process
+    (
+        cd "$output" || exit 1
+        exec sleep 3600
+    ) </dev/null >/dev/null 2>&1 &
+    pid=$!
+    printf '%s\n' "$pid" >"$runtime/service.pid"
+    touch "$runtime/active"
+    address=$(jq -r '.listen.address' "$output/manifest.json")
+    generation=$(jq -r '.generation_id' "$output/manifest.json")
+    [[ ! -f "$runtime/wrong-address" ]] || address=127.0.0.1
+    jq -r --arg address "$address" --arg pid "$pid" --arg generation "$generation" '
+      .expected_listeners[] |
+      [.network,$address,(.port|tostring),$pid,$generation] | @tsv
+    ' "$output/manifest.json" >"$runtime/sockets.tsv"
+    if [[ -f "$runtime/wrong-pid" ]]; then
+        awk -F '\t' -v OFS='\t' '{$4=99999; print}' "$runtime/sockets.tsv" \
+          >"$runtime/sockets.new"
+        mv "$runtime/sockets.new" "$runtime/sockets.tsv"
+    fi
+}
+
+should_run() {
+    local command_path="${SB_APP_LINK:-}/sb"
+    [[ -x "$command_path" ]] || command_path="${SB_APP_DIR:?}/sb"
+    env -u SB_APP_DIR "$command_path" internal should-run >/dev/null 2>&1
+}
+
+case "$command" in
+    daemon-reload) exit 0 ;;
+    enable) touch "$runtime/enabled"; exit 0 ;;
+    is-enabled) [[ -f "$runtime/enabled" ]] ;;
+    is-active) [[ -f "$runtime/active" ]] ;;
+    start)
+        [[ ! -f "$runtime/fail-start" ]] || exit 1
+        if ! should_run; then
+            stop_process
+            exit 0
+        fi
+        start_process
+        ;;
+    reload)
+        [[ ! -f "$runtime/fail-reload" ]] || exit 1
+        [[ ! -f "$runtime/sleep-reload" ]] || sleep 2
+        [[ -f "$runtime/active" ]]
+        ;;
+    restart)
+        if [[ -f "$runtime/fail-restart-once" ]]; then
+            rm -f "$runtime/fail-restart-once"
+            exit 1
+        fi
+        [[ ! -f "$runtime/fail-restart" ]] || exit 1
+        [[ ! -f "$runtime/sleep-restart" ]] || sleep 2
+        if ! should_run; then
+            stop_process
+            exit 0
+        fi
+        start_process
+        ;;
+    stop) stop_process ;;
+    show)
+        [[ -f "$runtime/service.pid" ]] && cat "$runtime/service.pid" || printf '0\n'
+        ;;
+    status) [[ -f "$runtime/active" ]] ;;
+    *)
+        printf 'mock-systemctl: unsupported command: %s\n' "$command" >&2
+        exit 2
+        ;;
+esac

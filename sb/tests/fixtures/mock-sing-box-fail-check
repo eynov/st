@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+set -u
+
+case "${1:-}" in
+    version)
+        printf 'sing-box version 1.13.14\n'
+        ;;
+    check)
+        printf 'forced config validation failure\n' >&2
+        exit 1
+        ;;
+    *)
+        exec "${SB_TEST_REAL_CORE:?}" "$@"
+        ;;
+esac

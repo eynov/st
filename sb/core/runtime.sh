@@ -1,156 +1,184 @@
-#!/bin/bash
-# ==============================================================================
-# 运行时编译器
-# 职责：instances.json → output/config.json + output/sub.yaml
-# 不触碰 systemd，不调用 service.sh
-# ==============================================================================
+#!/usr/bin/env bash
 
-BASE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-source "$BASE_DIR/core/common.sh"
-source "$BASE_DIR/core/state.sh"
-source "$BASE_DIR/core/registry.sh"
+runtime_append_json() {
+    local array="$1" value="$2"
+    jq -cn --argjson array "$array" --argjson value "$value" '$array + [$value]'
+}
 
-# 注：load_protocols 由入口脚本 sb 统一调用，此处不再重复调用。
-# registry.sh 仍需 source，因为本文件依赖 PROTO_INBOUND / PROTO_CLASH /
-# PROTO_SURGE 等关联数组的声明。
+runtime_render() {
+    local state_file="$1" output_dir="$2"
+    local settings_file="${3:-${SB_RENDER_SETTINGS_FILE:-$SB_SETTINGS_FILE}}"
+    local generation_id="${4:-${SB_RENDER_GENERATION_ID:-unknown}}" endpoint ids
+    state_validate_file "$state_file" || return 1
+    settings_validate_file "$settings_file" || return 1
+    safe_mkdir "$output_dir"
+    safe_mkdir "$output_dir/clients"
 
-# ------------------------------------------------------------------------------
-# 编译 output/config.json
-# ------------------------------------------------------------------------------
-compile_config() {
-    ensure_dirs
-
-    local ids
-    mapfile -t ids < <(state_list_enabled)
-
-    if [ "${#ids[@]}" -eq 0 ]; then
-        warn "无任何启用中的实例，config.json 不会生成。"
-        return 1
+    mapfile -t ids < <(jq -r '.instances | to_entries[] | select(.value.enabled) | .key' "$state_file")
+    if ((${#ids[@]} > 0)); then
+        endpoint=$(endpoint_get "$settings_file") || return 1
+    else
+        endpoint=""
     fi
 
-    local inbounds_json="[]"
+    local inbounds='[]' clash='[]' outbounds='[]' firewall='[]' listeners='[]'
+    SB_RENDER_LISTEN=$(listen_address_get "$settings_file") || return 1
+    local uri_file surge_file
+    uri_file="$output_dir/clients/uris.txt"
+    surge_file="$output_dir/clients/surge.conf"
+    : >"$uri_file"
+    printf '[Proxy]\n' >"$surge_file"
 
+    local id meta protocol fragment fn rc
     for id in "${ids[@]}"; do
-        local payload proto fn inbound_fragment
+        meta=$(jq -c --arg id "$id" '.instances[$id]' "$state_file")
+        protocol=$(jq -r '.protocol' <<<"$meta")
 
-        payload=$(state_get "$id")
-        [ -z "$payload" ] && { warn "实例 [${id}] 数据为空，跳过"; continue; }
+        fn="${PROTO_INBOUND[$protocol]}"
+        fragment=$("$fn" "$meta") || return 1
+        inbounds=$(runtime_append_json "$inbounds" "$fragment") || return 1
 
-        proto=$(echo "$payload" | jq -r '.protocol')
-        fn="${PROTO_INBOUND[$proto]}"
+        fn="${PROTO_OUTBOUND[$protocol]}"
+        fragment=$("$fn" "$meta" "$endpoint") || return 1
+        outbounds=$(runtime_append_json "$outbounds" "$fragment") || return 1
 
-        if [ -z "$fn" ] || ! declare -F "$fn" >/dev/null 2>&1; then
-            warn "协议 [${proto}] 未注册 inbound 函数，跳过 [${id}]"
-            continue
+        fn="${PROTO_CLASH[$protocol]}"
+        if fragment=$(SB_SUPPRESS_UNSUPPORTED_WARNINGS=true "$fn" "$meta" "$endpoint"); then
+            clash=$(runtime_append_json "$clash" "$fragment") || return 1
+        else
+            rc=$?
+            ((rc == 2)) || return "$rc"
         fi
 
-        inbound_fragment=$("$fn" "$payload")
-        [ -z "$inbound_fragment" ] && { warn "[${id}] inbound 片段为空，跳过"; continue; }
+        fn="${PROTO_URI[$protocol]}"
+        if fragment=$(SB_SUPPRESS_UNSUPPORTED_WARNINGS=true "$fn" "$meta" "$endpoint"); then
+            printf '%s\n' "$fragment" >>"$uri_file"
+        else
+            rc=$?
+            ((rc == 2)) || return "$rc"
+        fi
 
-        inbounds_json=$(echo "$inbounds_json" \
-            | jq --argjson ib "$inbound_fragment" '. += [$ib]')
+        fn="${PROTO_SURGE[$protocol]}"
+        if fragment=$(SB_SUPPRESS_UNSUPPORTED_WARNINGS=true "$fn" "$meta" "$endpoint"); then
+            [[ -n "$fragment" ]] && printf '%s\n' "$fragment" >>"$surge_file"
+        else
+            rc=$?
+            ((rc == 2)) || return "$rc"
+        fi
+
+        fn="${PROTO_FIREWALL[$protocol]}"
+        fragment=$("$fn" "$meta") || return 1
+        firewall=$(runtime_append_json "$firewall" "$fragment") || return 1
+
+        fn="${PROTO_EXPECTED[$protocol]}"
+        fragment=$("$fn" "$meta") || return 1
+        listeners=$(jq -cn --argjson current "$listeners" --argjson extra "$fragment" \
+            '$current + $extra') || return 1
     done
 
-    jq -n \
-        --argjson inbounds "$inbounds_json" \
-        '{
-            "log": { "level": "info", "timestamp": true },
-            "inbounds": $inbounds,
-            "outbounds": [{ "type": "direct" }]
-        }' > "$OUTPUT_CONFIG"
+    jq -n --argjson inbounds "$inbounds" '
+      {
+        log:{level:"info",timestamp:true},
+        inbounds:$inbounds
+      }' | atomic_write "$output_dir/config.json" 600
 
-    ok "config.json 已编译（${#ids[@]} 个实例）"
+    jq -n --argjson proxies "$clash" '{proxies:$proxies}' |
+        atomic_write "$output_dir/clients/clash.yaml" 600
+
+    jq -n --argjson outbounds "$outbounds" '{outbounds:$outbounds}' |
+        atomic_write "$output_dir/clients/sing-box.json" 600
+
+    jq -n --argjson requirements "$firewall" \
+        '{notice:"Examples only. No firewall command is executed.",instances:$requirements}' |
+        atomic_write "$output_dir/firewall-requirements.json" 600
+
+    jq -n --argjson schema "$SB_CONFIG_SCHEMA_VERSION" \
+        --arg project_version "$SB_PROJECT_VERSION" \
+        --arg core_version "$SB_CORE_VERSION" \
+        --arg generation_id "$generation_id" \
+        --arg endpoint "$endpoint" \
+        --arg endpoint_source "$(jq -r '.endpoint.source' "$settings_file")" \
+        --arg listen_mode "$(jq -r '.listen.mode' "$settings_file")" \
+        --arg listen_address "$SB_RENDER_LISTEN" \
+        --arg rendered_at "$(now_iso)" \
+        --argjson count "${#ids[@]}" \
+        --argjson listeners "$listeners" '
+      {
+        schema_version:$schema,project_version:$project_version,generation_id:$generation_id,
+        sing_box_version:$core_version,rendered_at:$rendered_at,
+        endpoint:{value:(if $endpoint=="" then null else $endpoint end),source:$endpoint_source},
+        listen:{mode:$listen_mode,address:$listen_address},
+        enabled_instances:$count,expected_listeners:$listeners
+      }' | atomic_write "$output_dir/manifest.json" 600
+
+    chmod 600 "$uri_file" "$surge_file"
+    runtime_validate_outputs "$output_dir"
 }
 
-# ------------------------------------------------------------------------------
-# 编译 output/sub.yaml
-# ------------------------------------------------------------------------------
-compile_sub() {
-    ensure_dirs
-
-    local ids
-    mapfile -t ids < <(state_list_enabled)
-
-    if [ "${#ids[@]}" -eq 0 ]; then
-        warn "无任何启用中的实例，sub.yaml 不会生成。"
+runtime_validate_generation() {
+    local generation="$1" require_core_check="${2:-true}" expected_id="${3:-}"
+    [[ -d "$generation" && -f "$generation/instances.json" &&
+       -f "$generation/settings.json" && -d "$generation/output" ]] || {
+        err "generation is incomplete: $generation"
         return 1
+    }
+    state_validate_file "$generation/instances.json" || return 1
+    settings_validate_file "$generation/settings.json" || return 1
+    runtime_validate_outputs "$generation/output" || return 1
+    [[ -n "$expected_id" ]] || expected_id=$(basename "$generation")
+    jq -e --arg id "$expected_id" --argjson schema "$SB_CONFIG_SCHEMA_VERSION" \
+      '.schema_version==$schema and .generation_id==$id and
+       (.expected_listeners|type=="array")' "$generation/output/manifest.json" >/dev/null || {
+        err "generation manifest does not match its directory: $generation"
+        return 1
+    }
+    if [[ "$require_core_check" == "true" ]]; then
+        runtime_check_config "$generation/output/config.json" || return 1
     fi
+    find "$generation" -type f -exec sh -c '
+      for file do
+        mode=$(stat -c %a "$file") || exit 1
+        [ "$mode" = 600 ] || exit 1
+      done
+    ' sh {} + || {
+        err "generation contains a file with unsafe permissions"
+        return 1
+    }
+}
 
-    local ipv4
-    ipv4=$(get_ipv4)
-    [ -z "$ipv4" ] && warn "无法获取公网 IPv4，订阅可能不完整。"
-
-    local clash_proxies="[]"
-    local surge_lines=()
-
-    for id in "${ids[@]}"; do
-        local payload proto
-
-        payload=$(state_get "$id")
-        [ -z "$payload" ] && continue
-        proto=$(echo "$payload" | jq -r '.protocol')
-
-        # Clash
-        local clash_fn="${PROTO_CLASH[$proto]}"
-        if [ -n "$clash_fn" ] && declare -F "$clash_fn" >/dev/null 2>&1; then
-            local clash_node
-            clash_node=$("$clash_fn" "$payload" "$ipv4")
-            [ -n "$clash_node" ] && \
-                clash_proxies=$(echo "$clash_proxies" \
-                    | jq --argjson n "$clash_node" '. += [$n]')
-        fi
-
-        # Surge
-        local surge_fn="${PROTO_SURGE[$proto]}"
-        if [ -n "$surge_fn" ] && declare -F "$surge_fn" >/dev/null 2>&1; then
-            local surge_line
-            surge_line=$("$surge_fn" "$payload" "$ipv4")
-            [ -n "$surge_line" ] && surge_lines+=("$surge_line")
-        fi
+runtime_validate_outputs() {
+    local output_dir="$1" file
+    for file in \
+        "$output_dir/config.json" \
+        "$output_dir/clients/clash.yaml" \
+        "$output_dir/clients/sing-box.json" \
+        "$output_dir/firewall-requirements.json" \
+        "$output_dir/manifest.json"; do
+        json_file_valid "$file" || {
+            err "generated JSON/YAML document is invalid: $file"
+            return 1
+        }
     done
-
-    {
-        echo "# 自动生成 - $(date '+%Y-%m-%d %H:%M:%S')"
-        echo ""
-        echo "proxies:"
-        echo "$clash_proxies" | jq -r '.[] | "  - " + (. | tojson)' 2>/dev/null
-        echo ""
-        echo "# [Proxy]"
-        for line in "${surge_lines[@]}"; do
-            echo "# ${line}"
-        done
-    } > "$OUTPUT_SUB"
-
-    ok "sub.yaml 已生成（${#ids[@]} 个节点）"
-}
-
-# ------------------------------------------------------------------------------
-# 全量重编译
-# ------------------------------------------------------------------------------
-compile_all() {
-    compile_config && compile_sub
-}
-
-# ------------------------------------------------------------------------------
-# 打印单个实例分享 URI
-# 用法: print_uri <id>
-# ------------------------------------------------------------------------------
-print_uri() {
-    local id="$1"
-    local payload proto fn ipv4
-
-    payload=$(state_get "$id")
-    [ -z "$payload" ] && { err "实例 [${id}] 不存在"; return 1; }
-
-    proto=$(echo "$payload" | jq -r '.protocol')
-    fn="${PROTO_URI[$proto]}"
-    ipv4=$(get_ipv4)
-
-    if [ -z "$fn" ] || ! declare -F "$fn" >/dev/null 2>&1; then
-        warn "协议 [${proto}] 未注册 URI 函数"
+    awk '
+      /^$/ || /^\[Proxy\]$/ || /^[A-Za-z0-9_-]+ = / {next}
+      {exit 1}
+    ' "$output_dir/clients/surge.conf" || {
+        err "generated Surge document is invalid"
         return 1
-    fi
-
-    "$fn" "$payload" "$ipv4"
+    }
+    while IFS= read -r uri; do
+        [[ -z "$uri" || "$uri" =~ ^(ss|vless|hysteria2)://[^[:space:]]+$ ]] || {
+            err "generated URI is invalid"
+            return 1
+        }
+    done <"$output_dir/clients/uris.txt"
 }
 
+runtime_check_config() {
+    local config="$1"
+    core_validate_installed false || {
+        err "fixed sing-box binary version/digest/receipt validation failed"
+        return 1
+    }
+    "$SB_BIN" check -c "$config"
+}

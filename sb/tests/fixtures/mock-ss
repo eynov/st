@@ -1,0 +1,22 @@
+#!/usr/bin/env bash
+set -u
+
+runtime="${SB_TEST_RUNTIME_DIR:?}"
+network=udp
+for arg in "$@"; do
+    [[ "$arg" == *t* ]] && network=tcp
+done
+while IFS=$'\t' read -r socket_network address port pid _generation; do
+    [[ "$socket_network" == "$network" ]] || continue
+    if [[ "$address" == "::" ]]; then address="[::]"; fi
+    if [[ "$network" == "tcp" ]]; then
+        printf 'LISTEN 0 4096 %s:%s *:* users:(("sing-box",pid=%s,fd=9))\n' \
+          "$address" "$port" "$pid"
+    else
+        printf 'UNCONN 0 0 %s:%s *:* users:(("sing-box",pid=%s,fd=9))\n' \
+          "$address" "$port" "$pid"
+    fi
+done < <(
+    [[ ! -f "$runtime/sockets.tsv" ]] || cat "$runtime/sockets.tsv"
+    [[ ! -f "$runtime/old-socket.tsv" ]] || cat "$runtime/old-socket.tsv"
+)

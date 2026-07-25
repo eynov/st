@@ -1,427 +1,930 @@
-#!/bin/bash
-# ==============================================================================
-# sb - sing-box 管理工具
-# ==============================================================================
+#!/usr/bin/env bash
+set -Eeuo pipefail
+umask 077
 
 REAL_SOURCE="$(readlink -f "${BASH_SOURCE[0]}")"
-BASE_DIR="$(cd "$(dirname "${REAL_SOURCE}")" && pwd)"
+SB_APP_DIR="${SB_APP_DIR:-$(cd "$(dirname "$REAL_SOURCE")" && pwd)}"
+export SB_APP_DIR
 
-source "$BASE_DIR/core/common.sh"
-source "$BASE_DIR/core/state.sh"
-source "$BASE_DIR/core/registry.sh"
-source "$BASE_DIR/core/runtime.sh"
-source "$BASE_DIR/core/service.sh"
-source "$BASE_DIR/core/install.sh"
+# shellcheck source=core/common.sh
+source "$SB_APP_DIR/core/common.sh"
+# shellcheck source=core/settings.sh
+source "$SB_APP_DIR/core/settings.sh"
+# shellcheck source=core/tls.sh
+source "$SB_APP_DIR/core/tls.sh"
+# shellcheck source=core/registry.sh
+source "$SB_APP_DIR/core/registry.sh"
+# shellcheck source=core/state.sh
+source "$SB_APP_DIR/core/state.sh"
+# shellcheck source=core/runtime.sh
+source "$SB_APP_DIR/core/runtime.sh"
+# shellcheck source=core/backup.sh
+source "$SB_APP_DIR/core/backup.sh"
+# shellcheck source=core/migration.sh
+source "$SB_APP_DIR/core/migration.sh"
+# shellcheck source=core/install.sh
+source "$SB_APP_DIR/core/install.sh"
+# shellcheck source=core/manager.sh
+source "$SB_APP_DIR/core/manager.sh"
+# shellcheck source=core/service.sh
+source "$SB_APP_DIR/core/service.sh"
+# shellcheck source=core/transaction.sh
+source "$SB_APP_DIR/core/transaction.sh"
+# shellcheck source=core/doctor.sh
+source "$SB_APP_DIR/core/doctor.sh"
 load_protocols
 
-[[ "$EUID" -ne 0 ]] && { err "请以 root 权限运行"; exit 1; }
+ARGS=()
+while (($#)); do
+    case "$1" in
+        --json) SB_JSON=true; shift ;;
+        --yes|-y) SB_YES=true; shift ;;
+        --dry-run) SB_DRY_RUN=true; shift ;;
+        --show-secrets) SB_SHOW_SECRETS=true; shift ;;
+        *) ARGS+=("$1"); shift ;;
+    esac
+done
+set -- "${ARGS[@]}"
+export SB_JSON SB_YES SB_DRY_RUN SB_SHOW_SECRETS
 
-ensure_dirs
-
-# ------------------------------------------------------------------------------
-# 内部：修改 state 后自动 compile + reload
-# ------------------------------------------------------------------------------
-_commit() {
-    compile_all && service_reload
+require_layout() {
+    [[ -L "$SB_CURRENT_LINK" && -f "$SB_CURRENT_STATE" ]] || {
+        err "sb is not initialized; run 'sb install'"
+        return 1
+    }
 }
 
-# ------------------------------------------------------------------------------
-# 内部：解析实例参数 → id，失败则 exit
-# 用法: _resolve <arg1> [arg2]
-# ------------------------------------------------------------------------------
-_resolve() {
-    local id
-    id=$(resolve_id "$@") || exit 1
-    echo "$id"
+require_root() {
+    [[ $EUID -eq 0 || "${SB_TEST_MODE:-false}" == "true" ]] || {
+        err "this command requires root"
+        return 1
+    }
 }
 
-# ------------------------------------------------------------------------------
-# 交互菜单：无参数运行 sb 时进入
-# ------------------------------------------------------------------------------
-interactive_menu() {
-    while true; do
-        echo ""
-        echo "┌─────────────────────────────────┐"
-        echo "│         sb 管理菜单             │"
-        echo "├─────────────────────────────────┤"
-        echo "│  1) 添加节点                    │"
-        echo "│  2) 查看节点列表                │"
-        echo "│  3) 编辑节点                    │"
-        echo "│  4) 删除节点                    │"
-        echo "│  5) 启用节点                    │"
-        echo "│  6) 停用节点                    │"
-        echo "│  7) 重启单个节点                │"
-        echo "│  8) 查看节点详情 / 分享链接     │"
-        echo "├─────────────────────────────────┤"
-        echo "│  9) 服务管理（启动/停止/状态）  │"
-        echo "│ 10) 查看订阅                    │"
-        echo "│ 11) 安装 / 升级 sing-box        │"
-        echo "├─────────────────────────────────┤"
-        echo "│  0) 退出                        │"
-        echo "└─────────────────────────────────┘"
-        read -rp "请输入编号: " choice
+reject_dry_run() {
+    local operation="$1"
+    [[ "$SB_DRY_RUN" != "true" ]] || {
+        err "--dry-run is not supported for ${operation}; no action was taken"
+        return 64
+    }
+}
 
-        case "$choice" in
-            1)
-                "$0" add
-                ;;
-            2)
-                "$0" list
-                ;;
-            3)
-                read -rp "实例 id（如 is01）: " mid
-                "$0" edit "$mid"
-                ;;
-            4)
-                read -rp "实例 id（如 is01）: " mid
-                "$0" remove "$mid"
-                ;;
-            5)
-                read -rp "实例 id（如 is01）: " mid
-                "$0" enable "$mid"
-                ;;
-            6)
-                read -rp "实例 id（如 is01）: " mid
-                "$0" disable "$mid"
-                ;;
-            7)
-                read -rp "实例 id（如 is01）: " mid
-                "$0" restart "$mid"
-                ;;
-            8)
-                read -rp "实例 id（如 is01）: " mid
-                "$0" info "$mid"
-                ;;
-            9)
-                echo ""
-                echo "  1) 启动   2) 停止   3) 状态   4) 日志"
-                read -rp "请选择: " sc
-                case "$sc" in
-                    1) "$0" start  ;;
-                    2) "$0" stop   ;;
-                    3) "$0" status ;;
-                    4) "$0" logs   ;;
-                    *) warn "无效选择" ;;
-                esac
-                ;;
-            10)
-                "$0" sub
-                ;;
-            11)
-                "$0" install
-                ;;
-            0)
-                echo "已退出"
-                exit 0
-                ;;
-            *)
-                warn "无效选择"
-                ;;
+prompt_value() {
+    local prompt="$1" default="${2:-}" result
+    [[ -t 0 ]] || return 1
+    read -r -p "${prompt}${default:+ [${default}]}: " result
+    printf '%s\n' "${result:-$default}"
+}
+
+OPT_PORT=""
+OPT_METHOD=""
+OPT_PASSWORD_FILE=""
+OPT_ROTATE_PASSWORD=false
+OPT_SNI=""
+OPT_TLS_MODE=""
+OPT_CERT=""
+OPT_KEY=""
+OPT_ROTATE_CERTIFICATE=false
+OPT_MASQUERADE=""
+OPT_SERVER_NAME=""
+OPT_HOP_MODE="unchanged"
+OPT_HOP_RANGE=""
+OPT_HOP_INTERVAL=""
+OPT_HOP_ACK=false
+
+parse_instance_options() {
+    OPT_PORT=""; OPT_METHOD=""; OPT_PASSWORD_FILE=""; OPT_ROTATE_PASSWORD=false
+    OPT_SNI=""; OPT_TLS_MODE=""; OPT_CERT=""; OPT_KEY=""; OPT_ROTATE_CERTIFICATE=false
+    OPT_MASQUERADE=""; OPT_SERVER_NAME=""
+    OPT_HOP_MODE="unchanged"; OPT_HOP_RANGE=""; OPT_HOP_INTERVAL=""; OPT_HOP_ACK=false
+    while (($#)); do
+        case "$1" in
+            --port) (($# >= 2)) || { err "--port requires a value"; return 64; }
+                OPT_PORT="$2"; shift 2 ;;
+            --method) (($# >= 2)) || { err "--method requires a value"; return 64; }
+                OPT_METHOD="$2"; shift 2 ;;
+            --password-file) (($# >= 2)) || { err "--password-file requires a value"; return 64; }
+                OPT_PASSWORD_FILE="$2"; shift 2 ;;
+            --rotate-password) OPT_ROTATE_PASSWORD=true; shift ;;
+            --sni) (($# >= 2)) || { err "--sni requires a value"; return 64; }
+                OPT_SNI="$2"; shift 2 ;;
+            --tls-mode) (($# >= 2)) || { err "--tls-mode requires a value"; return 64; }
+                OPT_TLS_MODE="$2"; shift 2 ;;
+            --certificate) (($# >= 2)) || { err "--certificate requires a value"; return 64; }
+                OPT_CERT="$2"; shift 2 ;;
+            --key) (($# >= 2)) || { err "--key requires a value"; return 64; }
+                OPT_KEY="$2"; shift 2 ;;
+            --rotate-certificate) OPT_ROTATE_CERTIFICATE=true; shift ;;
+            --masquerade) (($# >= 2)) || { err "--masquerade requires a value"; return 64; }
+                OPT_MASQUERADE="$2"; shift 2 ;;
+            --server-name) (($# >= 2)) || { err "--server-name requires a value"; return 64; }
+                OPT_SERVER_NAME="$2"; shift 2 ;;
+            --hop-range) (($# >= 2)) || { err "--hop-range requires a value"; return 64; }
+                OPT_HOP_MODE="enabled"; OPT_HOP_RANGE="$2"; shift 2 ;;
+            --hop-interval) (($# >= 2)) || { err "--hop-interval requires a value"; return 64; }
+                OPT_HOP_INTERVAL="$2"; shift 2 ;;
+            --no-hop) OPT_HOP_MODE="disabled"; shift ;;
+            --ack-port-hopping) OPT_HOP_ACK=true; shift ;;
+            *) err "unknown instance option: $1"; return 64 ;;
         esac
-
-        echo ""
-        read -rp "按回车键返回菜单..." _
     done
 }
 
-# ==============================================================================
-# 命令路由
-# ==============================================================================
+password_from_file() {
+    local file="$1"
+    [[ -f "$file" ]] || {
+        err "password file not found: $file"
+        return 1
+    }
+    local password
+    IFS= read -r password <"$file"
+    [[ -n "$password" ]] || {
+        err "password file is empty"
+        return 1
+    }
+    printf '%s\n' "$password"
+}
 
-# 无参数运行 → 进入交互菜单
-if [ $# -eq 0 ]; then
-    interactive_menu
-    exit 0
-fi
+options_build() {
+    local protocol="$1" mode="$2" current="${3:-{}}" password="" hop='null'
+    if [[ -n "$OPT_PASSWORD_FILE" ]]; then
+        password=$(password_from_file "$OPT_PASSWORD_FILE") || return 1
+    elif [[ "$OPT_ROTATE_PASSWORD" == "true" ]]; then
+        case "$protocol" in
+            SS) password=$(openssl rand -base64 32 | tr -d '\n') ;;
+            SS2022)
+                local method
+                method="${OPT_METHOD:-$(jq -r '.method' <<<"$current")}"
+                password=$(ss2022_password_generate "$method")
+                ;;
+            *) password=$(openssl rand -base64 32 | tr -d '\n') ;;
+        esac
+    fi
+
+    if [[ "$protocol" == "HY2" ]]; then
+        if [[ "$mode" == "add" && "$OPT_HOP_MODE" == "unchanged" ]]; then
+            OPT_HOP_MODE="disabled"
+        fi
+        if [[ "$OPT_HOP_MODE" == "enabled" ]]; then
+            [[ "$OPT_HOP_RANGE" =~ ^([0-9]+)-([0-9]+)$ ]] || {
+                err "hop range must be START-END"
+                return 1
+            }
+            [[ -z "$OPT_HOP_INTERVAL" || "$OPT_HOP_INTERVAL" == "30" ]] || {
+                err "portable HY2 URI mode currently supports only the official 30-second default"
+                return 1
+            }
+            if [[ "$OPT_HOP_ACK" != "true" ]]; then
+                if [[ "$SB_YES" == "true" ]]; then
+                    err "--ack-port-hopping is required with --yes"
+                    return 1
+                fi
+                show_hy2_acknowledgement
+                confirm "Confirm all three HY2 Port Hopping network responsibilities" ||
+                  return 1
+            fi
+            hop=$(jq -n --argjson start "${BASH_REMATCH[1]}" --argjson end "${BASH_REMATCH[2]}" '
+              {enabled:true,start:$start,end:$end,interval_seconds:30,acknowledged:true}')
+        elif [[ "$OPT_HOP_MODE" == "disabled" ]]; then
+            hop='{"enabled":false,"start":null,"end":null,"interval_seconds":null,"acknowledged":false}'
+        fi
+    fi
+
+    jq -n \
+      --arg port "$OPT_PORT" --arg method "$OPT_METHOD" --arg password "$password" \
+      --arg sni "$OPT_SNI" --arg tls_mode "$OPT_TLS_MODE" \
+      --arg certificate_path "$OPT_CERT" --arg key_path "$OPT_KEY" \
+      --argjson rotate_certificate "$OPT_ROTATE_CERTIFICATE" \
+      --arg masquerade "$OPT_MASQUERADE" --arg server_name "$OPT_SERVER_NAME" \
+      --argjson hop "$hop" '
+      {}
+      + (if $port!="" then {port:($port|tonumber)} else {} end)
+      + (if $method!="" then {method:$method} else {} end)
+      + (if $password!="" then {password:$password} else {} end)
+      + (if $sni!="" then {sni:$sni} else {} end)
+      + (if $tls_mode!="" then {tls_mode:$tls_mode} else {} end)
+      + (if $certificate_path!="" then {certificate_path:$certificate_path} else {} end)
+      + (if $key_path!="" then {key_path:$key_path} else {} end)
+      + (if $rotate_certificate then {rotate_certificate:true} else {} end)
+      + (if $masquerade!="" then {masquerade:$masquerade} else {} end)
+      + (if $server_name!="" then {server_name:$server_name} else {} end)
+      + (if $hop!=null then {hop:$hop} else {} end)'
+}
+
+options_complete_add() {
+    local protocol="$1"
+    if [[ -z "$OPT_PORT" ]]; then
+        OPT_PORT=$(prompt_value "Listen port") || {
+            err "--port is required"
+            return 1
+        }
+    fi
+    port_valid "$OPT_PORT" || {
+        err "invalid port: $OPT_PORT"
+        return 1
+    }
+    case "$protocol" in
+        HY2|ANYTLS)
+            [[ -n "$OPT_SNI" ]] || OPT_SNI=$(prompt_value "TLS SNI") || {
+                err "--sni is required"
+                return 1
+            }
+            [[ -n "$OPT_TLS_MODE" ]] || OPT_TLS_MODE=$(prompt_value \
+                "TLS mode (trusted/provided/self-signed/insecure)" "self-signed") || return 1
+            if [[ "$protocol" == "HY2" && -z "$OPT_MASQUERADE" ]]; then
+                OPT_MASQUERADE="https://${OPT_SNI}"
+            fi
+            ;;
+        VLESS)
+            [[ -n "$OPT_SERVER_NAME" ]] ||
+                OPT_SERVER_NAME=$(prompt_value "Reality handshake server name") || {
+                    err "--server-name is required"
+                    return 1
+                }
+            ;;
+    esac
+}
+
+mutator_add() {
+    local state="$1" protocol="$2" options="$3" id meta fn
+    id=$(state_next_id_file "$state")
+    fn="${PROTO_CREATE[$protocol]}"
+    meta=$("$fn" "$id" "$options") || return 1
+    "${PROTO_VALIDATE[$protocol]}" "$meta" || return 1
+    state_set_file "$state" "$id" "$meta"
+    [[ -n "${SB_TXN_RESULT_FILE:-}" ]] && printf '%s\n' "$id" >"$SB_TXN_RESULT_FILE"
+}
+
+mutator_edit() {
+    local state="$1" id="$2" options="$3" meta protocol fn updated
+    meta=$(state_get_file "$state" "$id") || return 1
+    protocol=$(jq -r '.protocol' <<<"$meta")
+    fn="${PROTO_EDIT[$protocol]}"
+    updated=$("$fn" "$meta" "$options") || return 1
+    state_set_file "$state" "$id" "$updated"
+}
+
+mutator_delete() {
+    state_delete_file "$1" "$2"
+}
+
+mutator_enabled() {
+    local state="$1" id="$2" enabled="$3" acknowledge="${4:-false}" patch
+    patch=$(jq -n --argjson value "$enabled" --argjson acknowledge "$acknowledge" '
+      {enabled:$value} +
+      (if $acknowledge then
+        {hop:{acknowledged:true,confirmation_required:false}}
+       else {} end)')
+    state_patch_file "$state" "$id" "$patch"
+}
+
+mutator_noop() {
+    :
+}
+
+mutator_endpoint_settings() {
+    local _state="$1" action="$2" value="${3:-}" allow_private="${4:-false}"
+    if [[ "$action" == "set" ]]; then
+        endpoint_set_file "$SB_TXN_SETTINGS_FILE" "$value" "$allow_private"
+    else
+        endpoint_detect_file "$SB_TXN_SETTINGS_FILE" >/dev/null
+    fi
+}
+
+mutator_listen_settings() {
+    local _state="$1" mode="$2"
+    listen_set_file "$SB_TXN_SETTINGS_FILE" "$mode"
+}
+
+mutator_install_settings() {
+    local _state="$1" endpoint="$2" allow_private="$3" listen_mode="$4"
+    [[ -z "$endpoint" ]] ||
+        endpoint_set_file "$SB_TXN_SETTINGS_FILE" "$endpoint" "$allow_private" ||
+        return 1
+    [[ -z "$listen_mode" ]] ||
+        listen_set_file "$SB_TXN_SETTINGS_FILE" "$listen_mode"
+}
+
+mutator_restore() {
+    local state="$1" backup_state="$2" backup_settings="$3"
+    cp -- "$backup_state" "${state}.restore"
+    chmod 600 "${state}.restore"
+    mv -fT "${state}.restore" "$state"
+    cp -- "$backup_settings" "${SB_TXN_SETTINGS_FILE}.restore"
+    chmod 600 "${SB_TXN_SETTINGS_FILE}.restore"
+    mv -fT "${SB_TXN_SETTINGS_FILE}.restore" "$SB_TXN_SETTINGS_FILE"
+}
+
+show_hy2_notice() {
+    local id="$1" meta
+    meta=$(state_get_file "$SB_CURRENT_STATE" "$id") || return 0
+    jq -e '.protocol=="HY2" and .hop.enabled' <<<"$meta" >/dev/null || return 0
+    local start end port
+    start=$(jq -r '.hop.start' <<<"$meta")
+    end=$(jq -r '.hop.end' <<<"$meta")
+    port=$(jq -r '.port' <<<"$meta")
+    cat <<EOF
+HY2 端口跳跃已启用。
+请自行完成以下网络配置：
+1. 在云防火墙或安全组中放行 UDP 基础端口及完整跳跃端口范围。
+2. 在 VPS 系统防火墙中将完整跳跃端口范围重定向或 DNAT 到基础监听端口。
+3. 客户端跳跃范围必须与服务端实际放行和转发范围一致。
+当前要求：
+UDP ${start}-${end} → UDP ${port}
+仅放行端口不等于已经实现 Port Hopping；本项目不会自动执行防火墙命令。
+EOF
+}
+
+show_hy2_acknowledgement() {
+    cat >&2 <<'EOF'
+HY2 Port Hopping confirmation:
+1. I understand the complete UDP hopping range must be allowed externally.
+2. I understand the complete UDP range must be redirected/DNATed to the base UDP port.
+3. I understand this project only prints examples and never configures a firewall.
+EOF
+}
+
+cmd_install() {
+    require_root
+    local endpoint="" listen_mode="" allow_private=false had_layout=false
+    local current_endpoint="" current_listen="" settings_changed=false
+    while (($#)); do
+        case "$1" in
+            --endpoint) (($# >= 2)) || { err "--endpoint requires a value"; return 64; }
+                endpoint="$2"; shift 2 ;;
+            --listen-mode) (($# >= 2)) || { err "--listen-mode requires a value"; return 64; }
+                listen_mode="$2"; shift 2 ;;
+            --allow-private-endpoint) allow_private=true; shift ;;
+            *) err "unknown install option: $1"; return 64 ;;
+        esac
+    done
+    core_install || return 1
+    layout_prepare || return 1
+    [[ -L "$SB_CURRENT_LINK" ]] && had_layout=true
+    if [[ "$had_layout" == "false" ]]; then
+        settings_bootstrap_prepare || return 1
+        [[ -z "$endpoint" ]] ||
+            endpoint_set_file "$SB_SETTINGS_BOOTSTRAP" "$endpoint" "$allow_private" ||
+            return 1
+        [[ -z "$listen_mode" ]] ||
+            listen_set_file "$SB_SETTINGS_BOOTSTRAP" "$listen_mode" || return 1
+    fi
+    migrate_legacy || return 1
+    settings_link_publish || return 1
+    runtime_validate_generation "$(readlink -f "$SB_CURRENT_LINK")" true || return 1
+    service_generate_unit || return 1
+    if [[ "$had_layout" == "true" ]]; then
+        current_endpoint=$(jq -r '.endpoint.value // empty' "$SB_SETTINGS_FILE")
+        current_listen=$(jq -r '.listen.mode' "$SB_SETTINGS_FILE")
+        [[ -z "$endpoint" || "$current_endpoint" == "$endpoint" ]] ||
+            settings_changed=true
+        [[ -z "$listen_mode" || "$current_listen" == "$listen_mode" ]] ||
+            settings_changed=true
+        if [[ "$settings_changed" == "true" ]]; then
+            transaction_run "install settings update and output regeneration" \
+              mutator_install_settings "$endpoint" "$allow_private" "$listen_mode" ||
+              return 1
+        else
+            transaction_run "install validation and output regeneration" \
+              mutator_noop || return 1
+        fi
+    fi
+    runtime_validate_generation "$(readlink -f "$SB_CURRENT_LINK")" true || return 1
+    service_is_enabled || return 1
+    if (( $(state_enabled_count_file "$SB_CURRENT_STATE") > 0 )); then
+        if service_is_active; then
+            runtime_check_config "$SB_CURRENT_CONFIG"
+        else
+            service_start
+        fi
+        [[ "${SB_SKIP_LISTENER_CHECK:-false}" == "true" ]] || service_verify_listeners
+    else
+        service_stop
+    fi
+    core_validate_installed true || return 1
+    [[ -x "$SB_BIN" && -f "$SB_SERVICE_FILE" && -f "$SB_CURRENT_STATE" &&
+       -L "$SB_SETTINGS_LINK" ]] || return 1
+    if [[ "${SB_TEST_MODE:-false}" != "true" ]]; then
+        [[ -x "$SB_COMMAND_LINK" ]] || {
+            err "management command link is missing: $SB_COMMAND_LINK"
+            return 1
+        }
+    fi
+    ok "sb manager initialization verified"
+}
+
+cmd_add() {
+    require_root; require_layout
+    local protocol="${1^^}"
+    shift
+    proto_exists "$protocol" || {
+        err "unsupported protocol: $protocol"
+        return 64
+    }
+    parse_instance_options "$@"
+    options_complete_add "$protocol"
+    local options result_file id
+    options=$(options_build "$protocol" add) || return 1
+    result_file=$(mktemp)
+    local rc
+    if SB_TXN_RESULT_FILE="$result_file" \
+      transaction_run "add $protocol" mutator_add "$protocol" "$options"; then
+        :
+    else
+        rc=$?
+        rm -f -- "$result_file"
+        return "$rc"
+    fi
+    id=$(cat "$result_file") || {
+        rm -f -- "$result_file"
+        return 1
+    }
+    rm -f "$result_file"
+    if [[ "$SB_JSON" == "true" ]]; then
+        jq -n --arg id "$id" --arg protocol "$protocol" '{result:"success",id:$id,protocol:$protocol}'
+    else
+        ok "instance created: $id"
+        if [[ "$protocol" == "HY2" ]]; then
+            show_hy2_notice "$id"
+        fi
+    fi
+}
+
+cmd_edit() {
+    require_root; require_layout
+    local id="$1"
+    shift
+    local current protocol options
+    current=$(state_get_file "$SB_CURRENT_STATE" "$id") || return 1
+    protocol=$(jq -r '.protocol' <<<"$current")
+    parse_instance_options "$@"
+    options=$(options_build "$protocol" edit "$current") || return 1
+    [[ "$(jq 'length' <<<"$options")" -gt 0 ]] || {
+        err "no edit fields supplied"
+        return 64
+    }
+    if [[ "$SB_DRY_RUN" != "true" ]]; then
+        confirm "Edit instance $id and reload all enabled nodes" || return 1
+    fi
+    transaction_run "edit $id" mutator_edit "$id" "$options"
+    if [[ "$SB_JSON" == "true" ]]; then
+        jq -n --arg id "$id" '{result:"success",id:$id}'
+    elif [[ "$protocol" == "HY2" ]]; then
+        show_hy2_notice "$id"
+    fi
+}
+
+cmd_delete() {
+    require_root; require_layout
+    local id="$1"
+    state_get_file "$SB_CURRENT_STATE" "$id" >/dev/null || return 1
+    confirm "Delete instance $id" || return 1
+    transaction_run "delete $id" mutator_delete "$id"
+    if [[ "$SB_JSON" == "true" ]]; then
+        jq -n --arg id "$id" '{result:"success",id:$id}'
+    fi
+}
+
+cmd_enabled() {
+    require_root; require_layout
+    local id="$1" value="$2" acknowledge=false meta
+    shift 2
+    if [[ "${1:-}" == "--ack-port-hopping" && $# -eq 1 ]]; then
+        acknowledge=true
+    elif (($#)); then
+        err "unknown enable/disable option: $1"
+        return 64
+    fi
+    state_get_file "$SB_CURRENT_STATE" "$id" >/dev/null || return 1
+    meta=$(state_get_file "$SB_CURRENT_STATE" "$id") || return 1
+    if [[ "$value" == "true" &&
+       "$(jq -r '.protocol=="HY2" and .hop.enabled and
+         (.hop.acknowledged|not)' <<<"$meta")" == "true" ]]; then
+        if [[ "$acknowledge" != "true" ]]; then
+            [[ "$SB_YES" != "true" ]] || {
+                err "unacknowledged HY2 hopping requires --ack-port-hopping even with --yes"
+                return 1
+            }
+            show_hy2_acknowledgement
+            confirm "Confirm all three HY2 Port Hopping network responsibilities" ||
+                return 1
+            acknowledge=true
+        fi
+    fi
+    if [[ "$value" == "false" && "$SB_DRY_RUN" != "true" ]]; then
+        confirm "Disable instance $id" || return 1
+    fi
+    transaction_run "$([[ "$value" == "true" ]] && printf enable || printf disable) $id" \
+      mutator_enabled "$id" "$value" "$acknowledge"
+    if [[ "$SB_JSON" == "true" ]]; then
+        jq -n --arg id "$id" --argjson enabled "$value" \
+            '{result:"success",id:$id,enabled:$enabled}'
+    fi
+}
+
+cmd_list() {
+    require_layout
+    if [[ "$SB_JSON" == "true" ]]; then
+        jq '[.instances | to_entries[] | {
+          id:.key,protocol:.value.protocol,port:.value.port,enabled:.value.enabled,
+          created_at:.value.created_at,updated_at:.value.updated_at
+        }]' "$SB_CURRENT_STATE"
+    else
+        jq -r '.instances | to_entries[] |
+          [.key,.value.protocol,(.value.port|tostring),
+           (if .value.enabled then "enabled" else "disabled" end),.value.updated_at] | @tsv' \
+          "$SB_CURRENT_STATE" |
+          awk 'BEGIN{printf "%-8s %-10s %-7s %-10s %s\n","ID","PROTOCOL","PORT","STATE","UPDATED"}
+               {printf "%-8s %-10s %-7s %-10s %s\n",$1,$2,$3,$4,$5}'
+    fi
+}
+
+cmd_validate() {
+    require_layout
+    state_validate_file "$SB_CURRENT_STATE"
+    runtime_validate_outputs "$SB_CURRENT_OUTPUT"
+    runtime_check_config "$SB_CURRENT_CONFIG"
+    if [[ "$SB_JSON" == "true" ]]; then
+        printf '{"valid":true}\n'
+    else
+        ok "state and outputs are valid"
+    fi
+}
+
+cmd_render() (
+    require_layout
+    local temp
+    temp=$(mktemp -d)
+    trap 'rm -rf -- "$temp"' EXIT
+    runtime_render "$SB_CURRENT_STATE" "$temp/output"
+    runtime_check_config "$temp/output/config.json"
+    if [[ "$SB_JSON" == "true" ]]; then
+        jq -n --arg path "$temp/output" --slurpfile manifest "$temp/output/manifest.json" \
+          '{valid:true,manifest:$manifest[0],temporary_path:$path}'
+    else
+        ok "render validation passed"
+        find "$temp/output" -type f -printf '%P\n' | sort
+    fi
+)
+
+cmd_status() {
+    require_layout
+    local output
+    output=$(status_json)
+    [[ "$SB_JSON" == "true" ]] && printf '%s\n' "$output" ||
+        jq -r '
+          "enabled=\(.enabled) active=\(.active) pid=\(.pid)",
+          "sing-box=\(.sing_box_version) nodes=\(.instances.total) enabled_nodes=\(.instances.enabled)",
+          "listeners=" + ([.listeners[] | "\(.network):\(.port)"] | join(",")),
+          "last_publish=" + ((.last_publish.result // "none")|tostring),
+          "last_rollback=" + ((.last_rollback.performed // false)|tostring)
+        ' <<<"$output"
+}
+
+cmd_endpoint_update() {
+    local action="$1" value="${2:-}" allow_private="${3:-false}"
+    require_root
+    require_layout
+    if [[ "$SB_DRY_RUN" != "true" ]]; then
+        confirm "Update endpoint and regenerate every client output" || return 1
+    fi
+    transaction_run "update endpoint and regenerate clients" \
+      mutator_endpoint_settings "$action" "$value" "$allow_private"
+}
+
+cmd_listen_update() {
+    local mode="$1"
+    require_root
+    require_layout
+    if [[ "$SB_DRY_RUN" != "true" ]]; then
+        confirm "Update listen mode and reload all enabled nodes" || return 1
+    fi
+    transaction_run "update listen mode and regenerate configuration" \
+      mutator_listen_settings "$mode"
+}
+
+cmd_output() {
+    require_layout
+    local id="$1" format="${2:-all}" meta protocol endpoint fn
+    meta=$(state_get_file "$SB_CURRENT_STATE" "$id") || return 1
+    protocol=$(jq -r '.protocol' <<<"$meta")
+    endpoint=$(endpoint_get)
+    case "$format" in
+        uri) fn="${PROTO_URI[$protocol]}" ;;
+        surge) fn="${PROTO_SURGE[$protocol]}" ;;
+        clash) fn="${PROTO_CLASH[$protocol]}" ;;
+        sing-box) fn="${PROTO_OUTBOUND[$protocol]}" ;;
+        firewall) fn="${PROTO_FIREWALL[$protocol]}"; "$fn" "$meta"; return ;;
+        all)
+            jq -n --arg uri "$("${PROTO_URI[$protocol]}" "$meta" "$endpoint" 2>/dev/null || true)" \
+              --arg surge "$("${PROTO_SURGE[$protocol]}" "$meta" "$endpoint" 2>/dev/null || true)" \
+              --argjson clash "$("${PROTO_CLASH[$protocol]}" "$meta" "$endpoint" 2>/dev/null || printf null)" \
+              --argjson singbox "$("${PROTO_OUTBOUND[$protocol]}" "$meta" "$endpoint")" \
+              '{uri:(if $uri=="" then null else $uri end),
+                surge:(if $surge=="" then null else $surge end),
+                clash:$clash,"sing-box":$singbox}'
+            return
+            ;;
+        *) err "unknown output format: $format"; return 64 ;;
+    esac
+    "$fn" "$meta" "$endpoint"
+}
+
+cmd_upgrade() {
+    [[ "${1:-}" == "--source" && -n "${2:-}" ]] || {
+        err "usage: sb upgrade --source DIR"
+        return 64
+    }
+    confirm "Upgrade the sb manager application" || return 1
+    local previous_app_link="" upgrade_backup new_release=""
+    [[ -L "$SB_APP_LINK" ]] && previous_app_link=$(readlink "$SB_APP_LINK")
+    upgrade_backup=$(backup_create "pre-manager-upgrade" true true) || return 1
+    manager_install_source "$(cd "$2" && pwd)" || return 1
+    new_release="${SB_MANAGER_INSTALLED_RELEASE:-}"
+    if ! env -u SB_APP_DIR "$SB_APP_LINK/sb" install --yes; then
+        if [[ -n "$previous_app_link" ]]; then
+            ln -s "$previous_app_link" "${SB_INSTALL_ROOT}/.app.upgrade-rollback.$$"
+            mv -fT "${SB_INSTALL_ROOT}/.app.upgrade-rollback.$$" "$SB_APP_LINK"
+        fi
+        if [[ -f "$upgrade_backup/sb-core.service" ]]; then
+            cp -- "$upgrade_backup/sb-core.service" "$SB_SERVICE_FILE"
+            chmod 644 "$SB_SERVICE_FILE"
+            "$SB_SYSTEMCTL" daemon-reload || true
+        fi
+        [[ -z "$new_release" ]] || rm -rf -- "$new_release"
+        err "manager upgrade verification failed; application link rolled back"
+        return 1
+    fi
+}
+
+cmd_restore() (
+    local backup_id="$1" backup_dir cert_candidate="" cert_previous="" restored=false
+    trap '[[ -z "$cert_candidate" ]] || rm -rf -- "$cert_candidate"' EXIT
+    [[ "$backup_id" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ &&
+       "$backup_id" != "." && "$backup_id" != ".." ]] || {
+        err "invalid backup id"
+        return 64
+    }
+    backup_dir="${SB_BACKUP_DIR}/${backup_id}"
+    backup_validate "$backup_dir" || {
+        err "invalid backup"
+        return 1
+    }
+    confirm "Restore backup ${backup_id}" || return 1
+    if [[ "$SB_DRY_RUN" == "true" ]]; then
+        transaction_run "restore ${backup_id}" mutator_restore \
+          "$backup_dir/generation/instances.json" "$backup_dir/generation/settings.json"
+        return
+    fi
+    cert_candidate=$(mktemp -d "${SB_DATA_DIR}/.cert-restore.XXXXXX") || return 1
+    cp -a -- "$backup_dir/certs/." "$cert_candidate/" || {
+        rm -rf -- "$cert_candidate"
+        return 1
+    }
+    find "$cert_candidate" -type d -exec chmod 700 {} + || return 1
+    find "$cert_candidate" -type f -exec chmod 600 {} + || return 1
+    cert_previous="${SB_DATA_DIR}/.cert-before-restore.$$"
+    mv -- "$SB_CERT_DIR" "$cert_previous" || return 1
+    mv -- "$cert_candidate" "$SB_CERT_DIR" || {
+        mv -- "$cert_previous" "$SB_CERT_DIR"
+        return 1
+    }
+    cert_candidate=""
+    if transaction_run "restore ${backup_id}" mutator_restore \
+      "$backup_dir/generation/instances.json" "$backup_dir/generation/settings.json"; then
+        restored=true
+    fi
+    if [[ "$restored" == "true" ]]; then
+        rm -rf -- "$cert_previous"
+        return 0
+    fi
+    rm -rf -- "$SB_CERT_DIR"
+    mv -- "$cert_previous" "$SB_CERT_DIR"
+    return 1
+)
+
+cmd_restart() {
+    confirm "Restart the entire sb-core process and all nodes" || return 1
+    service_restart
+    [[ "${SB_SKIP_LISTENER_CHECK:-false}" == "true" ]] || service_verify_listeners
+}
+
+usage() {
+    cat <<'EOF'
+sb 3.0 production manager
+
+Global options: --json --yes --dry-run --show-secrets
+
+Commands:
+  sb install [--endpoint HOST] [--listen-mode dual|ipv4|ipv6]
+  sb upgrade --source DIR
+  sb core install|upgrade
+  sb endpoint set HOST | detect | show
+  sb listen set dual|ipv4|ipv6 | show
+  sb add PROTOCOL --port PORT [protocol options]
+  sb edit ID [protocol options]
+  sb delete ID
+  sb enable ID
+  sb disable ID
+  sb list
+  sb status
+  sb validate
+  sb render
+  sb reload
+  sb restart
+  sb output ID [all|uri|surge|clash|sing-box|firewall]
+  sb firewall
+  sb backup
+  sb restore BACKUP_ID
+  sb state validate|export
+  sb doctor
+  sb version
+
+TLS protocol options:
+  --sni DOMAIN --tls-mode trusted|provided|self-signed|insecure
+  --certificate PATH --key PATH
+  --rotate-certificate
+
+HY2 options:
+  --masquerade HTTPS_URL
+  --hop-range START-END --hop-interval 30 --ack-port-hopping
+  --no-hop
+EOF
+}
 
 CMD="${1:-help}"
 shift || true
-
 case "$CMD" in
-
-# ------------------------------------------------------------------------------
-# sb install
-# ------------------------------------------------------------------------------
-install)
-    check_and_install_core
-    gen_service
-    ;;
-
-# ------------------------------------------------------------------------------
-# sb add [proto] [port]
-# ------------------------------------------------------------------------------
-add)
-    proto="${1:-}"
-    port="${2:-}"
-
-    # 选择协议
-    if [ -z "$proto" ] || [ -z "${PROTO_BUILD[$proto]+x}" ]; then
-        echo ""
-        echo "可用协议："
-        i=1
-        for k in "${PROTO_KEYS[@]}"; do
-            printf "  %d) %-10s %s\n" "$i" "$k" "${PROTO_MENU[$k]}"
-            (( i++ ))
-        done
-        echo ""
-        read -rp "输入编号或协议名: " choice
-        if [[ "$choice" =~ ^[0-9]+$ ]]; then
-            proto="${PROTO_KEYS[$((choice-1))]}"
-        else
-            proto="${choice^^}"
+    internal)
+        case "${1:-}" in
+            should-run)
+                require_layout
+                (( $(state_enabled_count_file "$SB_CURRENT_STATE") > 0 ))
+                ;;
+            *) exit 64 ;;
+        esac
+        ;;
+    self-check)
+        manager_validate_source "$SB_APP_DIR"
+        load_protocols
+        jq -e --arg version "$SB_CORE_VERSION" '.versions[$version]' "$SB_APP_DIR/checksums.json" >/dev/null
+        ;;
+    install)
+        reject_dry_run install
+        with_exclusive_lock cmd_install "$@"
+        if [[ "$SB_JSON" == "true" ]]; then
+            jq -n '{result:"success",operation:"install"}'
         fi
-    else
-        proto="${proto^^}"
-    fi
-
-    if [ -z "${PROTO_BUILD[$proto]+x}" ]; then
-        err "未知协议: ${proto}"
-        exit 1
-    fi
-
-    # 输入端口
-    if [ -z "$port" ]; then
-        read -rp "端口号: " port
-    fi
-
-    port_valid "$port" || { err "端口号非法: ${port}"; exit 1; }
-
-    # 调用协议 build
-    "${PROTO_BUILD[$proto]}" "$port" || exit 1
-
-    _commit
-    ;;
-
-# ------------------------------------------------------------------------------
-# sb edit <id|proto port>
-# ------------------------------------------------------------------------------
-edit)
-    id=$(_resolve "$@")
-    payload=$(state_get "$id")
-    proto=$(echo "$payload" | jq -r '.protocol')
-
-    fn="${PROTO_EDIT[$proto]}"
-    if [ -z "$fn" ] || ! declare -F "$fn" >/dev/null 2>&1; then
-        err "协议 [${proto}] 未实现 edit 接口"
-        exit 1
-    fi
-
-    "$fn" "$id" "$payload" || exit 1
-    _commit
-    ;;
-
-# ------------------------------------------------------------------------------
-# sb remove <id|proto port>
-# ------------------------------------------------------------------------------
-remove)
-    id=$(_resolve "$@")
-    payload=$(state_get "$id")
-    proto=$(echo "$payload" | jq -r '.protocol')
-    port=$(echo "$payload"  | jq -r '.port')
-
-    read -rp "⚠️  确认删除 [${id}] ${proto}:${port}？(y/N): " confirm
-    [[ "$confirm" != "y" && "$confirm" != "Y" ]] && { info "已取消"; exit 0; }
-
-    state_del "$id"
-    ok "[${id}] 已删除"
-    _commit
-    ;;
-
-# ------------------------------------------------------------------------------
-# sb enable <id|proto port>
-# ------------------------------------------------------------------------------
-enable)
-    id=$(_resolve "$@")
-    state_enable "$id"
-    ok "[${id}] 已启用"
-    _commit
-    ;;
-
-# ------------------------------------------------------------------------------
-# sb disable <id|proto port>
-# ------------------------------------------------------------------------------
-disable)
-    id=$(_resolve "$@")
-    state_disable "$id"
-    ok "[${id}] 已停用"
-    _commit
-    ;;
-
-# ------------------------------------------------------------------------------
-# sb restart <id|proto port>
-# 仅重启单个实例（disable → compile → reload → enable → compile → reload）
-# ------------------------------------------------------------------------------
-restart)
-    id=$(_resolve "$@")
-    payload=$(state_get "$id")
-    proto=$(echo "$payload" | jq -r '.protocol')
-    port=$(echo "$payload"  | jq -r '.port')
-
-    info "[${id}] ${proto}:${port} 正在重启..."
-    state_disable "$id"
-    compile_all
-    service_reload
-    sleep 1
-    state_enable "$id"
-    compile_all
-    service_reload
-    ok "[${id}] ${proto}:${port} 已重启"
-    ;;
-
-# ------------------------------------------------------------------------------
-# sb info <id|proto port>
-# ------------------------------------------------------------------------------
-info)
-    id=$(_resolve "$@")
-    payload=$(state_get "$id")
-    proto=$(echo "$payload" | jq -r '.protocol')
-
-    fn="${PROTO_INFO[$proto]}"
-    if [ -z "$fn" ] || ! declare -F "$fn" >/dev/null 2>&1; then
-        err "协议 [${proto}] 未实现 info 接口"
-        exit 1
-    fi
-
-    ipv4=$(get_ipv4)
-    "$fn" "$payload" "$ipv4"
-    echo ""
-    echo "📋 分享链接："
-    uri_fn="${PROTO_URI[$proto]}"
-    [ -n "$uri_fn" ] && "$uri_fn" "$payload" "$ipv4"
-    echo ""
-    uri_fn="${PROTO_URI[$proto]}"
-    [ -n "$uri_fn" ] && show_qr "$("$uri_fn" "$payload" "$ipv4")"
-    ;;
-
-# ------------------------------------------------------------------------------
-# sb list
-# ------------------------------------------------------------------------------
-list)
-    echo ""
-    printf "%-6s %-8s %-10s %-6s %-8s %-20s\n" \
-        "ID" "协议" "状态" "端口" "传输" "创建时间"
-    echo "────────────────────────────────────────────────────────────"
-
-    while IFS= read -r id; do
-        payload=$(state_get "$id")
-        proto=$(echo "$payload"   | jq -r '.protocol')
-        port=$(echo "$payload"    | jq -r '.port')
-        enabled=$(echo "$payload" | jq -r '.enabled')
-        created=$(echo "$payload" | jq -r '.created_at')
-        transport="${PROTO_TRANSPORT[$proto]:-?}"
-
-        [ "$enabled" = "true" ] && status="🟢 启用" || status="🔴 停用"
-
-        printf "%-6s %-8s %-10s %-6s %-8s %-20s\n" \
-            "$id" "$proto" "$status" "$port" "$transport" "$created"
-    done < <(state_list)
-    echo ""
-    ;;
-
-# ------------------------------------------------------------------------------
-# sb uri <id|proto port>
-# ------------------------------------------------------------------------------
-uri)
-    id=$(_resolve "$@")
-    payload=$(state_get "$id")
-    proto=$(echo "$payload" | jq -r '.protocol')
-    ipv4=$(get_ipv4)
-
-    fn="${PROTO_URI[$proto]}"
-    [ -z "$fn" ] && { err "协议 [${proto}] 未注册 URI 函数"; exit 1; }
-
-    uri=$("$fn" "$payload" "$ipv4")
-    echo ""
-    echo "📋 $uri"
-    echo ""
-    show_qr "$uri"
-    ;;
-
-# ------------------------------------------------------------------------------
-# sb sub
-# ------------------------------------------------------------------------------
-sub)
-    compile_sub
-    echo ""
-    cat "$OUTPUT_SUB"
-    ;;
-
-# ------------------------------------------------------------------------------
-# sb compile
-# ------------------------------------------------------------------------------
-compile)
-    compile_all
-    ;;
-
-# ------------------------------------------------------------------------------
-# sb reload
-# ------------------------------------------------------------------------------
-reload)
-    compile_all && service_reload
-    ;;
-
-# ------------------------------------------------------------------------------
-# 服务控制
-# ------------------------------------------------------------------------------
-start)   service_start   ;;
-stop)    service_stop    ;;
-status)  service_status  ;;
-logs)    service_logs    ;;
-
-# ------------------------------------------------------------------------------
-# sb version
-# ------------------------------------------------------------------------------
-version)
-    local ver=""
-    [ -f "$SB_BIN" ] && ver=$($SB_BIN version 2>/dev/null | awk '{print $3}')
-    echo "sb manager  v2.0"
-    echo "sing-box    ${ver:-未安装}"
-    ;;
-
-# ------------------------------------------------------------------------------
-# sb help
-# ------------------------------------------------------------------------------
-help|--help|-h)
-    echo ""
-    echo "用法: sb <命令> [id | 协议 端口]"
-    echo ""
-    echo "实例管理:"
-    printf "  %-28s %s\n" "sb add [协议] [端口]"      "新建实例（自动 compile + reload）"
-    printf "  %-28s %s\n" "sb edit <id|协议 端口>"    "编辑实例"
-    printf "  %-28s %s\n" "sb remove <id|协议 端口>"  "删除实例"
-    printf "  %-28s %s\n" "sb enable <id|协议 端口>"  "启用实例"
-    printf "  %-28s %s\n" "sb disable <id|协议 端口>" "停用实例"
-    printf "  %-28s %s\n" "sb restart <id|协议 端口>" "重启单个实例"
-    printf "  %-28s %s\n" "sb info <id|协议 端口>"    "查看实例详情 + URI"
-    printf "  %-28s %s\n" "sb list"                   "列出所有实例"
-    printf "  %-28s %s\n" "sb uri <id|协议 端口>"     "打印分享链接 + 二维码"
-    echo ""
-    echo "服务控制:"
-    printf "  %-28s %s\n" "sb start"   "启动 sing-box"
-    printf "  %-28s %s\n" "sb stop"    "停止 sing-box"
-    printf "  %-28s %s\n" "sb reload"  "重编译 + 热重载"
-    printf "  %-28s %s\n" "sb status"  "查看运行状态"
-    printf "  %-28s %s\n" "sb logs"    "实时日志"
-    echo ""
-    echo "订阅 / 配置:"
-    printf "  %-28s %s\n" "sb sub"     "生成并打印订阅"
-    printf "  %-28s %s\n" "sb compile" "手动重编译（高级）"
-    echo ""
-    echo "其他:"
-    printf "  %-28s %s\n" "sb install" "安装 / 升级 sing-box"
-    printf "  %-28s %s\n" "sb version" "版本信息"
-    echo ""
-    echo "已注册协议:"
-    for k in "${PROTO_KEYS[@]}"; do
-        printf "  %-10s %s\n" "$k" "${PROTO_MENU[$k]}"
-    done
-    echo ""
-    ;;
-
-*)
-    err "未知命令: ${CMD}"
-    echo "执行 'sb help' 查看帮助"
-    exit 1
-    ;;
-
+        ;;
+    upgrade)
+        require_root
+        reject_dry_run upgrade
+        with_exclusive_lock cmd_upgrade "$@"
+        if [[ "$SB_JSON" == "true" ]]; then
+            jq -n '{result:"success",operation:"upgrade"}'
+        fi
+        ;;
+    core)
+        require_root
+        reject_dry_run "core installation or upgrade"
+        case "${1:-}" in
+            install)
+                with_exclusive_lock core_install
+                if [[ "$SB_JSON" == "true" ]]; then
+                  jq -n --arg version "$SB_CORE_VERSION" \
+                    '{result:"success",operation:"core-install",version:$version}'
+                fi
+                ;;
+            upgrade)
+                confirm "Upgrade the sing-box core and restart sb-core if active" || exit 1
+                with_exclusive_lock core_upgrade
+                if [[ "$SB_JSON" == "true" ]]; then
+                  jq -n --arg version "$SB_CORE_VERSION" \
+                    '{result:"success",operation:"core-upgrade",version:$version}'
+                fi
+                ;;
+            *) err "usage: sb core install|upgrade"; exit 64 ;;
+        esac
+        ;;
+    endpoint)
+        require_layout
+        case "${1:-}" in
+            set)
+                allow_private=false
+                [[ "${3:-}" == "--allow-private-endpoint" ]] && allow_private=true
+                cmd_endpoint_update set "${2:-}" "$allow_private"
+                if [[ "$SB_DRY_RUN" == "true" && "$SB_JSON" == "true" ]]; then
+                    printf '{"dry_run":true}\n'
+                elif [[ "$SB_DRY_RUN" == "true" ]]; then
+                    ok "endpoint dry-run completed; settings were not changed"
+                elif [[ "$SB_JSON" == "true" ]]; then
+                    jq '.endpoint' "$SB_SETTINGS_FILE"
+                else
+                    ok "endpoint updated"
+                fi
+                ;;
+            detect)
+                cmd_endpoint_update detect
+                [[ "$SB_DRY_RUN" == "true" ]] || endpoint_get
+                ;;
+            show)
+                [[ "$SB_JSON" == "true" ]] && jq '.endpoint' "$SB_SETTINGS_FILE" ||
+                    jq -r '.endpoint | "value=\(.value) source=\(.source) updated=\(.updated_at)"' "$SB_SETTINGS_FILE"
+                ;;
+            *) err "usage: sb endpoint set|detect|show"; exit 64 ;;
+        esac
+        ;;
+    listen)
+        require_layout
+        case "${1:-}" in
+            set)
+                cmd_listen_update "${2:-}"
+                if [[ "$SB_DRY_RUN" == "true" && "$SB_JSON" == "true" ]]; then
+                    printf '{"dry_run":true}\n'
+                elif [[ "$SB_DRY_RUN" == "true" ]]; then
+                    ok "listen-mode dry-run completed; settings were not changed"
+                elif [[ "$SB_JSON" == "true" ]]; then
+                    jq '.listen' "$SB_SETTINGS_FILE"
+                else
+                    ok "listen mode updated"
+                fi
+                ;;
+            show)
+                [[ "$SB_JSON" == "true" ]] && jq '.listen' "$SB_SETTINGS_FILE" ||
+                    jq -r '.listen | "mode=\(.mode) address=\(.address) updated=\(.updated_at)"' \
+                      "$SB_SETTINGS_FILE"
+                ;;
+            *) err "usage: sb listen set dual|ipv4|ipv6 | show"; exit 64 ;;
+        esac
+        ;;
+    add) [[ $# -ge 1 ]] || { err "protocol is required"; exit 64; }; cmd_add "$@" ;;
+    edit) [[ $# -ge 1 ]] || { err "instance id is required"; exit 64; }; cmd_edit "$@" ;;
+    delete|remove) [[ $# -eq 1 ]] || { err "instance id is required"; exit 64; }; cmd_delete "$1" ;;
+    enable) [[ $# -ge 1 ]] || exit 64; cmd_enabled "$1" true "${@:2}" ;;
+    disable) [[ $# -eq 1 ]] || exit 64; cmd_enabled "$1" false ;;
+    list) cmd_list ;;
+    status) cmd_status ;;
+    validate) cmd_validate ;;
+    render) cmd_render ;;
+    reload)
+        require_root; require_layout
+        transaction_run "render and reload all nodes" mutator_noop
+        if [[ "$SB_JSON" == "true" ]]; then
+            jq -n '{result:"success",operation:"reload"}'
+        fi
+        ;;
+    restart)
+        require_root; require_layout
+        reject_dry_run restart
+        with_exclusive_lock cmd_restart
+        if [[ "$SB_JSON" == "true" ]]; then
+            jq -n '{result:"success",operation:"restart"}'
+        fi
+        ;;
+    output) [[ $# -ge 1 ]] || exit 64; cmd_output "$@" ;;
+    firewall)
+        require_layout
+        cat "$SB_CURRENT_OUTPUT/firewall-requirements.json"
+        ;;
+    backup)
+        require_root; require_layout
+        reject_dry_run backup
+        backup_path=$(with_exclusive_lock backup_create manual true true)
+        if [[ "$SB_JSON" == "true" ]]; then
+            jq -n --arg path "$backup_path" --arg id "$(basename "$backup_path")" \
+              '{result:"success",id:$id,path:$path}'
+        else
+            printf '%s\n' "$backup_path"
+        fi
+        ;;
+    restore)
+        require_root; require_layout
+        [[ -n "${1:-}" ]] || { err "backup id is required"; exit 64; }
+        with_exclusive_lock cmd_restore "$1"
+        if [[ "$SB_JSON" == "true" ]]; then
+            jq -n --arg id "$1" '{result:"success",operation:"restore",id:$id}'
+        fi
+        ;;
+    state)
+        require_layout
+        case "${1:-}" in
+            validate) state_validate_file "$SB_CURRENT_STATE"; ok "state is valid" ;;
+            export) state_export_file "$SB_CURRENT_STATE" "$SB_SHOW_SECRETS" ;;
+            *) err "usage: sb state validate|export"; exit 64 ;;
+        esac
+        ;;
+    doctor) require_layout; doctor_run ;;
+    version)
+        if [[ "$SB_JSON" == "true" ]]; then
+            jq --arg installed "$(core_installed_version 2>/dev/null || true)" \
+              '. + {installed_sing_box_version:$installed}' "$SB_APP_DIR/version.json"
+        else
+            printf 'sb manager %s\n' "$SB_PROJECT_VERSION"
+            printf 'state schema %s\n' "$SB_STATE_SCHEMA_VERSION"
+            printf 'sing-box expected %s\n' "$SB_CORE_VERSION"
+            printf 'sing-box installed %s\n' "$(core_installed_version 2>/dev/null || printf 'not-installed')"
+        fi
+        ;;
+    help|--help|-h) usage ;;
+    *) err "unknown command: $CMD"; usage >&2; exit 64 ;;
 esac

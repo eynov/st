@@ -1,220 +1,218 @@
-#!/bin/bash
-# ==============================================================================
-# State Store：instances.json 唯一状态层
-#
-# 数据结构：
-# {
-#   "instances": {
-#     "is01": { "id": "is01", "protocol": "VLESS", "port": 443, ... },
-#     "is02": { "id": "is02", "protocol": "HY2",   "port": 443, ... }
-#   }
-# }
-#
-# 所有操作以 id 为主键。
-# 支持 proto:port → id 反查。
-# ==============================================================================
+#!/usr/bin/env bash
 
-state_init() {
-    [ -f "$STATE_FILE" ] || echo '{"instances":{}}' > "$STATE_FILE"
+state_empty_json() {
+    jq -n \
+        --argjson schema_version "$SB_STATE_SCHEMA_VERSION" \
+        --arg project_version "$SB_PROJECT_VERSION" \
+        --arg updated_at "$(now_iso)" \
+        '{
+            schema_version: $schema_version,
+            project_version: $project_version,
+            updated_at: $updated_at,
+            instances: {}
+        }'
 }
 
-# ------------------------------------------------------------------------------
-# ID 生成：递增 is01 is02 ...
-# ------------------------------------------------------------------------------
-state_next_id() {
-    state_init
-    local max
-    max=$(jq -r '.instances | keys[] | select(test("^is[0-9]+$")) | ltrimstr("is") | tonumber' \
-        "$STATE_FILE" 2>/dev/null | sort -n | tail -1)
-    local next=$(( ${max:-0} + 1 ))
-    printf "is%02d" "$next"
+state_migrate_json() {
+    local source="$1"
+    jq \
+        --argjson current "$SB_STATE_SCHEMA_VERSION" \
+        --arg project_version "$SB_PROJECT_VERSION" \
+        --arg updated_at "$(now_iso)" \
+        --arg legacy_cert_dir "${SB_LEGACY_DIR}/certs/" \
+        --arg cert_dir "${SB_CERT_DIR}/" \
+        '
+        if (.schema_version // 1) > $current then
+            error("state schema is newer than this program")
+        elif (.schema_version // 1) == 1 then
+            .schema_version = $current
+            | .project_version = $project_version
+            | .updated_at = $updated_at
+            | .instances = ((.instances // {}) | with_entries(
+                .value.enabled = (.value.enabled // true)
+                | .value.updated_at = (.value.updated_at // .value.created_at // $updated_at)
+                | if ((.value.cert? | type) == "string" and (.value.cert | startswith($legacy_cert_dir))) then
+                    .value.cert |= ($cert_dir + ltrimstr($legacy_cert_dir))
+                  else . end
+                | if ((.value.key? | type) == "string" and (.value.key | startswith($legacy_cert_dir))) then
+                    .value.key |= ($cert_dir + ltrimstr($legacy_cert_dir))
+                  else . end
+                | if .value.protocol == "HY2" then
+                    .value as $v
+                    | .value.masquerade = ($v.masquerade // $v.masq)
+                    | .value.hop = (
+                        if ($v.hop_ports? // null) == null then
+                            {enabled:false, start:null, end:null, interval_seconds:null, acknowledged:false}
+                        else
+                            ($v.hop_ports | capture("^(?<start>[0-9]+)(-(?<end>[0-9]+))?$")) as $range
+                            | {
+                                enabled:true,
+                                start:($range.start | tonumber),
+                                end:(($range.end // $range.start) | tonumber),
+                                interval_seconds:($v.hop_interval // 30),
+                                acknowledged:false
+                              }
+                        end
+                    )
+                    | del(.value.hop_ports, .value.hop_interval, .value.masq)
+                    | .value.tls_mode = (.value.tls_mode // "insecure")
+                  else . end
+                | if (.value.protocol == "ANYTLS") then
+                    .value.tls_mode = (.value.tls_mode // "insecure")
+                  else . end
+            ))
+        else
+            .project_version = $project_version
+            | .updated_at = $updated_at
+        end
+        ' "$source"
 }
 
-# ------------------------------------------------------------------------------
-# 写入 / 更新实例（以 id 为 key）
-# 用法: state_set <id> <json_payload>
-# ------------------------------------------------------------------------------
-state_set() {
-    local id="$1"
-    local payload="$2"
-    state_init
-
-    local tmp
-    tmp=$(mktemp)
-    if jq --arg id "$id" --argjson v "$payload" \
-        '.instances[$id] = $v' "$STATE_FILE" > "$tmp"; then
-        mv "$tmp" "$STATE_FILE"
-    else
-        rm -f "$tmp"
-        err "state_set: 写入 [${id}] 失败"
-        return 1
-    fi
-}
-
-# ------------------------------------------------------------------------------
-# 读取实例（by id）
-# ------------------------------------------------------------------------------
-state_get() {
-    local id="$1"
-    state_init
-    jq -r --arg id "$id" '.instances[$id] // empty' "$STATE_FILE"
-}
-
-# ------------------------------------------------------------------------------
-# 读取单个字段（by id）
-# ------------------------------------------------------------------------------
-state_get_field() {
-    local id="$1"
-    local field="$2"
-    state_init
-    jq -r --arg id "$id" --arg f "$field" \
-        '.instances[$id][$f] // empty' "$STATE_FILE"
-}
-
-# ------------------------------------------------------------------------------
-# proto:port → id 反查
-# 用法: state_find <VLESS> <443>  → is01
-# ------------------------------------------------------------------------------
-state_find() {
-    local proto="${1^^}"
-    local port="$2"
-    state_init
-    jq -r --arg proto "$proto" --argjson port "$port" \
-        '.instances | to_entries[]
-         | select(.value.protocol == $proto and .value.port == $port)
-         | .key' "$STATE_FILE" 2>/dev/null | head -1
-}
-
-# ------------------------------------------------------------------------------
-# 解析用户输入 → id
-# 支持：is01 | VLESS 443 | hy2 443
-# 用法: resolve_id <arg1> [arg2]
-# ------------------------------------------------------------------------------
-resolve_id() {
-    local arg1="${1:-}"
-    local arg2="${2:-}"
-
-    # 直接是 id
-    if [[ "$arg1" =~ ^is[0-9]+$ ]]; then
-        echo "$arg1"
-        return
-    fi
-
-    # proto port
-    if [ -n "$arg2" ]; then
-        local id
-        id=$(state_find "$arg1" "$arg2")
-        if [ -z "$id" ]; then
-            err "找不到实例 [${arg1^^}:${arg2}]"
+state_validate_file() {
+    local file="$1"
+    jq -e \
+        --argjson schema "$SB_STATE_SCHEMA_VERSION" '
+        type == "object"
+        and .schema_version == $schema
+        and (.project_version | type == "string" and length > 0)
+        and (.updated_at | type == "string" and length > 0)
+        and (.instances | type == "object")
+        and ([.instances | to_entries[] |
+            (.key | test("^is[0-9]{2,}$"))
+            and (.value | type == "object")
+            and (.value.id == .key)
+            and (.value.protocol | type == "string")
+            and (.value.port | type == "number")
+            and (.value.port >= 1 and .value.port <= 65535)
+            and (.value.enabled | type == "boolean")
+            and (.value.created_at | type == "string" and length > 0)
+            and (.value.updated_at | type == "string" and length > 0)
+        ] | all)
+        and (([.instances[].id] | length) == ([.instances[].id] | unique | length))
+        and (([.instances[] | select(.enabled) | "\(.protocol):\(.port)"] | length)
+             == ([.instances[] | select(.enabled) | "\(.protocol):\(.port)"] | unique | length))
+        ' "$file" >/dev/null || {
+            err "state common schema validation failed: $file"
             return 1
-        fi
-        echo "$id"
-        return
-    fi
+        }
 
-    err "无法识别实例标识: ${arg1}"
-    return 1
+    local id protocol fn payload
+    while IFS=$'\t' read -r id protocol; do
+        proto_exists "$protocol" || {
+            err "state contains unsupported protocol: $id/$protocol"
+            return 1
+        }
+        payload=$(jq -c --arg id "$id" '.instances[$id]' "$file")
+        fn="${PROTO_VALIDATE[$protocol]}"
+        "$fn" "$payload" || {
+            err "protocol validation failed: $id/$protocol"
+            return 1
+        }
+    done < <(jq -r '.instances | to_entries[] | [.key,.value.protocol] | @tsv' "$file")
+
+    state_validate_port_uniqueness "$file"
 }
 
-# ------------------------------------------------------------------------------
-# 删除实例
-# ------------------------------------------------------------------------------
-state_del() {
-    local id="$1"
-    state_init
+state_validate_port_uniqueness() {
+    local file="$1"
+    local collisions
+    collisions=$(jq -r '
+        [.instances[] | select(.enabled) |
+          if (.protocol == "HY2") then ["udp:\(.port)"]
+          elif (.protocol == "SS" or .protocol == "SS2022") then ["tcp:\(.port)", "udp:\(.port)"]
+          else ["tcp:\(.port)"] end
+        ] | flatten | group_by(.)[] | select(length > 1) | .[0]
+    ' "$file")
+    [[ -z "$collisions" ]] || {
+        err "enabled instance listen collision: ${collisions//$'\n'/, }"
+        return 1
+    }
+}
 
-    local tmp
-    tmp=$(mktemp)
-    if jq --arg id "$id" 'del(.instances[$id])' "$STATE_FILE" > "$tmp"; then
-        mv "$tmp" "$STATE_FILE"
+state_next_id_file() {
+    local file="$1" max
+    max=$(jq -r '[.instances | keys[] | select(test("^is[0-9]+$")) |
+        ltrimstr("is") | tonumber] | max // 0' "$file")
+    printf 'is%02d\n' "$((max + 1))"
+}
+
+state_get_file() {
+    local file="$1" id="$2"
+    jq -ec --arg id "$id" '.instances[$id] // error("instance not found")' "$file"
+}
+
+state_set_file() {
+    local file="$1" id="$2" payload="$3" tmp
+    tmp=$(mktemp "${file}.tmp.XXXXXX")
+    if jq --arg id "$id" --argjson value "$payload" \
+        --arg project_version "$SB_PROJECT_VERSION" \
+        --arg updated_at "$(now_iso)" \
+        '.instances[$id] = $value
+         | .project_version = $project_version
+         | .updated_at = $updated_at' "$file" >"$tmp"; then
+        chmod 600 "$tmp"
+        mv -fT "$tmp" "$file"
     else
         rm -f "$tmp"
-        err "state_del: 删除 [${id}] 失败"
         return 1
     fi
 }
 
-# ------------------------------------------------------------------------------
-# 列出所有实例 id
-# ------------------------------------------------------------------------------
-state_list() {
-    state_init
-    jq -r '.instances | keys[]' "$STATE_FILE" 2>/dev/null
-}
-
-# ------------------------------------------------------------------------------
-# 列出所有 enabled=true 的实例 id
-# ------------------------------------------------------------------------------
-state_list_enabled() {
-    state_init
-    jq -r '.instances | to_entries[]
-        | select(.value.enabled == true)
-        | .key' "$STATE_FILE" 2>/dev/null
-}
-
-# ------------------------------------------------------------------------------
-# 软停用 / 软启用
-# ------------------------------------------------------------------------------
-state_disable() {
-    local id="$1"
-    _state_set_enabled "$id" false
-}
-
-state_enable() {
-    local id="$1"
-    _state_set_enabled "$id" true
-}
-
-_state_set_enabled() {
-    local id="$1"
-    local val="$2"
-    state_init
-
-    local tmp
-    tmp=$(mktemp)
-    if jq --arg id "$id" --argjson v "$val" \
-        '.instances[$id].enabled = $v
-         | .instances[$id].updated_at = (now | strftime("%Y-%m-%d %H:%M:%S"))' \
-        "$STATE_FILE" > "$tmp"; then
-        mv "$tmp" "$STATE_FILE"
+state_delete_file() {
+    local file="$1" id="$2" tmp
+    jq -e --arg id "$id" '.instances | has($id)' "$file" >/dev/null || {
+        err "instance not found: $id"
+        return 1
+    }
+    tmp=$(mktemp "${file}.tmp.XXXXXX")
+    if jq --arg id "$id" --arg updated_at "$(now_iso)" \
+        'del(.instances[$id]) | .updated_at = $updated_at' "$file" >"$tmp"; then
+        chmod 600 "$tmp"
+        mv -fT "$tmp" "$file"
     else
         rm -f "$tmp"
-        err "_state_set_enabled: 操作失败"
         return 1
     fi
 }
 
-# ------------------------------------------------------------------------------
-# 更新任意字段（patch）
-# 用法: state_patch <id> <jq_filter>
-# 示例: state_patch is01 '.port = 8443'
-# ------------------------------------------------------------------------------
-state_patch() {
-    local id="$1"
-    local filter="$2"
-    state_init
-
-    local tmp
-    tmp=$(mktemp)
-    if jq --arg id "$id" \
-        "(.instances[\$id]) |= ( ${filter} )
-         | .instances[\$id].updated_at = (now | strftime(\"%Y-%m-%d %H:%M:%S\"))" \
-        "$STATE_FILE" > "$tmp"; then
-        mv "$tmp" "$STATE_FILE"
+state_patch_file() {
+    local file="$1" id="$2" patch="$3" tmp
+    jq -e --arg id "$id" '.instances | has($id)' "$file" >/dev/null || {
+        err "instance not found: $id"
+        return 1
+    }
+    tmp=$(mktemp "${file}.tmp.XXXXXX")
+    if jq --arg id "$id" --argjson patch "$patch" --arg updated_at "$(now_iso)" \
+        '.instances[$id] = (.instances[$id] * $patch)
+         | .instances[$id].updated_at = $updated_at
+         | .updated_at = $updated_at' "$file" >"$tmp"; then
+        chmod 600 "$tmp"
+        mv -fT "$tmp" "$file"
     else
         rm -f "$tmp"
-        err "state_patch: 更新 [${id}] 失败"
         return 1
     fi
 }
 
-# ------------------------------------------------------------------------------
-# 检查 id 是否存在
-# ------------------------------------------------------------------------------
-state_exists() {
-    local id="$1"
-    state_init
-    local val
-    val=$(jq -r --arg id "$id" '.instances[$id] // empty' "$STATE_FILE")
-    [ -n "$val" ]
+state_count_file() {
+    jq -r '.instances | length' "$1"
+}
+
+state_enabled_count_file() {
+    jq -r '[.instances[] | select(.enabled)] | length' "$1"
+}
+
+state_export_file() {
+    local file="$1" include_secrets="${2:-false}"
+    if [[ "$include_secrets" == "true" ]]; then
+        jq . "$file"
+    else
+        jq '
+          .instances |= with_entries(
+            .value |=
+              if has("password") then .password = "[REDACTED]" else . end
+              | if has("uuid") then .uuid = "[REDACTED]" else . end
+              | if has("private_key") then .private_key = "[REDACTED]" else . end
+          )' "$file"
+    fi
 }

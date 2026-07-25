@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+set -u
+
+[[ "${1:-}" == "ahosts" && -n "${2:-}" ]] || exit 2
+case "$2" in
+    private.example.com) address=192.168.1.10 ;;
+    unresolved.example.com) exit 2 ;;
+    *) address=203.0.114.10 ;;
+esac
+printf '%s STREAM %s\n%s DGRAM %s\n' "$address" "$2" "$address" "$2"
