@@ -92,6 +92,62 @@ doctor_run_json() {
         results=$(doctor_add "$results" listeners info "service is inactive; listener check skipped")
     fi
 
+    # A failed publish or a failed rollback can leave the current link, the
+    # generation recorded in state and the generation the service actually
+    # loaded pointing at three different things. Surface that explicitly.
+    local current_generation service_generation status_result rollback_result
+    current_generation=$(readlink -f "$SB_CURRENT_LINK" 2>/dev/null || printf 'unresolved')
+    if [[ "$active" == "true" ]]; then
+        service_generation=$(readlink -f "/proc/$(service_pid)/cwd" 2>/dev/null ||
+          printf 'unknown')
+        # /proc/<pid>/cwd of a root-owned process is unreadable to other users,
+        # and `sb doctor` deliberately does not require root. An unobservable
+        # generation is missing information, not evidence of drift.
+        if [[ -z "$service_generation" || "$service_generation" == "unknown" ]]; then
+            results=$(doctor_add "$results" generation_drift info \
+              "loaded generation is not observable here (needs root); drift check skipped")
+        elif [[ "$service_generation" == "$(readlink -f "$SB_CURRENT_OUTPUT" 2>/dev/null)" ]]; then
+            results=$(doctor_add "$results" generation_drift pass \
+              "current link and running service agree on ${current_generation}")
+        else
+            results=$(doctor_add "$results" generation_drift fail \
+              "service runs ${service_generation} but current resolves to ${current_generation}")
+        fi
+    else
+        results=$(doctor_add "$results" generation_drift info \
+          "service is inactive; generation drift check skipped")
+    fi
+
+    if [[ -f "$SB_STATUS_FILE" ]]; then
+        status_result=$(jq -r '.last_publish.result // "unknown"' "$SB_STATUS_FILE")
+        rollback_result=$(jq -r '.last_rollback.result // "not-required"' "$SB_STATUS_FILE")
+        if [[ "$status_result" == "rollback-failed" ]]; then
+            results=$(doctor_add "$results" last_publish fail \
+              "the last publish could not be rolled back (${rollback_result}); manual recovery required")
+        elif [[ "$rollback_result" == "service-restore-failed" ]]; then
+            results=$(doctor_add "$results" last_publish fail \
+              "the last rollback restored data but the service did not recover")
+        else
+            results=$(doctor_add "$results" last_publish pass \
+              "last publish ${status_result}, rollback ${rollback_result}")
+        fi
+    fi
+
+    # The application link and the release it names must agree, otherwise a
+    # failed manager upgrade has left the installation half-switched.
+    local app_target
+    if [[ -L "$SB_APP_LINK" ]]; then
+        app_target=$(readlink -f "$SB_APP_LINK" 2>/dev/null || printf '')
+        if [[ -n "$app_target" && -x "$app_target/sb" && -f "$app_target/version.json" ]]; then
+            results=$(doctor_add "$results" app_release pass "$app_target")
+        else
+            results=$(doctor_add "$results" app_release fail \
+              "application link does not resolve to a usable release: ${SB_APP_LINK}")
+        fi
+    else
+        results=$(doctor_add "$results" app_release info "no managed application link")
+    fi
+
     local tls_id tls_meta tls_status days tls_mode
     while IFS= read -r tls_id; do
         tls_meta=$(jq -c --arg id "$tls_id" '.instances[$id]' "$SB_CURRENT_STATE")

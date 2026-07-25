@@ -27,7 +27,7 @@ layout_create_empty() (
     safe_mkdir "$generation" || return 1
     state_empty_json | atomic_write "$generation/instances.json" 600 || return 1
     cp -- "$SB_SETTINGS_BOOTSTRAP" "$generation/settings.json" || return 1
-    chmod 600 "$generation/settings.json"
+    chmod 600 "$generation/settings.json" || return 1
     runtime_render "$generation/instances.json" "$generation/output" \
       "$generation/settings.json" "$id" || return 1
     runtime_check_config "$generation/output/config.json" || return 1
@@ -51,7 +51,7 @@ layout_upgrade_generation_settings() (
     trap '[[ -z "${candidate:-}" ]] || rm -rf -- "$candidate"' EXIT
     cp -a -- "$current" "$candidate" || return 1
     cp -- "$SB_SETTINGS_BOOTSTRAP" "$candidate/settings.json" || return 1
-    chmod 600 "$candidate/settings.json"
+    chmod 600 "$candidate/settings.json" || return 1
     rm -rf -- "$candidate/output"
     runtime_render "$candidate/instances.json" "$candidate/output" \
       "$candidate/settings.json" "$id" || return 1
@@ -65,7 +65,7 @@ layout_upgrade_generation_settings() (
 
 migration_normalize_tls() {
     local file="$1" tmp id protocol cert key sni pin cert_fingerprint
-    tmp=$(mktemp "${file}.tmp.XXXXXX")
+    tmp=$(mktemp "${file}.tmp.XXXXXX") || return 1
     if ! jq '
       .instances |= with_entries(
         if (.value.protocol=="HY2" or .value.protocol=="ANYTLS") then
@@ -80,8 +80,8 @@ migration_normalize_tls() {
         rm -f -- "$tmp"
         return 1
     fi
-    chmod 600 "$tmp"
-    mv -fT -- "$tmp" "$file"
+    chmod 600 "$tmp" || { rm -f -- "$tmp"; return 1; }
+    mv -fT -- "$tmp" "$file" || { rm -f -- "$tmp"; return 1; }
 
     while IFS=$'\t' read -r id protocol cert key sni; do
         [[ "$protocol" == "HY2" || "$protocol" == "ANYTLS" ]] || continue
@@ -96,7 +96,7 @@ migration_normalize_tls() {
         pin=$(tls_public_key_pin "$cert") || return 1
         cert_fingerprint=$(openssl x509 -in "$cert" -noout -fingerprint -sha256 |
             cut -d= -f2-) || return 1
-        tmp=$(mktemp "${file}.tmp.XXXXXX")
+        tmp=$(mktemp "${file}.tmp.XXXXXX") || return 1
         if ! jq --arg id "$id" --arg pin "$pin" --arg fingerprint "$cert_fingerprint" '
           .instances[$id].tls.public_key_sha256=$pin |
           .instances[$id].tls.certificate_sha256=$fingerprint
@@ -104,8 +104,8 @@ migration_normalize_tls() {
             rm -f -- "$tmp"
             return 1
         fi
-        chmod 600 "$tmp"
-        mv -fT -- "$tmp" "$file"
+        chmod 600 "$tmp" || { rm -f -- "$tmp"; return 1; }
+        mv -fT -- "$tmp" "$file" || { rm -f -- "$tmp"; return 1; }
     done < <(jq -r '.instances | to_entries[] |
       [.key,.value.protocol,(.value.tls.certificate_path//""),
        (.value.tls.key_path//""),(.value.tls.sni//"")] | @tsv' "$file")
@@ -168,7 +168,9 @@ migrate_legacy() (
       [[ -z "${cert_candidate:-}" ]] || rm -rf -- "$cert_candidate"
       if [[ "$published" != "true" && -n "$cert_previous" && -d "$cert_previous" ]]; then
         rm -rf -- "$SB_CERT_DIR"
-        mv -- "$cert_previous" "$SB_CERT_DIR"
+        mv -- "$cert_previous" "$SB_CERT_DIR" ||
+          printf "CRITICAL: certificate directory not restored; move %s to %s\n" \
+            "$cert_previous" "$SB_CERT_DIR" >&2
       fi
     ' EXIT
     safe_mkdir "$generation" || return 1
@@ -197,11 +199,11 @@ migrate_legacy() (
          (.value.hop.acknowledged|not)
       then .value.enabled=false | .value.hop.confirmation_required=true
       else . end)' "$state" >"$tmp" || { rm -f -- "$tmp"; return 1; }
-    chmod 600 "$tmp"
-    mv -fT -- "$tmp" "$state"
+    chmod 600 "$tmp" || { rm -f -- "$tmp"; return 1; }
+    mv -fT -- "$tmp" "$state" || { rm -f -- "$tmp"; return 1; }
     migration_normalize_tls "$state" || return 1
     cp -- "$SB_SETTINGS_BOOTSTRAP" "$generation/settings.json" || return 1
-    chmod 600 "$generation/settings.json"
+    chmod 600 "$generation/settings.json" || return 1
     state_validate_file "$state" || return 1
     runtime_render "$state" "$generation/output" "$generation/settings.json" "$id" ||
         return 1

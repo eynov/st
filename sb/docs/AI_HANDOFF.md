@@ -6,107 +6,118 @@
 
 ## 当前 Git 状态
 
-Development Snapshot 建立于 2026-07-25：
+第二轮修复、第二次与第三次独立复审整改，均完成于 2026-07-25/26：
 
-- 分支：`main...origin/main`
-- 快照提交：`53acf0835e922ead26315ead3d1d81df11d910ad`
-- `HEAD` 与 `origin/main` 相同
-- sb 生产化升级、测试、元数据和 Documentation Baseline 已作为同一自洽快照提交
-- `sb/instances.json` 和 `sb/protocols/xxxx.txt` 的预期删除已纳入快照
-- 快照推送后工作树 clean，分支与 Gitea `origin/main` 同步
+- 分支：`main`，已在用户明确授权后 commit 并推送到 Gitea `origin/main`
+- 工作树：clean
+- 上一基线提交：`aaa7de7`（`docs: record development snapshot status`）
+- 改动范围：第二轮 17 个代码/测试文件，叠加第二次复审整改后见 `git diff --stat`；
+  另新增 `sb/tests/errexit-audit.sh` 与文档更新
+- 未执行任何 VPS、部署或防火墙操作
 
-开始新任务时必须重新执行 `AGENTS.md` 指定的 Git 检查；本节不是永久不变的仓库
-状态快照。
+开始新任务时必须重新执行 `AGENTS.md` 指定的 Git 检查；本节不是永久不变的仓库状态快照。
 
 ## 当前开发阶段
 
 **Repository Production Candidate — Not Production Ready**
 
-代码已完成第一轮生产化实现和修复，但最终独立只读复审发现两个尚未修复的 High。
-不得依据 `FINAL_REVIEW_PACK.md` 中较早的 “High 0” 结论宣布通过。该文件保留当轮
-修复证据；当前准入结论以本交接文档及后续独立复审为准。
+- 第一次独立复审的 2 个 High + 4 个 Medium：已修复（第二轮）。
+- 第二次独立复审的 4 个阻断 High（HIGH-A..D）与 2 个阻断 Medium（M1、M2），外加被点名的
+  M3（IPv4 前导零）与 M4（非 root `generation_drift` 误报）：已修复。四个 High 在整改前
+  全部实际复现，整改后在同一注入点复测通过。
+- 第三次独立复审（Critical 0 / High 0 / Medium 5，全部非阻断）指出的 M-3.1（`cmd_install`
+  仍压平 rc=70）与 M-3.2（salvage 确认可从环境继承）：已修复，两项均在整改前实际复现。
+
+第三次复审的结论是「commit/push 允许，但需用户明确授权」。用户已明确授权，变更集已提交
+并推送到 Gitea `origin/main`。Production Ready 仍为否——真实 systemd/cgroup 门槛未验证。
 
 ## 已完成内容
 
-- 程序、settings、state、generation、证书、输出与备份目录分离
-- state/settings schema、派生输出和旧 `/opt/sb` 数据迁移框架
-- 全局锁、候选 generation、备份、service 验收和整体 rollback 的事务框架
-- endpoint/listen settings 事务化与非全局地址校验框架
-- 原子候选备份与 restore 数据恢复流程
-- SS、SS2022、AnyTLS、VLESS Reality、HY2 服务端及客户端输出矩阵
-- HY2 显式 Port Hopping 与外部防火墙责任提示
-- trusted、provided、self-signed、explicit insecure TLS 模式
-- SS2022 SIP002 URI 与 HY2 certificate fingerprint 契约
-- 固定 sing-box `1.13.14`、架构映射、archive/binary digest 和 receipt
-- 零节点 enabled/stopped 策略及 systemd unit
-- 隔离测试、真实 sing-box/Hysteria/ssurl 测试入口和 mock systemd 故障注入
+在上一轮基础上，本轮新增：
+
+- `symlink_switch()`：统一的三步显式检查符号链接原子切换原语
+- `transaction_run` 发布阶段机与两级回滚严重度（普通失败 vs `SB_EX_UNRECOVERABLE`=70）
+- `manager_install_source` 全路径显式检查、`manager_rollback_app()`、命令路径冲突前置判定
+- `cmd_upgrade` 阶段化 + `upgrade_rollback()` 完整数据恢复（app/unit 恢复先于数据恢复）
+- `backup_create` salvage 模式，使 live 数据已损坏时 `sb restore` 仍可执行
+- IANA Special-Purpose 表驱动的 IPv4/IPv6 endpoint 判定（位精确前缀匹配）
+- listener mock 的 observed 侧改由 `config.json` 推导，消除循环证明
+- `doctor` 新增 `generation_drift`、`last_publish`、`app_release` 检查
+- 仓库级 errexit 条件上下文审计与常驻检查 `tests/errexit-audit.sh`
+
+第二次复审整改新增：
+
+- 全部 mutator 以显式 `return 0` 结尾，state 写入逐项检查；新增 `state-set-write` 注入点
+- salvage 判定改为检查 **live 源**（`backup_live_source_valid`），不再检查半成品候选
+- salvage 快照默认拒绝恢复，需 `--restore-unvalidated-salvage` 显式确认并留下状态证据
+- `SB_TXN_SALVAGE_BACKUP` 改为进程内 `SB_INTERNAL_MARKER`，环境不可达
+- rc=70 在 `cmd_restore`、`core_upgrade` 及其余调用点原样传播；current 链接恢复失败后
+  不再继续做证书目录回退
+- CRITICAL 中指名的恢复物（旧核心二进制、暂存副本、被拒 generation 的证书）不再被
+  EXIT trap 删除
+- IPv4 前导零与全数字末标签一律拒绝；`generation_drift` 在 `/proc` 不可读时记为 info
+
+第三次复审整改新增：
+
+- `cmd_install` 的 `core_install || return $?`：`sb install` 经 `core_switch` 的 rc=70 不再被
+  压平；`FINAL_REVIEW_PACK.md` 中「已全部排查压平点」的表述已更正
+- `SB_ALLOW_SALVAGE_RESTORE` 不再从环境读取、不再被导出：salvage 恢复授权只能来自本次调用
+  键入的 `--restore-unvalidated-salvage`，不会经会话或子进程继承
+
+上一轮已完成的内容（协议矩阵、TLS 模式、固定核心校验、事务框架、零节点策略等）保持不变。
 
 ## 当前阻断
 
-最新独立只读复审结论：
-
 ```text
-Critical: 0
-High: 2
-Medium: 4
+自测 Critical: 0
+自测 High:     0
+自测 Medium:   0 blocking
 ```
 
-### High 1：current generation 链接切换未可靠传播失败
+第二次复审的 M5、M6、LOW-1..9，以及第三次复审的 M-3.3（非 root `sb doctor` 的 `listeners`
+检查仍失败）、M-3.4、M-3.5 及其 Low 列表，均仍然开放。按指示本轮只处理 M-3.1 与 M-3.2。
 
-证据位置：
+下轮优先项仍是 **M-3.5 / M6**：`errexit-audit.sh` 只匹配字面命令，不覆盖 `safe_mkdir`、
+`atomic_write`、`state_set_file` 等包装函数，正是这个盲区放过了 HIGH-A。第三次复审复扫后
+确认剩余 13 处包装调用点当前都不会掩盖失败。
 
-- `sb/core/transaction.sh:45-49`：`transaction_restore_link`
-- `sb/core/transaction.sh:124-127`：候选 generation 发布
-
-`ln -s`、`mv -fT` 等关键步骤没有逐项显式检查。在函数被条件调用的 Shell 上下文中，
-不能依赖 `set -e`；故障注入曾观察到 current 链接切换失败却返回成功，或 rollback
-失败后 state/current 与运行服务漂移。
-
-### High 2：manager app 链接切换未可靠传播失败
-
-证据位置：
-
-- `sb/core/manager.sh:66-71`：release 发布与第一次 rollback
-- `sb/core/manager.sh:79-94`：下游失败 rollback 与 CLI link
-
-`.app.new` 的创建和 `mv -fT` 切换没有逐项显式检查。故障注入曾观察到 app 链接没有
-切换、失败 release 被保留，但命令仍返回 0 并打印安装成功。
-
-### 相关 Medium
-
-1. `sb/tests/fixtures/mock-systemctl:37-43` 仍从 current generation 的预期 manifest
-   生成 runtime socket 表，监听测试存在循环证明。
-2. `sb/core/common.sh` 的 IPv6 global-unicast 判定仍接受部分保留或非公网范围，例如
-   `2001::1`、`2001:2::1`、`3fff::1`。
-3. manager upgrade 创建的数据备份没有形成下游失败时的完整数据 rollback。
-4. 首次安装创建 CLI symlink 失败时的 release/app 恢复路径仍不完整。
+**当前阻断项：无自测阻断项。** commit/push 需用户明确授权；真实 systemd 验收仍未完成。
 
 ## 当前禁止事项
 
 - 不得部署到生产 VPS。
 - 不得宣布 Repository Production Ready。
-- 两个 High 修复并重新独立复审前，不得进入测试 VPS 灰度。
+- 未通过第三次独立只读复审前，不得进入测试 VPS 灰度。
 - 未经用户明确授权，不得 commit 或 push。
 - 不得用修改 Review Pack、降低严重度或增加宽松测试代替代码修复。
 - 不得把 mock systemd 结果表述为真实 systemd 验收。
 
 ## 下一步工作
 
-1. 对 generation 与 app 的每个 symlink/rename/rollback 操作显式检查退出码，并确保
-   失败不会输出成功、不会保留错误 release 或造成 live 数据漂移。
-2. 增加独立故障注入，验证发布失败和 rollback 失败的非零退出码及 state/current/
-   service 哈希一致性。
-3. 让监听 mock 的运行事实独立于 expected manifest，消除循环证明。
-4. 收紧 IPv6 endpoint global-unicast 判定。
-5. 补齐 manager upgrade 数据 rollback 和首次安装 CLI link 失败恢复。
-6. 重新执行完整隔离测试、真实组件测试、ShellCheck、`bash -n` 和
-   `git diff --check`。
-7. 再做一次独立只读复审。只有 Critical 0 / High 0 后，才讨论 commit、push 和单台
-   测试 VPS 的真实 systemd 灰度。
+1. 下一轮代码工作：M-3.5 的包装函数审计覆盖，然后 M-3.4，再处理 Low 列表。
+2. 单台测试 VPS 的真实 systemd 灰度，并把真实 systemd 验收作为强制门槛；同时在真实主机上
+   验证非 root `sb doctor` 的可用性（M-3.3）。
+
+## 复现与验证入口
+
+```bash
+SB_TEST_REAL_CORE=/path/to/sing-box-1.13.14 \
+SB_TEST_HYSTERIA_BIN=/path/to/hysteria-v2.10.0-linux-amd64 \
+SB_TEST_SSURL_BIN=/path/to/shadowsocks-rust-v1.24.0/ssurl \
+  sb/tests/run.sh                    # 期望 567 pass / 0 fail
+
+sb/tests/errexit-audit.sh            # 期望 0 blocking
+shellcheck --severity=warning --external-sources \
+  file.sh sb/sb sb/install.sh sb/core/*.sh sb/protocols/*.sh sb/tests/*.sh
+git diff --check
+```
+
+故障注入通过 `SB_TEST_FAULTS`（冒号分隔）配合 `SB_TEST_MODE=true` 启用；注入点清单见
+[`TESTING.md`](TESTING.md)。
 
 ## 尚未验证边界
 
-当前隔离环境 PID 1 为 `bwrap`，无法连接 systemd system bus。以下只能在获批的单台
-测试 VPS 验证：真实 MainPID/cgroup/socket 归属，enable/start/restart/stop，
-generation 实际加载，旧 socket 消失，异常退出 Restart，主机 reboot 后有节点和
-零节点行为，以及事务失败后的真实 service rollback。
+当前隔离环境 PID 1 为 `bwrap`，无法连接 systemd system bus。以下只能在获批的单台测试 VPS
+验证：真实 MainPID/cgroup/socket 归属，enable/start/restart/stop，generation 实际加载，
+旧 socket 消失，异常退出 Restart，主机 reboot 后有节点和零节点行为，以及事务失败后的真实
+service rollback。

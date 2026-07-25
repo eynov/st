@@ -44,7 +44,7 @@ install_all() {
     elif [[ -e "$SB_COMMAND_LINK" ]]; then
         PREVIOUS_COMMAND_EXISTS=true
     fi
-    manager_install_source "$SOURCE_DIR"
+    manager_install_source "$SOURCE_DIR" || return $?
 
     args=(install)
     [[ "$YES" == "true" ]] && args+=(--yes)
@@ -53,13 +53,22 @@ install_all() {
     [[ "$ALLOW_PRIVATE" == "true" ]] && args+=(--allow-private-endpoint)
     if ! env -u SB_APP_DIR "$SB_APP_LINK/sb" "${args[@]}"; then
         if [[ -n "$PREVIOUS_APP_LINK" ]]; then
-            ln -s "$PREVIOUS_APP_LINK" "${SB_INSTALL_ROOT}/.app.install-rollback.$$"
-            mv -fT "${SB_INSTALL_ROOT}/.app.install-rollback.$$" "$SB_APP_LINK"
+            symlink_switch "$PREVIOUS_APP_LINK" "$SB_APP_LINK" \
+              "${SB_INSTALL_ROOT}/.app.install-rollback.$$" || {
+                printf 'CRITICAL: the application link could not be restored\n' >&2
+                printf 'manual recovery: point %s at %s\n' \
+                  "$SB_APP_LINK" "$PREVIOUS_APP_LINK" >&2
+                return 70
+            }
         else
             rm -f "$SB_APP_LINK"
         fi
         if [[ -n "$PREVIOUS_COMMAND_LINK" ]]; then
-            ln -sfn "$PREVIOUS_COMMAND_LINK" "$SB_COMMAND_LINK"
+            symlink_switch "$PREVIOUS_COMMAND_LINK" "$SB_COMMAND_LINK" \
+              "${SB_COMMAND_LINK}.rollback.$$" || {
+                printf 'CRITICAL: the management command link could not be restored\n' >&2
+                return 70
+            }
         elif [[ "$PREVIOUS_COMMAND_EXISTS" == "false" &&
                 -L "$SB_COMMAND_LINK" &&
                 "$(readlink "$SB_COMMAND_LINK")" == "$SB_APP_LINK/sb" ]]; then

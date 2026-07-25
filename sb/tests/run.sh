@@ -439,8 +439,11 @@ test_restart_and_rollback() {
         pass "persistent systemctl failure returns nonzero"
     fi
     assert "unrecoverable service rollback is reported honestly" jq -e \
-      '.last_rollback.performed==true and .last_rollback.result=="failed"' \
+      '.last_rollback.performed==true and
+       .last_rollback.result=="service-restore-failed"' \
       "$root/data/status.json"
+    assert "service restore failure is not conflated with a link restore failure" \
+      jq -e '.last_publish.result=="rolled-back"' "$root/data/status.json"
 }
 
 test_last_node_semantics() {
@@ -946,6 +949,158 @@ test_listener_ownership_and_generation() {
     rm -f "$root/runtime/old-socket.tsv"
 }
 
+# --- MEDIUM-01: expected/observed decoupling ------------------------------
+#
+# The mock derives observed sockets from config.json (what a daemon binds),
+# never from manifest.json (what the verifier expects). These tests drive the
+# observed side directly so a divergence between the two is provably detected.
+
+observe_socket() {
+    # observe_socket <runtime> <network> <address> <port> <pid> <generation>
+    printf '%s\t%s\t%s\t%s\t%s\n' "$2" "$3" "$4" "$5" "$6" >>"$1/observed-sockets.tsv"
+}
+
+observe_reset() {
+    rm -f "$1/observed-sockets.tsv" "$1/observed-generation" "$1/observed-mainpid"
+}
+
+test_listener_expected_observed_divergence() {
+    local root runtime generation cases description
+    new_env
+    root="$TEST_ROOT"
+    runtime="$root/runtime"
+    init_env
+    sb add SS --port 26401 --yes >/dev/null
+    generation=$(jq -r '.generation_id' "$root/data/current/output/manifest.json")
+
+    assert "config-derived observation satisfies the manifest" \
+      sb doctor --json >/dev/null
+
+    # Each case replaces the observed world with one deliberate divergence from
+    # the expected manifest (tcp+udp on :: port 26401 owned by MainPID).
+    cases=(
+      "expected TCP observed UDP only|udp|::|26401|MAINPID"
+      "expected IPv4-mapped observed IPv6 literal|tcp|127.0.0.1|26401|MAINPID"
+      "observed port differs|tcp|::|26999|MAINPID"
+      "observed PID differs|tcp|::|26401|99999"
+    )
+    for entry in "${cases[@]}"; do
+        IFS='|' read -r description network address port pid <<<"$entry"
+        observe_reset "$runtime"
+        observe_socket "$runtime" "$network" "$address" "$port" "$pid" "$generation"
+        "$SB_SYSTEMCTL" restart sb-core >/dev/null 2>&1 || true
+        if sb doctor --json >/dev/null 2>&1; then
+            fail "listener verifier rejects: $description"
+        else
+            pass "listener verifier rejects: $description"
+        fi
+    done
+
+    # A missing socket and a surplus stale socket.
+    observe_reset "$runtime"
+    observe_socket "$runtime" tcp "::" 26401 MAINPID "$generation"
+    "$SB_SYSTEMCTL" restart sb-core >/dev/null 2>&1 || true
+    if sb doctor --json >/dev/null 2>&1; then
+        fail "listener verifier rejects: one expected socket missing"
+    else
+        pass "listener verifier rejects: one expected socket missing"
+    fi
+
+    # Loaded generation divergence: process cwd points at an older generation.
+    observe_reset "$runtime"
+    mkdir -p "$root/other-generation"
+    printf '%s\n' "$root/other-generation" >"$runtime/observed-generation"
+    "$SB_SYSTEMCTL" restart sb-core >/dev/null 2>&1 || true
+    if sb doctor --json >/dev/null 2>&1; then
+        fail "listener verifier rejects: loaded generation differs"
+    else
+        pass "listener verifier rejects: loaded generation differs"
+    fi
+
+    # MainPID divergence reported by systemd itself.
+    observe_reset "$runtime"
+    printf '99999\n' >"$runtime/observed-mainpid"
+    "$SB_SYSTEMCTL" restart sb-core >/dev/null 2>&1 || true
+    if sb doctor --json >/dev/null 2>&1; then
+        fail "listener verifier rejects: MainPID does not own the sockets"
+    else
+        pass "listener verifier rejects: MainPID does not own the sockets"
+    fi
+    observe_reset "$runtime"
+
+    assert "mock-systemctl never reads expected_listeners" sh -c \
+      "! rg -q 'expected_listeners' '$APP_DIR/tests/fixtures/mock-systemctl'"
+    assert "mock-ss never reads the generation manifest" sh -c \
+      "! rg -q 'manifest' '$APP_DIR/tests/fixtures/mock-ss'"
+}
+
+# --- MEDIUM-02: endpoint special-purpose classification -------------------
+
+test_endpoint_special_purpose_matrix() {
+    local address expected verdict
+    # Samples taken from the IANA IPv4/IPv6 Special-Purpose Address Registries,
+    # plus the three addresses the previous review observed being accepted.
+    local -a matrix=(
+      "0.0.0.0 reject"         "10.1.2.3 reject"        "127.0.0.1 reject"
+      "100.64.0.1 reject"      "169.254.1.1 reject"     "172.16.0.1 reject"
+      "192.0.0.1 reject"       "192.0.2.1 reject"       "192.31.196.1 reject"
+      "192.52.193.1 reject"    "192.88.99.1 reject"     "192.168.1.1 reject"
+      "192.175.48.1 reject"    "198.18.0.1 reject"      "198.51.100.1 reject"
+      "203.0.113.1 reject"     "224.0.0.1 reject"       "240.0.0.1 reject"
+      "255.255.255.255 reject"
+      "8.8.8.8 accept"         "1.1.1.1 accept"         "192.0.3.1 accept"
+      "172.32.0.1 accept"      "100.128.0.1 accept"     "198.20.0.1 accept"
+      ":: reject"              "::1 reject"             "64:ff9b::1 reject"
+      "100::1 reject"          "2001::1 reject"         "2001:2::1 reject"
+      "2001:20::1 reject"      "2001:db8::1 reject"     "2002::1 reject"
+      "3fff::1 reject"         "5f00::1 reject"         "fc00::1 reject"
+      "fd12:3456::1 reject"    "fe80::1 reject"         "ff02::1 reject"
+      "2606:4700:4700::1111 accept" "2400:cb00::1 accept"
+      "2a00:1450:4001::1 accept"    "2001:db9::1 accept"
+    )
+    local entry failures=0
+    for entry in "${matrix[@]}"; do
+        read -r address expected <<<"$entry"
+        if bash -c 'source "$1/core/common.sh"; endpoint_valid "$2" false' \
+          _ "$APP_DIR" "$address" >/dev/null 2>&1; then
+            verdict=accept
+        else
+            verdict=reject
+        fi
+        [[ "$verdict" == "$expected" ]] || {
+            printf '  endpoint %s: got %s want %s\n' "$address" "$verdict" "$expected" >&2
+            failures=$((failures + 1))
+        }
+    done
+    assert "IANA special-purpose endpoint matrix classifies all samples" \
+      test "$failures" -eq 0
+
+    local root
+    new_env
+    root="$TEST_ROOT"
+    init_env
+    # The three addresses the review observed being wrongly accepted.
+    for address in 2001::1 2001:2::1 3fff::1; do
+        if sb endpoint set "$address" --yes >/dev/null 2>&1; then
+            fail "special-purpose endpoint rejected: $address"
+        else
+            pass "special-purpose endpoint rejected: $address"
+        fi
+    done
+    assert "rejected endpoints never reach live settings" \
+      test "$(jq -r '.endpoint.value' "$root/data/current/settings.json")" = node.example.com
+
+    # The override is a separate flag: --yes alone must not bypass the policy.
+    if sb endpoint set 10.0.0.1 --yes >/dev/null 2>&1; then
+        fail "--yes alone does not bypass the special-purpose policy"
+    else
+        pass "--yes alone does not bypass the special-purpose policy"
+    fi
+    sb endpoint set 10.0.0.1 --allow-private-endpoint --yes >"$SB_TEST_OUTPUT_FILE" 2>&1
+    assert "explicit override is accepted and flagged as risky" \
+      rg -q 'special-purpose address accepted only because' "$SB_TEST_OUTPUT_FILE"
+}
+
 test_core_digest_adversarial() {
     local root fake_dir bad_app rc wrong_archive wrong_hash
     new_env
@@ -1187,6 +1342,686 @@ print(urllib.parse.parse_qs(urllib.parse.urlsplit(sys.argv[1]).query)["pinSHA256
     done
 }
 
+# --- HIGH-01: publish / rollback fault injection --------------------------
+#
+# Every fault below makes a real command fail with a real errno (a staging path
+# redirected into a missing directory, or an occupied rename target). None of
+# them fakes a return code, so each case proves the specific command's status is
+# actually inspected.
+
+txn_probe() {
+    # txn_probe <name> <fault> <command...>
+    # Runs the command under an armed fault and records the resulting state.
+    local name="$1" fault="$2"
+    shift 2
+    PROBE_BEFORE_CURRENT=$(readlink "$SB_CURRENT_LINK")
+    PROBE_BEFORE_STATE=$(sha256sum "$SB_CURRENT_LINK/instances.json" | awk '{print $1}')
+    PROBE_BEFORE_SETTINGS=$(sha256sum "$SB_CURRENT_LINK/settings.json" | awk '{print $1}')
+    PROBE_OUTPUT=$(SB_TEST_FAULTS="$fault" "$@" 2>&1) && PROBE_RC=0 || PROBE_RC=$?
+    PROBE_AFTER_CURRENT=$(readlink "$SB_CURRENT_LINK")
+    PROBE_AFTER_STATE=$(sha256sum "$SB_CURRENT_LINK/instances.json" | awk '{print $1}')
+    PROBE_AFTER_SETTINGS=$(sha256sum "$SB_CURRENT_LINK/settings.json" | awk '{print $1}')
+    printf '  [%s] rc=%s current=%s state=%s\n' "$name" "$PROBE_RC" \
+      "$([[ "$PROBE_BEFORE_CURRENT" == "$PROBE_AFTER_CURRENT" ]] && printf unchanged || printf SWITCHED)" \
+      "$([[ "$PROBE_BEFORE_STATE" == "$PROBE_AFTER_STATE" ]] && printf unchanged || printf CHANGED)"
+}
+
+assert_publish_failed_cleanly() {
+    local name="$1"
+    assert "${name}: returns nonzero" test "$PROBE_RC" -ne 0
+    assert "${name}: current still points at the old generation" \
+      test "$PROBE_BEFORE_CURRENT" = "$PROBE_AFTER_CURRENT"
+    assert "${name}: live state hash unchanged" \
+      test "$PROBE_BEFORE_STATE" = "$PROBE_AFTER_STATE"
+    assert "${name}: live settings hash unchanged" \
+      test "$PROBE_BEFORE_SETTINGS" = "$PROBE_AFTER_SETTINGS"
+    assert "${name}: no publish success message" \
+      sh -c "! printf '%s' \"\$1\" | rg -q 'publish completed'" _ "$PROBE_OUTPUT"
+    assert "${name}: no business success message" \
+      sh -c "! printf '%s' \"\$1\" | rg -q 'instance created|instance updated|endpoint updated|listen mode updated'" \
+      _ "$PROBE_OUTPUT"
+}
+
+test_transaction_publish_fault_injection() {
+    local root fault
+    for fault in generation-final-mv current-new-create current-new-switch; do
+        new_env
+        root="$TEST_ROOT"
+        init_env
+        txn_probe "$fault" "$fault" sb add SS --port 27001 --yes
+        assert_publish_failed_cleanly "publish fault ${fault}"
+        assert "publish fault ${fault}: live state has no new instance" \
+          jq -e '.instances|length==0' "$root/data/current/instances.json"
+        assert "publish fault ${fault}: status records a failed publish" \
+          jq -e '.last_publish.result=="failed"' "$root/data/status.json"
+        assert "publish fault ${fault}: no staging link left behind" sh -c \
+          "! find '$root/data' -maxdepth 1 -name '.current.*' | grep -q ."
+    done
+
+    # The exact scenario the previous review reproduced: rc=0 with an unchanged
+    # current link but a printed success message. Assert it cannot recur.
+    new_env
+    root="$TEST_ROOT"
+    init_env
+    txn_probe regression current-new-create sb add SS --port 27002 --yes
+    assert "regression: unswitched current can never report success" \
+      sh -c "test \"\$1\" -ne 0 || ! printf '%s' \"\$2\" | rg -q 'publish completed'" \
+      _ "$PROBE_RC" "$PROBE_OUTPUT"
+}
+
+test_transaction_rollback_fault_injection() {
+    local root
+    # Rollback path with the link restore intact.
+    new_env
+    root="$TEST_ROOT"
+    init_env
+    touch "$root/runtime/fail-start"
+    txn_probe rollback-clean "" sb add SS --port 27101 --yes
+    assert_publish_failed_cleanly "rollback (service failure)"
+    assert "rollback (service failure): status records a successful rollback" \
+      jq -e '.last_rollback.performed==true and .last_rollback.result=="success"' \
+      "$root/data/status.json"
+    assert "rollback (service failure): rejected generation discarded" \
+      test "$(find "$root/data/generations" -mindepth 1 -maxdepth 1 -type d | wc -l)" -eq 1
+
+    local fault
+    for fault in current-rollback-create current-rollback-switch; do
+        new_env
+        root="$TEST_ROOT"
+        init_env
+        touch "$root/runtime/fail-start"
+        txn_probe "$fault" "$fault" sb add SS --port 27102 --yes
+        assert "rollback fault ${fault}: returns the unrecoverable exit code" \
+          test "$PROBE_RC" -eq 70
+        assert "rollback fault ${fault}: no success message" \
+          sh -c "! printf '%s' \"\$1\" | rg -q 'publish completed|instance created'" \
+          _ "$PROBE_OUTPUT"
+        assert "rollback fault ${fault}: reports a critical failure" \
+          sh -c "printf '%s' \"\$1\" | rg -q 'CRITICAL'" _ "$PROBE_OUTPUT"
+        assert "rollback fault ${fault}: prints the manual recovery target" \
+          sh -c "printf '%s' \"\$1\" | rg -q 'manual recovery'" _ "$PROBE_OUTPUT"
+        assert "rollback fault ${fault}: status records the failed rollback" \
+          jq -e '.last_publish.result=="rollback-failed" and
+                 .last_rollback.result=="current-link-restore-failed"' \
+          "$root/data/status.json"
+        assert "rollback fault ${fault}: both generations retained for recovery" \
+          test "$(find "$root/data/generations" -mindepth 1 -maxdepth 1 -type d | wc -l)" -ge 2
+        assert "rollback fault ${fault}: no credentials in the failure output" \
+          sh -c "! printf '%s' \"\$1\" | rg -q 'password|BEGIN .*PRIVATE KEY'" _ "$PROBE_OUTPUT"
+        assert "rollback fault ${fault}: doctor reports the drift" sh -c \
+          "'$APP_DIR/sb' doctor --json 2>/dev/null | jq -e '.results[]|select(.name==\"last_publish\")|.status==\"fail\"' >/dev/null"
+    done
+
+    # Service recovery failure after a successful link restore is a distinct,
+    # less severe outcome and must not be conflated with the above.
+    new_env
+    root="$TEST_ROOT"
+    init_env
+    sb add SS --port 27201 --yes >/dev/null
+    touch "$root/runtime/fail-restart"
+    txn_probe rollback-service-restore "" sb edit is01 --port 27202 --yes
+    assert "rollback with failed service restore returns nonzero" test "$PROBE_RC" -ne 0
+    assert "rollback with failed service restore is not reported as unrecoverable" \
+      test "$PROBE_RC" -ne 70
+    assert "rollback with failed service restore keeps the current link restored" \
+      test "$PROBE_BEFORE_CURRENT" = "$PROBE_AFTER_CURRENT"
+    assert "rollback with failed service restore is labelled distinctly" \
+      jq -e '.last_rollback.result=="service-restore-failed"' "$root/data/status.json"
+}
+
+test_transaction_fault_across_operations() {
+    # Every state-changing operation must fail the same way when the current
+    # link switch fails, not just `sb add`.
+    local root
+    new_env
+    root="$TEST_ROOT"
+    init_env
+    sb add SS --port 27301 --yes >/dev/null
+    sb add HY2 --port 27302 --sni hy.example.com --tls-mode self-signed \
+      --masquerade https://hy.example.com --no-hop --yes >/dev/null
+
+    txn_probe edit current-new-switch sb edit is01 --port 27311 --yes
+    assert_publish_failed_cleanly "edit with failed current switch"
+    txn_probe disable current-new-switch sb disable is01 --yes
+    assert_publish_failed_cleanly "disable with failed current switch"
+    txn_probe delete current-new-switch sb delete is02 --yes
+    assert_publish_failed_cleanly "delete with failed current switch"
+    assert "delete with failed current switch keeps both instances" \
+      jq -e '.instances|length==2' "$root/data/current/instances.json"
+    txn_probe endpoint current-new-switch sb endpoint set 203.0.113.9 --allow-private-endpoint --yes
+    assert_publish_failed_cleanly "endpoint update with failed current switch"
+    txn_probe listen current-new-switch sb listen set ipv4 --yes
+    assert_publish_failed_cleanly "listen update with failed current switch"
+    assert "listen update failure leaves the live listen mode intact" \
+      test "$(jq -r '.listen.mode' "$root/data/current/settings.json")" = dual
+}
+
+# --- HIGH-02 / MEDIUM-04: manager app switch and CLI link -----------------
+
+manager_probe() {
+    # manager_probe <fault> ; runs manager_install_source in a subshell
+    local fault="$1"
+    PROBE_BEFORE_APP=$(readlink "$SB_APP_LINK" 2>/dev/null || printf '')
+    PROBE_BEFORE_CLI=$(readlink "$SB_COMMAND_LINK" 2>/dev/null || printf '')
+    PROBE_BEFORE_RELEASES=$(manager_release_count)
+    PROBE_OUTPUT=$( (
+        export SB_TEST_FAULTS="$fault"
+        # shellcheck source=/dev/null
+        source "$APP_DIR/core/common.sh"
+        # shellcheck source=/dev/null
+        source "$APP_DIR/core/manager.sh"
+        manager_install_source "$APP_DIR"
+    ) 2>&1 ) && PROBE_RC=0 || PROBE_RC=$?
+    PROBE_AFTER_APP=$(readlink "$SB_APP_LINK" 2>/dev/null || printf '')
+    PROBE_AFTER_CLI=$(readlink "$SB_COMMAND_LINK" 2>/dev/null || printf '')
+    PROBE_AFTER_RELEASES=$(manager_release_count)
+}
+
+manager_release_count() {
+    # Count only real releases: an injected rename obstruction is not one.
+    # The directory legitimately does not exist before the first install, and
+    # find's failure there must not look like a counting error under pipefail.
+    [[ -d "$SB_RELEASES_DIR" ]] || {
+        printf '0\n'
+        return 0
+    }
+    find "$SB_RELEASES_DIR" -mindepth 1 -maxdepth 1 -type d \
+      -exec test -x '{}/sb' \; -print | wc -l
+}
+
+manager_baseline() {
+    ( # shellcheck source=/dev/null
+      source "$APP_DIR/core/common.sh"
+      # shellcheck source=/dev/null
+      source "$APP_DIR/core/manager.sh"
+      manager_install_source "$APP_DIR" ) >/dev/null 2>&1
+}
+
+test_manager_app_switch_fault_injection() {
+    local root fault
+    for fault in release-stage-mkdir release-copy release-validate release-final-mv \
+                 app-new-create app-new-switch app-selfcheck \
+                 cli-link-create cli-link-switch; do
+        new_env
+        root="$TEST_ROOT"
+        init_env
+        manager_baseline
+        manager_probe "$fault"
+        assert "manager fault ${fault}: returns nonzero" test "$PROBE_RC" -ne 0
+        assert "manager fault ${fault}: app link unchanged" \
+          test "$PROBE_BEFORE_APP" = "$PROBE_AFTER_APP"
+        assert "manager fault ${fault}: no orphan release" \
+          test "$PROBE_AFTER_RELEASES" -eq "$PROBE_BEFORE_RELEASES"
+        assert "manager fault ${fault}: no install success message" \
+          sh -c "! printf '%s' \"\$1\" | rg -q 'sb manager installed'" _ "$PROBE_OUTPUT"
+        assert "manager fault ${fault}: no .app.new residue" sh -c \
+          "! find '$root/opt' -maxdepth 1 -name '.app.*' | grep -q ."
+        assert "manager fault ${fault}: command link unchanged" \
+          test "$PROBE_BEFORE_CLI" = "$PROBE_AFTER_CLI"
+        assert "manager fault ${fault}: no broken command link" \
+          sh -c "[ ! -L '$SB_COMMAND_LINK' ] || [ -x '$SB_COMMAND_LINK' ]"
+        assert "manager fault ${fault}: previous manager still runs" \
+          env -u SB_APP_DIR "$SB_APP_LINK/sb" self-check
+    done
+
+    for fault in app-rollback-create app-rollback-switch; do
+        new_env
+        root="$TEST_ROOT"
+        init_env
+        manager_baseline
+        manager_probe "app-selfcheck:$fault"
+        assert "manager rollback fault ${fault}: unrecoverable exit code" \
+          test "$PROBE_RC" -eq 70
+        assert "manager rollback fault ${fault}: reports a critical failure" \
+          sh -c "printf '%s' \"\$1\" | rg -q 'CRITICAL'" _ "$PROBE_OUTPUT"
+        assert "manager rollback fault ${fault}: prints manual recovery guidance" \
+          sh -c "printf '%s' \"\$1\" | rg -q 'manual recovery'" _ "$PROBE_OUTPUT"
+        assert "manager rollback fault ${fault}: rejected release retained for recovery" \
+          sh -c "printf '%s' \"\$1\" | rg -q 'rejected release retained'" _ "$PROBE_OUTPUT"
+        assert "manager rollback fault ${fault}: no install success message" \
+          sh -c "! printf '%s' \"\$1\" | rg -q 'sb manager installed'" _ "$PROBE_OUTPUT"
+    done
+
+    # Regression: the reproduced scenario was rc=0, app link unchanged, orphan
+    # release created and "sb manager installed" printed.
+    new_env
+    init_env
+    manager_baseline
+    manager_probe app-new-create
+    assert "regression: unswitched app link can never report installed" sh -c \
+      "test \"\$1\" -ne 0 && ! printf '%s' \"\$2\" | rg -q 'sb manager installed'" \
+      _ "$PROBE_RC" "$PROBE_OUTPUT"
+}
+
+test_command_link_conflicts() {
+    local root
+    # A plain file at the command path must never be silently replaced.
+    new_env
+    root="$TEST_ROOT"
+    init_env
+    mkdir -p "$(dirname "$SB_COMMAND_LINK")"
+    printf 'not-sb\n' >"$SB_COMMAND_LINK"
+    manager_probe ""
+    assert "plain file at the command path is refused" test "$PROBE_RC" -ne 0
+    assert "plain file at the command path is preserved" \
+      test "$(cat "$SB_COMMAND_LINK")" = not-sb
+    assert "refusing a plain command path leaves no orphan release" \
+      test "$PROBE_AFTER_RELEASES" -eq "$PROBE_BEFORE_RELEASES"
+
+    # A symlink owned by another project must not be hijacked.
+    new_env
+    root="$TEST_ROOT"
+    init_env
+    mkdir -p "$(dirname "$SB_COMMAND_LINK")"
+    printf '#!/bin/sh\n' >"$root/other-project"
+    chmod 755 "$root/other-project"
+    ln -sfn "$root/other-project" "$SB_COMMAND_LINK"
+    manager_probe ""
+    assert "foreign symlink at the command path is refused" test "$PROBE_RC" -ne 0
+    assert "foreign symlink at the command path is preserved" \
+      test "$(readlink "$SB_COMMAND_LINK")" = "$root/other-project"
+    assert "refusing a foreign command path leaves no orphan release" \
+      test "$PROBE_AFTER_RELEASES" -eq "$PROBE_BEFORE_RELEASES"
+
+    # An unwritable command directory is a plain creation failure.
+    new_env
+    root="$TEST_ROOT"
+    init_env
+    manager_baseline
+    manager_probe cli-link-create
+    assert "unwritable command directory rolls the app link back" \
+      test "$PROBE_BEFORE_APP" = "$PROBE_AFTER_APP"
+    assert "unwritable command directory leaves no broken command link" \
+      sh -c "[ ! -L '$SB_COMMAND_LINK' ] || [ -x '$SB_COMMAND_LINK' ]"
+}
+
+# --- MEDIUM-03: upgrade data rollback -------------------------------------
+
+# Build a source tree that installs cleanly but whose `sb install` mutates live
+# data and then fails, simulating a migration that dies halfway through.
+make_failing_upgrade_source() {
+    local destination="$1" mutation="$2"
+    cp -a "$APP_DIR/." "$destination/" || return 1
+    rm -rf "${destination:?}/tests"
+    python3 - "$destination/sb" "$mutation" <<'PY'
+import sys, pathlib
+target, mutation = pathlib.Path(sys.argv[1]), sys.argv[2]
+lines = target.read_text().splitlines(keepends=True)
+hook = f'''
+if [[ "${{1:-}}" == "install" && "${{SB_UPGRADE_MUTATION_DONE:-}}" != "true" ]]; then
+    export SB_UPGRADE_MUTATION_DONE=true
+    _gen=$(readlink -f "$SB_CURRENT_LINK")
+    case "{mutation}" in
+        state)
+            jq '.instances.injected={{"protocol":"SS"}}' "$_gen/instances.json" \\
+              >"$_gen/instances.tmp" && mv "$_gen/instances.tmp" "$_gen/instances.json" ;;
+        settings)
+            jq '.endpoint.value="mutated.example.com"' "$_gen/settings.json" \\
+              >"$_gen/settings.tmp" && mv "$_gen/settings.tmp" "$_gen/settings.json" ;;
+        generation)
+            printf 'corrupted\\n' >"$_gen/output/config.json" ;;
+        certs)
+            find "$SB_CERT_DIR" -name 'certificate.pem' -exec sh -c \\
+              'printf "corrupted\\n" >"$1"' _ {{}} \\; ;;
+    esac
+    printf 'simulated migration failure after mutating {mutation}\\n' >&2
+    exit 1
+fi
+'''
+# Insert immediately after the global option parsing block.
+for index, line in enumerate(lines):
+    if line.startswith('export SB_JSON SB_YES SB_DRY_RUN SB_SHOW_SECRETS'):
+        lines.insert(index + 1, hook)
+        break
+else:
+    raise SystemExit('anchor not found')
+target.write_text(''.join(lines))
+PY
+    chmod 755 "$destination/sb"
+}
+
+test_upgrade_data_rollback() {
+    local root mutation source rc
+    for mutation in state settings generation certs; do
+        new_env
+        root="$TEST_ROOT"
+        init_env
+        sb add HY2 --port 27401 --sni hy.example.com --tls-mode self-signed \
+          --masquerade https://hy.example.com --no-hop --yes >/dev/null
+        manager_baseline
+
+        local before_state before_settings before_certs before_current
+        before_state=$(sha256sum "$root/data/current/instances.json" | awk '{print $1}')
+        before_settings=$(sha256sum "$root/data/current/settings.json" | awk '{print $1}')
+        before_certs=$(find "$root/data/certs" -type f -exec sha256sum {} + |
+          sort | sha256sum | awk '{print $1}')
+        before_current=$(readlink "$root/data/current")
+
+        source="$root/upgrade-source-$mutation"
+        mkdir -p "$source"
+        make_failing_upgrade_source "$source" "$mutation"
+
+        rc=0
+        env -u SB_APP_DIR "$SB_APP_LINK/sb" upgrade --source "$source" --yes \
+          >"$SB_TEST_OUTPUT_FILE" 2>&1 || rc=$?
+
+        assert "upgrade (${mutation} mutated): returns nonzero" test "$rc" -ne 0
+        assert "upgrade (${mutation} mutated): no upgrade success message" \
+          sh -c "! rg -q 'sb manager upgraded' '$SB_TEST_OUTPUT_FILE'"
+        assert "upgrade (${mutation} mutated): state restored to the pre-upgrade hash" \
+          test "$(sha256sum "$root/data/current/instances.json" | awk '{print $1}')" = "$before_state"
+        assert "upgrade (${mutation} mutated): settings restored to the pre-upgrade hash" \
+          test "$(sha256sum "$root/data/current/settings.json" | awk '{print $1}')" = "$before_settings"
+        assert "upgrade (${mutation} mutated): certificates restored to the pre-upgrade hash" \
+          test "$(find "$root/data/certs" -type f -exec sha256sum {} + | sort |
+            sha256sum | awk '{print $1}')" = "$before_certs"
+        assert "upgrade (${mutation} mutated): generation output passes the fixed core" \
+          "$REAL_CORE" check -c "$root/data/current/output/config.json"
+        assert "upgrade (${mutation} mutated): current link resolves to a valid generation" \
+          test -f "$root/data/current/output/manifest.json"
+        assert "upgrade (${mutation} mutated): restored installation validates" \
+          env -u SB_APP_DIR "$SB_APP_LINK/sb" validate
+        assert "upgrade (${mutation} mutated): app link points at a usable release" \
+          env -u SB_APP_DIR "$SB_APP_LINK/sb" self-check
+        assert "upgrade (${mutation} mutated): all restored files remain mode 0600" sh -c \
+          "! find '$root/data/current' -type f ! -perm 600 | grep -q ."
+        [[ "$before_current" == "$(readlink "$root/data/current")" ]] ||
+          printf '  note: current link legitimately advanced during restore\n'
+    done
+}
+
+# --- HIGH-A: mutator-level state write failure ----------------------------
+#
+# The symlink fault matrix cannot reach this: the failure happens inside the
+# mutator, before any generation is published. The trailing result-file write in
+# mutator_add used to become the function's return status and mask it.
+
+test_mutator_state_write_fault_injection() {
+    local root
+    new_env
+    root="$TEST_ROOT"
+    init_env
+
+    txn_probe add-state-write state-set-write sb add SS --port 28001 --yes
+    assert_publish_failed_cleanly "add with failed state write"
+    assert "add with failed state write: no instance in live state" \
+      jq -e '.instances|length==0' "$root/data/current/instances.json" >/dev/null
+    assert "add with failed state write: no state staging residue" sh -c \
+      "! find '$root/data' -name '*.tmp.*' | grep -q ."
+
+    # The exact scenario the second review reproduced.
+    assert "regression: failed state write never prints instance created" \
+      sh -c "! printf '%s' \"\$1\" | rg -q 'instance created'" _ "$PROBE_OUTPUT"
+    assert "regression: failed state write never prints publish completed" \
+      sh -c "! printf '%s' \"\$1\" | rg -q 'publish completed'" _ "$PROBE_OUTPUT"
+
+    sb add SS --port 28002 --yes >/dev/null
+    txn_probe edit-state-write state-set-write sb edit is01 --port 28003 --yes
+    assert_publish_failed_cleanly "edit with failed state write"
+    txn_probe enable-state-write state-set-write sb disable is01 --yes
+    assert_publish_failed_cleanly "disable with failed state write"
+    txn_probe delete-state-write state-set-write sb delete is01 --yes
+    assert_publish_failed_cleanly "delete with failed state write"
+    assert "delete with failed state write keeps the instance" \
+      jq -e '.instances|length==1' "$root/data/current/instances.json" >/dev/null
+}
+
+# --- HIGH-B / M1 / M2: salvage mode boundaries ----------------------------
+
+test_salvage_mode_boundaries() {
+    local root backup_id newest rc out
+    new_env
+    root="$TEST_ROOT"
+    init_env
+    sb add SS --port 28101 --yes >/dev/null
+
+    # Healthy live data: the pre-publish snapshot must be a validated backup.
+    assert "live installation validates before restore" sb validate
+    backup_id=$(basename "$(sb backup)")
+    out=$(sb restore "$backup_id" --yes 2>&1)
+    newest=$(find "$root/backups" -mindepth 1 -maxdepth 1 -type d -printf '%T@ %f\n' |
+      sort -rn | head -1 | cut -d' ' -f2-)
+    assert "healthy restore does not enter salvage mode" \
+      test "$(jq -r '.salvage' "$root/backups/$newest/metadata.json")" = false
+    assert "healthy restore prints no salvage warning" \
+      sh -c "! printf '%s' \"\$1\" | rg -q 'did not validate'" _ "$out"
+
+    # Live data that fails validation: salvage is the only way the recovery can
+    # proceed. Broken permissions on the live generation make the source invalid
+    # while leaving contents that backup_create normalises to 0600, so the
+    # resulting snapshot is both marked salvage and genuinely restorable — which
+    # is what makes the override path testable end to end.
+    latest_backup() {
+        find "$root/backups" -mindepth 1 -maxdepth 1 -type d -printf '%T@ %f\n' |
+          sort -rn | head -1 | cut -d' ' -f2-
+    }
+
+    chmod 644 "$root/data/current/instances.json"
+    out=$(sb restore "$backup_id" --yes 2>&1) && rc=0 || rc=$?
+    local salvage_restorable
+    salvage_restorable=$(latest_backup)
+    assert "invalid live data enters salvage mode" \
+      test "$(jq -r '.salvage' "$root/backups/$salvage_restorable/metadata.json")" = true
+    assert "invalid live data warns that the snapshot is unvalidated" \
+      sh -c "printf '%s' \"\$1\" | rg -q 'did not validate'" _ "$out"
+    assert "restore still succeeds from invalid live data" test "$rc" -eq 0
+    assert "restored state is valid again" sb validate
+
+    # Now a salvage snapshot whose *contents* are genuinely corrupt.
+    printf 'not json\n' >"$root/data/current/instances.json"
+    out=$(sb restore "$backup_id" --yes 2>&1) && rc=0 || rc=$?
+    local salvage_corrupt
+    salvage_corrupt=$(latest_backup)
+    assert "corrupt live data also enters salvage mode" \
+      test "$(jq -r '.salvage' "$root/backups/$salvage_corrupt/metadata.json")" = true
+    assert "restore from a validated backup repairs corrupt live state" test "$rc" -eq 0
+    assert "repaired live state validates" sb validate
+
+    # M1: a salvage snapshot must not be restorable without an explicit flag.
+    out=$(sb restore "$salvage_restorable" --yes 2>&1) && rc=0 || rc=$?
+    assert "salvage snapshot restore is refused by default" test "$rc" -ne 0
+    assert "salvage refusal explains the risk" \
+      sh -c "printf '%s' \"\$1\" | rg -q 'unvalidated salvage snapshot and is refused'" _ "$out"
+    assert "salvage refusal names the override flag" \
+      sh -c "printf '%s' \"\$1\" | rg -q 'restore-unvalidated-salvage'" _ "$out"
+    assert "default salvage refusal is not a generic invalid-backup error" \
+      sh -c "! printf '%s' \"\$1\" | rg -q '^ERROR: invalid backup'" _ "$out"
+
+    out=$(sb restore "$salvage_restorable" --restore-unvalidated-salvage --yes 2>&1) &&
+      rc=0 || rc=$?
+    assert "salvage snapshot with sound contents restores under the override" test "$rc" -eq 0
+    assert "salvage override emits an unmistakable warning" \
+      sh -c "printf '%s' \"\$1\" | rg -q 'DANGEROUS: restoring an UNVALIDATED salvage snapshot'" _ "$out"
+    assert "salvage restore is recorded in the publish status" \
+      jq -e '.last_publish.description | test("UNVALIDATED salvage snapshot")' \
+      "$root/data/status.json" >/dev/null
+
+    # The override is an acknowledgement, not a bypass: content validation still
+    # refuses a snapshot that is actually corrupt.
+    out=$(sb restore "$salvage_corrupt" --restore-unvalidated-salvage --yes 2>&1) &&
+      rc=0 || rc=$?
+    assert "override does not bypass validation of genuinely corrupt contents" \
+      test "$rc" -ne 0
+    assert "corrupt salvage restore leaves the live state valid" sb validate
+
+    # M-3.2: the acknowledgement is per-invocation. An inherited or exported
+    # value must not authorise a restore, or one deliberate recovery would
+    # silently authorise every later salvage restore in the session.
+    out=$(SB_ALLOW_SALVAGE_RESTORE=true sb restore "$salvage_restorable" --yes 2>&1) &&
+      rc=0 || rc=$?
+    assert "an inherited acknowledgement does not authorise a salvage restore" \
+      test "$rc" -ne 0
+    assert "an inherited acknowledgement still produces the refusal message" \
+      sh -c "printf '%s' \"\$1\" | rg -q 'unvalidated salvage snapshot and is refused'" _ "$out"
+    assert "an inherited acknowledgement prints no DANGEROUS warning" \
+      sh -c "! printf '%s' \"\$1\" | rg -q 'DANGEROUS'" _ "$out"
+
+    # The same must hold across a process boundary, including the internal
+    # `sb restore` that upgrade_rollback spawns.
+    out=$(SB_ALLOW_SALVAGE_RESTORE=true env bash -c \
+      "'$APP_DIR/sb' restore '$salvage_restorable' --yes" 2>&1) && rc=0 || rc=$?
+    assert "an exported acknowledgement does not reach a child sb process" \
+      test "$rc" -ne 0
+
+    # Typing the flag on this invocation still works.
+    out=$(sb restore "$salvage_restorable" --restore-unvalidated-salvage --yes 2>&1) &&
+      rc=0 || rc=$?
+    assert "the explicit flag still authorises the invocation that types it" test "$rc" -eq 0
+
+    # M2: the environment must not be able to turn salvage on.
+    new_env
+    root="$TEST_ROOT"
+    init_env
+    SB_TXN_SALVAGE_BACKUP=true sb add SS --port 28102 --yes >/dev/null
+    newest=$(find "$root/backups" -mindepth 1 -maxdepth 1 -type d -printf '%T@ %f\n' |
+      sort -rn | head -1 | cut -d' ' -f2-)
+    assert "SB_TXN_SALVAGE_BACKUP from the environment cannot enable salvage" \
+      test "$(jq -r '.salvage' "$root/backups/$newest/metadata.json")" = false
+    SB_TXN_SALVAGE_BACKUP=true sb backup >/dev/null
+    newest=$(find "$root/backups" -mindepth 1 -maxdepth 1 -type d -printf '%T@ %f\n' |
+      sort -rn | head -1 | cut -d' ' -f2-)
+    assert "SB_TXN_SALVAGE_BACKUP cannot weaken an explicit sb backup" \
+      test "$(jq -r '.salvage' "$root/backups/$newest/metadata.json")" = false
+}
+
+# --- HIGH-C: the unrecoverable exit code must survive every caller --------
+
+test_unrecoverable_code_reaches_the_cli() {
+    local root backup_id rc out
+    new_env
+    root="$TEST_ROOT"
+    init_env
+    sb add HY2 --port 28201 --sni hy.example.com --tls-mode self-signed \
+      --masquerade https://hy.example.com --no-hop --yes >/dev/null
+    backup_id=$(basename "$(sb backup)")
+    touch "$root/runtime/fail-restart"
+    out=$(SB_TEST_FAULTS=current-rollback-create sb restore "$backup_id" --yes 2>&1) &&
+      rc=0 || rc=$?
+    assert "sb restore surfaces the unrecoverable code at the CLI boundary" \
+      test "$rc" -eq 70
+    assert "sb restore reports the link restore failure" \
+      sh -c "printf '%s' \"\$1\" | rg -q 'current generation link could not be restored'" _ "$out"
+    assert "sb restore leaves the certificate directory alone after that failure" \
+      sh -c "printf '%s' \"\$1\" | rg -q 'leaving the certificate directory untouched'" _ "$out"
+    assert "sb restore retains the pre-restore certificates" \
+      sh -c "find '$root/data' -maxdepth 1 -name '.cert-before-restore.*' | grep -q ."
+    rm -f "$root/runtime/fail-restart"
+
+    # core upgrade must not flatten core_switch's 70 either.
+    new_env
+    root="$TEST_ROOT"
+    init_env
+    out=$(SB_TEST_FAULTS="core-post-switch-verify:core-backup-restore" \
+      sb core upgrade --yes 2>&1) && rc=0 || rc=$?
+    assert "sb core upgrade surfaces the unrecoverable code at the CLI boundary" \
+      test "$rc" -eq 70
+
+    # sb install reaches core_switch through core_install, which is a separate
+    # call site from `sb core upgrade` and used to flatten the code to 1.
+    new_env
+    root="$TEST_ROOT"
+    init_env
+    # Break the receipt digest so core_validate_installed fails while the version
+    # still matches: core_install then proceeds into core_switch instead of
+    # short-circuiting on "already installed".
+    jq '.binary_sha256="0000000000000000000000000000000000000000000000000000000000000000"' \
+      "$root/data/core.json" >"$root/data/core.json.tmp"
+    mv "$root/data/core.json.tmp" "$root/data/core.json"
+    out=$(SB_TEST_FAULTS="core-post-switch-verify:core-backup-restore" \
+      sb install --endpoint node.example.com --yes 2>&1) && rc=0 || rc=$?
+    assert "sb install surfaces the unrecoverable code at the CLI boundary" \
+      test "$rc" -eq 70
+    assert "sb install reports the core rollback failure" \
+      sh -c "printf '%s' \"\$1\" | rg -q 'previous sing-box binary could not be restored'" _ "$out"
+    assert "sb install prints no initialization success message" \
+      sh -c "! printf '%s' \"\$1\" | rg -q 'sb manager initialization verified'" _ "$out"
+}
+
+# --- HIGH-D: named recovery artifacts must outlive the process ------------
+
+test_recovery_artifacts_survive_exit() {
+    local root out rc artifact
+    new_env
+    root="$TEST_ROOT"
+    init_env
+    out=$(SB_TEST_FAULTS="core-post-switch-verify:core-backup-restore" \
+      sb core upgrade --yes 2>&1) && rc=0 || rc=$?
+    assert "core_switch rollback failure is unrecoverable" test "$rc" -eq 70
+    artifact=$(rg -o '/[^ ]*\.sing-box\.backup\.[A-Za-z0-9]+' <<<"$out" | head -1)
+    assert "core_switch names the retained old binary" test -n "$artifact"
+    assert "core_switch's named old binary still exists after exit" test -f "$artifact"
+
+    new_env
+    root="$TEST_ROOT"
+    init_env
+    sb add SS --port 28301 --yes >/dev/null
+    touch "$root/runtime/fail-restart"
+    out=$(SB_TEST_FAULTS="core-upgrade-restore" sb core upgrade --yes 2>&1) && rc=0 || rc=$?
+    assert "core_upgrade rollback failure is unrecoverable" test "$rc" -eq 70
+    artifact=$(rg -o '/[^ ]*\.sing-box\.restore\.[A-Za-z0-9]+' <<<"$out" | head -1)
+    assert "core_upgrade names the staged old binary" test -n "$artifact"
+    assert "core_upgrade's named staged binary still exists after exit" test -f "$artifact"
+
+    # A retained generation is only useful together with its certificate material.
+    new_env
+    root="$TEST_ROOT"
+    init_env
+    sb add HY2 --port 28302 --sni hy.example.com --tls-mode self-signed \
+      --masquerade https://hy.example.com --no-hop --yes >/dev/null
+    touch "$root/runtime/fail-restart"
+    out=$(sb edit is01 --port 28303 --yes 2>&1) && rc=0 || rc=$?
+    assert "service restore failure returns nonzero" test "$rc" -ne 0
+    if rg -q 'rejected generation is retained' <<<"$out"; then
+        artifact=$(rg -o '/[^ ]*/generations/[A-Za-z0-9-]+' <<<"$out" | head -1)
+        assert "the retained generation still exists after exit" test -d "$artifact"
+        assert "the retained generation keeps its certificate material" \
+          sh -c "find '$root/data/certs' -name '*.pem' | grep -q ."
+    fi
+}
+
+# --- M3 / M4 -------------------------------------------------------------
+
+test_ipv4_leading_zero_rejection() {
+    local root address rc out
+    new_env
+    root="$TEST_ROOT"
+    init_env
+    # Ambiguous octal/decimal literals must never reach settings: the value that
+    # would be validated is a different address from the one clients dial.
+    for address in 010.0.0.1 0100.64.0.1 08.0.0.1 09.0.0.1 00.0.0.1 172.016.0.1; do
+        out=$(sb endpoint set "$address" --yes 2>&1) && rc=0 || rc=$?
+        assert "leading-zero literal rejected: $address" test "$rc" -ne 0
+        assert "leading-zero literal leaks no raw shell error: $address" \
+          sh -c "! printf '%s' \"\$1\" | rg -q 'value too great for base'" _ "$out"
+    done
+    assert "leading-zero rejections never reach live settings" \
+      test "$(jq -r '.endpoint.value' "$root/data/current/settings.json")" = node.example.com
+    sb endpoint set 8.8.8.8 --yes >/dev/null
+    assert "canonical IPv4 endpoints still work" \
+      test "$(jq -r '.endpoint.value' "$root/data/current/settings.json")" = 8.8.8.8
+    assert "all-numeric final label is not a hostname" sh -c \
+      "! bash -c 'source \"\$1/core/common.sh\"; domain_valid 010.0.0.1' _ '$APP_DIR'"
+}
+
+test_doctor_drift_check_without_proc_access() {
+    local root
+    new_env
+    root="$TEST_ROOT"
+    init_env
+    sb add SS --port 28401 --yes >/dev/null
+    # Report a MainPID whose /proc entry cannot be read. That is missing
+    # information, not evidence of drift, and must not fail a healthy install.
+    printf '99999\n' >"$root/runtime/observed-mainpid"
+    assert "unobservable loaded generation is reported as info, not a failure" sh -c \
+      "'$APP_DIR/sb' doctor --json 2>/dev/null | jq -e '.results[]|select(.name==\"generation_drift\")|.status==\"info\"' >/dev/null"
+    rm -f "$root/runtime/observed-mainpid"
+}
+
+test_errexit_audit_guard() {
+    assert "no safety-critical command relies on implicit errexit" \
+      "$APP_DIR/tests/errexit-audit.sh"
+}
+
 TESTS=(
     test_all_protocols
     test_conflicts_and_check_failure
@@ -1216,6 +2051,21 @@ TESTS=(
     test_existing_data_validation
     test_zero_node_reboot_policy
     test_sensitive_logging_and_permissions
+    test_transaction_publish_fault_injection
+    test_transaction_rollback_fault_injection
+    test_transaction_fault_across_operations
+    test_manager_app_switch_fault_injection
+    test_command_link_conflicts
+    test_upgrade_data_rollback
+    test_listener_expected_observed_divergence
+    test_endpoint_special_purpose_matrix
+    test_mutator_state_write_fault_injection
+    test_salvage_mode_boundaries
+    test_unrecoverable_code_reaches_the_cli
+    test_recovery_artifacts_survive_exit
+    test_ipv4_leading_zero_rejection
+    test_doctor_drift_check_without_proc_access
+    test_errexit_audit_guard
     test_real_uri_parsers_and_hysteria_tls
 )
 for test_name in "${TESTS[@]}"; do

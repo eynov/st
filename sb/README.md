@@ -7,8 +7,9 @@
 本项目不绑定云厂商、控制面板、fwctl 或任何防火墙实现。它只输出端口需求及
 nftables/iptables 示例，绝不默认执行防火墙命令。
 
-> 当前状态：**Repository Production Candidate — Not Production Ready**。最新独立
-> 复审仍有两个 High 阻断项；请先阅读
+> 当前状态：**Repository Production Candidate — Not Production Ready**。三轮独立只读复审
+> 提出的全部阻断项均已修复（当前 Critical 0 / High 0 / Medium 0 阻断），但真实 systemd
+> 验收尚未完成，仍有非阻断项开放。请先阅读
 > [AI 交接状态](docs/AI_HANDOFF.md)，不要直接用于生产环境。
 
 ## 支持范围
@@ -95,8 +96,12 @@ sb restore <backup-id>
 ```
 
 `sb restore` 恢复 settings、state、generation 和证书数据；app、systemd unit 与
-sing-box 核心不属于数据恢复范围。完整语义与 rollback 边界见
-[运维文档](docs/OPERATIONS.md)。
+sing-box 核心不属于数据恢复范围。
+
+`sb upgrade` 在应用切换之后失败时，会先恢复 app 链接与 systemd unit，再由恢复后的旧
+manager 用升级前备份完整恢复 settings、state、generation、证书与输出，并重新校验。若
+恢复本身失败，命令以退出码 `70` 报告不可自动恢复，并保留全部恢复材料。完整语义与
+rollback 边界见 [运维文档](docs/OPERATIONS.md)。
 
 ## TLS
 

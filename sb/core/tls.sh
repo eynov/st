@@ -34,7 +34,10 @@ tls_generate_self_signed() {
         err "self-signed certificate generation failed"
         return 1
     fi
-    chmod 600 "$key" "$cert"
+    chmod 600 "$key" "$cert" || {
+        rm -rf -- "$cert_dir"
+        return 1
+    }
     openssl x509 -in "$cert" -noout -checkend 86400 >/dev/null || {
         rm -rf -- "$cert_dir"
         err "generated certificate validation failed"
@@ -125,11 +128,11 @@ tls_from_options() {
         return 1
     fi
     managed_dir="${SB_CERT_DIR}/${id}/$(date -u '+%Y%m%dT%H%M%S')-$(openssl rand -hex 4)"
-    safe_mkdir "$managed_dir"
+    safe_mkdir "$managed_dir" || return 1
     [[ -n "${SB_TXN_CREATED_PATHS:-}" ]] && printf '%s\n' "$managed_dir" >>"$SB_TXN_CREATED_PATHS"
-    cp -- "$cert" "$managed_dir/certificate.pem"
-    cp -- "$key" "$managed_dir/private-key.pem"
-    chmod 600 "$managed_dir/certificate.pem" "$managed_dir/private-key.pem"
+    cp -- "$cert" "$managed_dir/certificate.pem" || return 1
+    cp -- "$key" "$managed_dir/private-key.pem" || return 1
+    chmod 600 "$managed_dir/certificate.pem" "$managed_dir/private-key.pem" || return 1
     cert="$managed_dir/certificate.pem"
     key="$managed_dir/private-key.pem"
     pin=$(tls_public_key_pin "$cert") || return 1

@@ -53,7 +53,7 @@ settings_migrate_file() {
         settings_validate_file "$file"
         return
     }
-    tmp=$(mktemp "${file}.tmp.XXXXXX")
+    tmp=$(mktemp "${file}.tmp.XXXXXX") || return 1
     if ! jq --argjson schema "$SB_SETTINGS_SCHEMA_VERSION" --arg updated_at "$(now_iso)" '
       if .schema_version == 1 then
         .schema_version=$schema
@@ -63,20 +63,20 @@ settings_migrate_file() {
         rm -f -- "$tmp"
         return 1
     fi
-    chmod 600 "$tmp"
-    mv -fT -- "$tmp" "$file"
+    chmod 600 "$tmp" || { rm -f -- "$tmp"; return 1; }
+    mv -fT -- "$tmp" "$file" || { rm -f -- "$tmp"; return 1; }
     settings_validate_file "$file"
 }
 
 settings_bootstrap_prepare() {
-    safe_mkdir "$SB_CONFIG_DIR"
+    safe_mkdir "$SB_CONFIG_DIR" || return 1
     if [[ -f "$SB_SETTINGS_BOOTSTRAP" ]]; then
         settings_migrate_file "$SB_SETTINGS_BOOTSTRAP"
         return
     fi
     if [[ -e "$SB_SETTINGS_LINK" && ! -L "$SB_SETTINGS_LINK" ]]; then
         cp -- "$SB_SETTINGS_LINK" "$SB_SETTINGS_BOOTSTRAP" || return 1
-        chmod 600 "$SB_SETTINGS_BOOTSTRAP"
+        chmod 600 "$SB_SETTINGS_BOOTSTRAP" || return 1
         settings_migrate_file "$SB_SETTINGS_BOOTSTRAP"
         return
     fi
@@ -91,7 +91,11 @@ settings_link_publish() {
         mv -- "$SB_SETTINGS_LINK" "${SB_CONFIG_DIR}/settings.pre-generation.$(date -u +%Y%m%dT%H%M%SZ)" ||
             return 1
     fi
-    mv -fT -- "$temp" "$SB_SETTINGS_LINK"
+    mv -fT -- "$temp" "$SB_SETTINGS_LINK" || {
+        err "failed to publish the settings compatibility symlink"
+        rm -f -- "$temp"
+        return 1
+    }
 }
 
 settings_validate() {
@@ -105,15 +109,15 @@ listen_set_file() {
         ipv4) address="0.0.0.0" ;;
         *) err "listen mode must be dual, ipv4, or ipv6"; return 1 ;;
     esac
-    tmp=$(mktemp "${file}.tmp.XXXXXX")
+    tmp=$(mktemp "${file}.tmp.XXXXXX") || return 1
     if ! jq --arg mode "$mode" --arg address "$address" --arg updated_at "$(now_iso)" '
       .listen={mode:$mode,address:$address,updated_at:$updated_at}
     ' "$file" >"$tmp"; then
         rm -f -- "$tmp"
         return 1
     fi
-    chmod 600 "$tmp"
-    mv -fT -- "$tmp" "$file"
+    chmod 600 "$tmp" || { rm -f -- "$tmp"; return 1; }
+    mv -fT -- "$tmp" "$file" || { rm -f -- "$tmp"; return 1; }
     settings_validate_file "$file"
 }
 
@@ -123,7 +127,7 @@ listen_set() {
 
 listen_address_get() {
     local file="${1:-${SB_RENDER_SETTINGS_FILE:-$SB_SETTINGS_FILE}}"
-    settings_validate_file "$file"
+    settings_validate_file "$file" || return 1
     jq -er '.listen.address' "$file"
 }
 
@@ -133,6 +137,14 @@ endpoint_validate_value() {
         err "invalid endpoint or non-global address not explicitly allowed: $value"
         return 1
     }
+    # The override is a separate explicit flag; --yes never implies it. State the
+    # risk every time it actually suppresses a rejection.
+    if [[ "$allow_nonpublic" == "true" ]] &&
+      { { ipv4_valid "$value" && ipv4_nonpublic "$value"; } ||
+        { ipv6_valid "$value" && ipv6_nonpublic "$value"; }; }; then
+        warn "endpoint ${value} is a special-purpose address accepted only because"
+        warn "--allow-private-endpoint was given; clients outside this network cannot reach it"
+    fi
     if domain_valid "$value"; then
         endpoint_domain_resolves_global "$value" "$allow_nonpublic"
     fi
@@ -160,7 +172,7 @@ endpoint_set_file() {
     elif ipv6_valid "$value"; then mode="ipv6"
     else mode="domain"
     fi
-    tmp=$(mktemp "${file}.tmp.XXXXXX")
+    tmp=$(mktemp "${file}.tmp.XXXXXX") || return 1
     if ! jq --arg mode "$mode" --arg value "$value" \
       --argjson allow_private "$allow_private" --arg updated_at "$(now_iso)" '
       .endpoint={mode:$mode,value:$value,allow_private:$allow_private,
@@ -169,8 +181,8 @@ endpoint_set_file() {
         rm -f -- "$tmp"
         return 1
     fi
-    chmod 600 "$tmp"
-    mv -fT -- "$tmp" "$file"
+    chmod 600 "$tmp" || { rm -f -- "$tmp"; return 1; }
+    mv -fT -- "$tmp" "$file" || { rm -f -- "$tmp"; return 1; }
     settings_validate_file "$file"
 }
 
@@ -185,9 +197,9 @@ endpoint_detect_file() {
         err "public endpoint detection failed; no interface-address fallback was written"
         return 1
     }
-    endpoint_set_file "$file" "$value" false
+    endpoint_set_file "$file" "$value" false || return 1
     local tmp
-    tmp=$(mktemp "${file}.tmp.XXXXXX")
+    tmp=$(mktemp "${file}.tmp.XXXXXX") || return 1
     if ! jq --arg updated_at "$(now_iso)" '
       .endpoint.mode="detected" | .endpoint.source="api.ipify.org" |
       .endpoint.updated_at=$updated_at
@@ -195,8 +207,8 @@ endpoint_detect_file() {
         rm -f -- "$tmp"
         return 1
     fi
-    chmod 600 "$tmp"
-    mv -fT -- "$tmp" "$file"
+    chmod 600 "$tmp" || { rm -f -- "$tmp"; return 1; }
+    mv -fT -- "$tmp" "$file" || { rm -f -- "$tmp"; return 1; }
     settings_validate_file "$file" || return 1
     printf '%s\n' "$value"
 }

@@ -141,17 +141,29 @@ state_get_file() {
     jq -ec --arg id "$id" '.instances[$id] // error("instance not found")' "$file"
 }
 
+# Staging template for state writes. In test mode the `state-set-write` fault
+# redirects it into a directory that does not exist so mktemp(1) fails with a
+# real ENOENT, exercising the mutator-level failure path.
+state_tmp_template() {
+    local file="$1"
+    if fault_armed state-set-write; then
+        printf '%s/.sb-fault-missing/state.tmp.XXXXXX\n' "${file%/*}"
+    else
+        printf '%s.tmp.XXXXXX\n' "$file"
+    fi
+}
+
 state_set_file() {
     local file="$1" id="$2" payload="$3" tmp
-    tmp=$(mktemp "${file}.tmp.XXXXXX")
+    tmp=$(mktemp "$(state_tmp_template "$file")") || return 1
     if jq --arg id "$id" --argjson value "$payload" \
         --arg project_version "$SB_PROJECT_VERSION" \
         --arg updated_at "$(now_iso)" \
         '.instances[$id] = $value
          | .project_version = $project_version
          | .updated_at = $updated_at' "$file" >"$tmp"; then
-        chmod 600 "$tmp"
-        mv -fT "$tmp" "$file"
+        chmod 600 "$tmp" || { rm -f -- "$tmp"; return 1; }
+        mv -fT "$tmp" "$file" || { rm -f -- "$tmp"; return 1; }
     else
         rm -f "$tmp"
         return 1
@@ -164,11 +176,11 @@ state_delete_file() {
         err "instance not found: $id"
         return 1
     }
-    tmp=$(mktemp "${file}.tmp.XXXXXX")
+    tmp=$(mktemp "$(state_tmp_template "$file")") || return 1
     if jq --arg id "$id" --arg updated_at "$(now_iso)" \
         'del(.instances[$id]) | .updated_at = $updated_at' "$file" >"$tmp"; then
-        chmod 600 "$tmp"
-        mv -fT "$tmp" "$file"
+        chmod 600 "$tmp" || { rm -f -- "$tmp"; return 1; }
+        mv -fT "$tmp" "$file" || { rm -f -- "$tmp"; return 1; }
     else
         rm -f "$tmp"
         return 1
@@ -181,13 +193,13 @@ state_patch_file() {
         err "instance not found: $id"
         return 1
     }
-    tmp=$(mktemp "${file}.tmp.XXXXXX")
+    tmp=$(mktemp "$(state_tmp_template "$file")") || return 1
     if jq --arg id "$id" --argjson patch "$patch" --arg updated_at "$(now_iso)" \
         '.instances[$id] = (.instances[$id] * $patch)
          | .instances[$id].updated_at = $updated_at
          | .updated_at = $updated_at' "$file" >"$tmp"; then
-        chmod 600 "$tmp"
-        mv -fT "$tmp" "$file"
+        chmod 600 "$tmp" || { rm -f -- "$tmp"; return 1; }
+        mv -fT "$tmp" "$file" || { rm -f -- "$tmp"; return 1; }
     else
         rm -f "$tmp"
         return 1

@@ -41,10 +41,14 @@ while (($#)); do
         --yes|-y) SB_YES=true; shift ;;
         --dry-run) SB_DRY_RUN=true; shift ;;
         --show-secrets) SB_SHOW_SECRETS=true; shift ;;
+        --restore-unvalidated-salvage) SB_ALLOW_SALVAGE_RESTORE=true; shift ;;
         *) ARGS+=("$1"); shift ;;
     esac
 done
 set -- "${ARGS[@]}"
+# SB_ALLOW_SALVAGE_RESTORE is deliberately absent: it must not reach a child sb
+# process. common.sh resets it on every invocation, so the acknowledgement has to
+# be typed again for each restore that needs it.
 export SB_JSON SB_YES SB_DRY_RUN SB_SHOW_SECRETS
 
 require_layout() {
@@ -245,14 +249,21 @@ options_complete_add() {
     esac
 }
 
+# Mutators run from a conditional context inside transaction_run, so errexit is
+# disabled inside them. Every state write must be checked explicitly, and the
+# function must end on a statement whose status means "the mutation succeeded" —
+# a trailing bookkeeping command must never become the return value.
 mutator_add() {
     local state="$1" protocol="$2" options="$3" id meta fn
-    id=$(state_next_id_file "$state")
+    id=$(state_next_id_file "$state") || return 1
     fn="${PROTO_CREATE[$protocol]}"
     meta=$("$fn" "$id" "$options") || return 1
     "${PROTO_VALIDATE[$protocol]}" "$meta" || return 1
-    state_set_file "$state" "$id" "$meta"
-    [[ -n "${SB_TXN_RESULT_FILE:-}" ]] && printf '%s\n' "$id" >"$SB_TXN_RESULT_FILE"
+    state_set_file "$state" "$id" "$meta" || return 1
+    if [[ -n "${SB_TXN_RESULT_FILE:-}" ]]; then
+        printf '%s\n' "$id" >"$SB_TXN_RESULT_FILE" || return 1
+    fi
+    return 0
 }
 
 mutator_edit() {
@@ -261,11 +272,13 @@ mutator_edit() {
     protocol=$(jq -r '.protocol' <<<"$meta")
     fn="${PROTO_EDIT[$protocol]}"
     updated=$("$fn" "$meta" "$options") || return 1
-    state_set_file "$state" "$id" "$updated"
+    state_set_file "$state" "$id" "$updated" || return 1
+    return 0
 }
 
 mutator_delete() {
-    state_delete_file "$1" "$2"
+    state_delete_file "$1" "$2" || return 1
+    return 0
 }
 
 mutator_enabled() {
@@ -275,7 +288,8 @@ mutator_enabled() {
       (if $acknowledge then
         {hop:{acknowledged:true,confirmation_required:false}}
        else {} end)')
-    state_patch_file "$state" "$id" "$patch"
+    state_patch_file "$state" "$id" "$patch" || return 1
+    return 0
 }
 
 mutator_noop() {
@@ -285,15 +299,17 @@ mutator_noop() {
 mutator_endpoint_settings() {
     local _state="$1" action="$2" value="${3:-}" allow_private="${4:-false}"
     if [[ "$action" == "set" ]]; then
-        endpoint_set_file "$SB_TXN_SETTINGS_FILE" "$value" "$allow_private"
+        endpoint_set_file "$SB_TXN_SETTINGS_FILE" "$value" "$allow_private" || return 1
     else
-        endpoint_detect_file "$SB_TXN_SETTINGS_FILE" >/dev/null
+        endpoint_detect_file "$SB_TXN_SETTINGS_FILE" >/dev/null || return 1
     fi
+    return 0
 }
 
 mutator_listen_settings() {
     local _state="$1" mode="$2"
-    listen_set_file "$SB_TXN_SETTINGS_FILE" "$mode"
+    listen_set_file "$SB_TXN_SETTINGS_FILE" "$mode" || return 1
+    return 0
 }
 
 mutator_install_settings() {
@@ -302,17 +318,21 @@ mutator_install_settings() {
         endpoint_set_file "$SB_TXN_SETTINGS_FILE" "$endpoint" "$allow_private" ||
         return 1
     [[ -z "$listen_mode" ]] ||
-        listen_set_file "$SB_TXN_SETTINGS_FILE" "$listen_mode"
+        listen_set_file "$SB_TXN_SETTINGS_FILE" "$listen_mode" || return 1
+    return 0
 }
 
 mutator_restore() {
     local state="$1" backup_state="$2" backup_settings="$3"
-    cp -- "$backup_state" "${state}.restore"
-    chmod 600 "${state}.restore"
-    mv -fT "${state}.restore" "$state"
-    cp -- "$backup_settings" "${SB_TXN_SETTINGS_FILE}.restore"
-    chmod 600 "${SB_TXN_SETTINGS_FILE}.restore"
-    mv -fT "${SB_TXN_SETTINGS_FILE}.restore" "$SB_TXN_SETTINGS_FILE"
+    cp -- "$backup_state" "${state}.restore" || return 1
+    chmod 600 "${state}.restore" || { rm -f -- "${state}.restore"; return 1; }
+    mv -fT "${state}.restore" "$state" || { rm -f -- "${state}.restore"; return 1; }
+    cp -- "$backup_settings" "${SB_TXN_SETTINGS_FILE}.restore" || return 1
+    chmod 600 "${SB_TXN_SETTINGS_FILE}.restore" ||
+        { rm -f -- "${SB_TXN_SETTINGS_FILE}.restore"; return 1; }
+    mv -fT "${SB_TXN_SETTINGS_FILE}.restore" "$SB_TXN_SETTINGS_FILE" ||
+        { rm -f -- "${SB_TXN_SETTINGS_FILE}.restore"; return 1; }
+    return 0
 }
 
 show_hy2_notice() {
@@ -358,7 +378,7 @@ cmd_install() {
             *) err "unknown install option: $1"; return 64 ;;
         esac
     done
-    core_install || return 1
+    core_install || return $?
     layout_prepare || return 1
     [[ -L "$SB_CURRENT_LINK" ]] && had_layout=true
     if [[ "$had_layout" == "false" ]]; then
@@ -383,10 +403,10 @@ cmd_install() {
         if [[ "$settings_changed" == "true" ]]; then
             transaction_run "install settings update and output regeneration" \
               mutator_install_settings "$endpoint" "$allow_private" "$listen_mode" ||
-              return 1
+              return $?
         else
             transaction_run "install validation and output regeneration" \
-              mutator_noop || return 1
+              mutator_noop || return $?
         fi
     fi
     runtime_validate_generation "$(readlink -f "$SB_CURRENT_LINK")" true || return 1
@@ -466,7 +486,7 @@ cmd_edit() {
     if [[ "$SB_DRY_RUN" != "true" ]]; then
         confirm "Edit instance $id and reload all enabled nodes" || return 1
     fi
-    transaction_run "edit $id" mutator_edit "$id" "$options"
+    transaction_run "edit $id" mutator_edit "$id" "$options" || return $?
     if [[ "$SB_JSON" == "true" ]]; then
         jq -n --arg id "$id" '{result:"success",id:$id}'
     elif [[ "$protocol" == "HY2" ]]; then
@@ -479,7 +499,7 @@ cmd_delete() {
     local id="$1"
     state_get_file "$SB_CURRENT_STATE" "$id" >/dev/null || return 1
     confirm "Delete instance $id" || return 1
-    transaction_run "delete $id" mutator_delete "$id"
+    transaction_run "delete $id" mutator_delete "$id" || return $?
     if [[ "$SB_JSON" == "true" ]]; then
         jq -n --arg id "$id" '{result:"success",id:$id}'
     fi
@@ -515,7 +535,7 @@ cmd_enabled() {
         confirm "Disable instance $id" || return 1
     fi
     transaction_run "$([[ "$value" == "true" ]] && printf enable || printf disable) $id" \
-      mutator_enabled "$id" "$value" "$acknowledge"
+      mutator_enabled "$id" "$value" "$acknowledge" || return $?
     if [[ "$SB_JSON" == "true" ]]; then
         jq -n --arg id "$id" --argjson enabled "$value" \
             '{result:"success",id:$id,enabled:$enabled}'
@@ -630,35 +650,107 @@ cmd_output() {
     "$fn" "$meta" "$endpoint"
 }
 
+# Restore the systemd unit captured in a pre-upgrade backup.
+upgrade_restore_unit() {
+    local backup_dir="$1"
+    [[ -f "$backup_dir/sb-core.service" ]] || return 0
+    cp -- "$backup_dir/sb-core.service" "${SB_SERVICE_FILE}.restore" || return 1
+    chmod 644 "${SB_SERVICE_FILE}.restore" || {
+        rm -f -- "${SB_SERVICE_FILE}.restore"
+        return 1
+    }
+    mv -fT -- "${SB_SERVICE_FILE}.restore" "$SB_SERVICE_FILE" || {
+        rm -f -- "${SB_SERVICE_FILE}.restore"
+        return 1
+    }
+    "$SB_SYSTEMCTL" daemon-reload || return 1
+}
+
+# Roll a failed upgrade all the way back.
+#
+# Order matters. The application link and unit are restored first so that the
+# *old* manager, with the schema it understands, is the code that performs the
+# data restore. Restoring data first would briefly expose half-restored data to
+# the new manager, and restoring the link last would have the old manager read
+# data a newer schema had already migrated.
+upgrade_rollback() {
+    local backup_dir="$1" previous_app_link="$2" new_release="$3" reason="$4"
+    local backup_id failed=false
+    err "$reason"
+
+    if [[ -n "$previous_app_link" ]]; then
+        if ! symlink_switch "$previous_app_link" "$SB_APP_LINK" \
+          "${SB_INSTALL_ROOT}/.app.upgrade-rollback.$$" upgrade-app-rollback; then
+            err "CRITICAL: the application link could not be restored"
+            err "manual recovery: point ${SB_APP_LINK} at ${previous_app_link}"
+            err "pre-upgrade backup retained at: ${backup_dir}"
+            return "$SB_EX_UNRECOVERABLE"
+        fi
+    fi
+    upgrade_restore_unit "$backup_dir" || {
+        err "CRITICAL: the systemd unit could not be restored from ${backup_dir}"
+        return "$SB_EX_UNRECOVERABLE"
+    }
+
+    # Data restore, performed by the now-restored old manager.
+    backup_id=$(basename -- "$backup_dir")
+    if ! env -u SB_APP_DIR "$SB_APP_LINK/sb" restore "$backup_id" --yes; then
+        err "CRITICAL: settings, state, generation or certificates were not restored"
+        err "manual recovery: run 'sb restore ${backup_id}' once the cause is fixed"
+        err "pre-upgrade backup retained at: ${backup_dir}"
+        return "$SB_EX_UNRECOVERABLE"
+    fi
+
+    # Re-verify the restored installation with the old manager.
+    env -u SB_APP_DIR "$SB_APP_LINK/sb" validate >/dev/null || failed=true
+    env -u SB_APP_DIR "$SB_APP_LINK/sb" doctor >/dev/null || failed=true
+    if [[ "$failed" == "true" ]]; then
+        err "CRITICAL: the restored installation did not pass post-rollback verification"
+        err "pre-upgrade backup retained at: ${backup_dir}"
+        return "$SB_EX_UNRECOVERABLE"
+    fi
+
+    [[ -z "$new_release" ]] || rm -rf -- "$new_release"
+    err "manager upgrade rolled back; application, unit and data restored"
+    return 1
+}
+
 cmd_upgrade() {
     [[ "${1:-}" == "--source" && -n "${2:-}" ]] || {
         err "usage: sb upgrade --source DIR"
         return 64
     }
     confirm "Upgrade the sb manager application" || return 1
-    local previous_app_link="" upgrade_backup new_release=""
+    local source_dir previous_app_link="" upgrade_backup new_release="" rc
+    source_dir=$(cd "$2" && pwd) || return 1
     [[ -L "$SB_APP_LINK" ]] && previous_app_link=$(readlink "$SB_APP_LINK")
+
+    # Stage 1 - data backup. Nothing has been modified yet, so a failure here
+    # needs no rollback.
     upgrade_backup=$(backup_create "pre-manager-upgrade" true true) || return 1
-    manager_install_source "$(cd "$2" && pwd)" || return 1
+    info "upgrade backup: $upgrade_backup"
+
+    # Stage 2 - application switch. manager_install_source restores the previous
+    # app link itself and never touches settings, state, generations or certs,
+    # so a failure here also needs no data rollback.
+    manager_install_source "$source_dir" || return $?
     new_release="${SB_MANAGER_INSTALLED_RELEASE:-}"
-    if ! env -u SB_APP_DIR "$SB_APP_LINK/sb" install --yes; then
-        if [[ -n "$previous_app_link" ]]; then
-            ln -s "$previous_app_link" "${SB_INSTALL_ROOT}/.app.upgrade-rollback.$$"
-            mv -fT "${SB_INSTALL_ROOT}/.app.upgrade-rollback.$$" "$SB_APP_LINK"
-        fi
-        if [[ -f "$upgrade_backup/sb-core.service" ]]; then
-            cp -- "$upgrade_backup/sb-core.service" "$SB_SERVICE_FILE"
-            chmod 644 "$SB_SERVICE_FILE"
-            "$SB_SYSTEMCTL" daemon-reload || true
-        fi
-        [[ -z "$new_release" ]] || rm -rf -- "$new_release"
-        err "manager upgrade verification failed; application link rolled back"
-        return 1
+
+    # Stage 3 - the new manager runs install, which may migrate schemas, rebuild
+    # generations and migrate certificates. Every failure from this point on has
+    # to assume live data was already modified.
+    if env -u SB_APP_DIR "$SB_APP_LINK/sb" install --yes; then
+        ok "sb manager upgraded: $new_release"
+        return 0
     fi
+    upgrade_rollback "$upgrade_backup" "$previous_app_link" "$new_release" \
+      "manager upgrade verification failed after the application switch"
+    rc=$?
+    return "$rc"
 }
 
 cmd_restore() (
-    local backup_id="$1" backup_dir cert_candidate="" cert_previous="" restored=false
+    local backup_id="$1" backup_dir cert_candidate="" cert_previous=""
     trap '[[ -z "$cert_candidate" ]] || rm -rf -- "$cert_candidate"' EXIT
     [[ "$backup_id" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ &&
        "$backup_id" != "." && "$backup_id" != ".." ]] || {
@@ -666,13 +758,38 @@ cmd_restore() (
         return 64
     }
     backup_dir="${SB_BACKUP_DIR}/${backup_id}"
+    [[ -d "$backup_dir" && -f "$backup_dir/metadata.json" ]] || {
+        err "invalid backup"
+        return 1
+    }
+    # A salvage snapshot was captured from data that failed validation. Restoring
+    # one republishes that data, so it is refused unless the operator asks for it
+    # by name. This is checked before content validation so that the refusal
+    # names the real reason instead of a generic "invalid backup".
+    local is_salvage description="restore ${backup_id}"
+    is_salvage=$(jq -r '.salvage // false' "$backup_dir/metadata.json") || return 1
+    if [[ "$is_salvage" == "true" ]]; then
+        if [[ "$SB_ALLOW_SALVAGE_RESTORE" != "true" ]]; then
+            err "backup ${backup_id} is an unvalidated salvage snapshot and is refused"
+            err "it was captured from data that did not pass validation; restoring it can"
+            err "republish corrupt state, settings or certificates"
+            err "if you accept that risk, rerun with --restore-unvalidated-salvage"
+            return 1
+        fi
+        warn "DANGEROUS: restoring an UNVALIDATED salvage snapshot: ${backup_id}"
+        warn "this data failed validation when it was captured; it is forensic material,"
+        warn "not a known-good backup. Verify the result with 'sb doctor' before relying on it."
+        description="restore ${backup_id} (UNVALIDATED salvage snapshot)"
+    fi
+    # Content validation still applies. A salvage snapshot whose contents really
+    # are corrupt fails here, and that refusal is honest rather than a bypass.
     backup_validate "$backup_dir" || {
         err "invalid backup"
         return 1
     }
     confirm "Restore backup ${backup_id}" || return 1
     if [[ "$SB_DRY_RUN" == "true" ]]; then
-        transaction_run "restore ${backup_id}" mutator_restore \
+        transaction_run "$description" mutator_restore \
           "$backup_dir/generation/instances.json" "$backup_dir/generation/settings.json"
         return
     fi
@@ -686,21 +803,43 @@ cmd_restore() (
     cert_previous="${SB_DATA_DIR}/.cert-before-restore.$$"
     mv -- "$SB_CERT_DIR" "$cert_previous" || return 1
     mv -- "$cert_candidate" "$SB_CERT_DIR" || {
-        mv -- "$cert_previous" "$SB_CERT_DIR"
+        mv -- "$cert_previous" "$SB_CERT_DIR" || {
+            err "CRITICAL: the certificate directory could not be restored"
+            err "manual recovery: move ${cert_previous} back to ${SB_CERT_DIR}"
+            return "$SB_EX_UNRECOVERABLE"
+        }
         return 1
     }
     cert_candidate=""
-    if transaction_run "restore ${backup_id}" mutator_restore \
-      "$backup_dir/generation/instances.json" "$backup_dir/generation/settings.json"; then
-        restored=true
-    fi
-    if [[ "$restored" == "true" ]]; then
+    # A restore is a recovery path: the live generation it is replacing may
+    # already be invalid, so its pre-publish snapshot is allowed to be a marked
+    # salvage copy rather than a validated backup. The marker is an internal
+    # token, not a value an operator can inject from the environment.
+    local txn_rc=0
+    SB_TXN_SALVAGE_BACKUP="$SB_INTERNAL_MARKER" \
+      transaction_run "$description" mutator_restore \
+      "$backup_dir/generation/instances.json" \
+      "$backup_dir/generation/settings.json" || txn_rc=$?
+    if ((txn_rc == 0)); then
         rm -rf -- "$cert_previous"
         return 0
     fi
+    # The transaction could not put the current link back. The live generation
+    # that is now published is unknown, so swapping the certificate directory
+    # underneath it would compound the damage instead of undoing it.
+    if ((txn_rc == SB_EX_UNRECOVERABLE)); then
+        err "CRITICAL: leaving the certificate directory untouched after a failed link restore"
+        err "pre-restore certificates retained at: ${cert_previous}"
+        err "restore them only after ${SB_CURRENT_LINK} has been repaired"
+        return "$txn_rc"
+    fi
     rm -rf -- "$SB_CERT_DIR"
-    mv -- "$cert_previous" "$SB_CERT_DIR"
-    return 1
+    mv -- "$cert_previous" "$SB_CERT_DIR" || {
+        err "CRITICAL: the certificate directory could not be restored after a failed restore"
+        err "manual recovery: move ${cert_previous} back to ${SB_CERT_DIR}"
+        return "$SB_EX_UNRECOVERABLE"
+    }
+    return "$txn_rc"
 )
 
 cmd_restart() {
@@ -735,7 +874,7 @@ Commands:
   sb output ID [all|uri|surge|clash|sing-box|firewall]
   sb firewall
   sb backup
-  sb restore BACKUP_ID
+  sb restore BACKUP_ID [--restore-unvalidated-salvage]
   sb state validate|export
   sb doctor
   sb version
@@ -868,7 +1007,7 @@ case "$CMD" in
     render) cmd_render ;;
     reload)
         require_root; require_layout
-        transaction_run "render and reload all nodes" mutator_noop
+        transaction_run "render and reload all nodes" mutator_noop || exit $?
         if [[ "$SB_JSON" == "true" ]]; then
             jq -n '{result:"success",operation:"reload"}'
         fi

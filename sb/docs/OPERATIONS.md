@@ -1,8 +1,8 @@
 # 安装、升级、迁移、备份与恢复
 
-> 本文描述预期运维契约。当前未提交实现仍有 app/current 链接切换失败传播与回滚
-> 阻断，尚不允许用于生产安装或升级；以
-> [`AI_HANDOFF.md`](AI_HANDOFF.md) 的当前状态为准。
+> 本文描述预期运维契约。app/current 链接切换的失败传播与回滚阻断已经修复，但整个
+> 变更集尚未通过独立只读复审，也尚未做过真实 systemd 验收，因此仍不允许用于生产安装
+> 或升级；以 [`AI_HANDOFF.md`](AI_HANDOFF.md) 的当前状态为准。
 
 ## 安装分层
 
@@ -95,6 +95,54 @@ app/core。所有内容先写隐藏候选目录，state/settings/generation/TLS/
 它先独立验证备份中的证书与 state，再候选复制整棵证书目录，通过正常事务重新编译
 输出、固定核心校验、切换、服务验收和失败整体回滚。手工备份中的 app、unit 和核心
 用于管理器/核心灾难恢复参考，不由 `sb restore` 自动替换。
+
+### salvage 快照
+
+当 `sb restore` 要替换的 live generation 本身已经无法通过校验时，它的 pre-publish 安全网
+无法成为一个「已校验备份」。这种情况下备份会被标记 `salvage: true`，并打印警告说明该快照
+未经校验。健康安装上的 `sb restore` 不会进入该模式，其快照始终是 `salvage: false`。
+
+salvage 快照默认**不可恢复**：
+
+```bash
+sb restore <salvage-id> --yes                                  # 拒绝，并说明原因
+sb restore <salvage-id> --restore-unvalidated-salvage --yes    # 显式承担风险
+```
+
+使用该标志会打印 `DANGEROUS` 警告，并把「UNVALIDATED salvage snapshot」写入
+`status.json` 的 `last_publish.description`。这是知情确认而非绕过：内容确实损坏的快照
+仍会被内容校验拒绝。恢复后务必执行 `sb doctor`。
+
+salvage 模式不能从环境变量启用。
+
+## 升级失败与数据回滚
+
+`sb upgrade --source DIR` 分为三个阶段：数据备份、应用切换、由新 manager 执行 `install`。
+第三阶段之后的任何失败都必须假设 live 数据已被修改，此时会**先**恢复 app 链接与 systemd
+unit，**再**由恢复后的旧 manager 用升级前备份恢复 settings、state、generation、证书与
+输出，最后用旧 manager 重新 `validate` 和 `doctor`。
+
+顺序是有意的：反过来会让旧 manager 读到新 schema，或让新 manager 读到半恢复的数据。
+
+## 退出码 70：不可自动恢复
+
+除锁竞争的 `75` 外，还有一个专用退出码：
+
+```text
+70  管理器无法自行恢复，需要人工介入
+```
+
+它只在回滚自身失败时出现，例如 current 链接无法恢复、app 链接无法恢复、旧 sing-box
+二进制无法放回。这些路径会：
+
+- 打印 `CRITICAL` 与可操作的人工恢复路径（不含任何凭据）；
+- **保留**恢复所需的全部材料——新旧 generation、被拒 release、旧核心二进制的暂存副本、
+  恢复前的证书目录——即使进程随后退出；
+- 不再继续执行后续的「补救」动作。例如 current 链接恢复失败后，`sb restore` 不会再把证书
+  目录换回，因为那只会在一个指向未验证 generation 的 `current` 之下叠加损坏。
+
+出现 70 之后应先运行 `sb doctor`，它的 `generation_drift`、`last_publish` 和 `app_release`
+检查用于定位 current、state 与运行中服务之间的漂移。
 
 ## 并发与退出码
 

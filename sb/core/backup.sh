@@ -83,8 +83,35 @@ backup_validate() {
     backup_permissions_validate "$dir"
 }
 
+# Is the live generation itself in a restorable, self-consistent state?
+#
+# Salvage mode keys off this, not off the half-built backup candidate. Probing
+# the candidate cannot work: backup_validate hard-requires metadata.json, which
+# does not exist until the end of backup_create, so such a probe always fails
+# and would drive every salvage-eligible call into salvage mode regardless of
+# the health of the data being snapshotted.
+backup_live_source_valid() {
+    local target="$1" generation_id
+    [[ -d "$target" && -f "$target/instances.json" && -f "$target/settings.json" &&
+       -d "$target/output" && -f "$target/output/manifest.json" ]] || return 1
+    generation_id=$(jq -er '.generation_id' "$target/output/manifest.json" 2>/dev/null) || return 1
+    SB_VALIDATE_FILES=false \
+      runtime_validate_generation "$target" false "$generation_id" >/dev/null 2>&1 || return 1
+    state_validate_file "$target/instances.json" >/dev/null 2>&1 || return 1
+    settings_validate_file "$target/settings.json" >/dev/null 2>&1 || return 1
+}
+
+# backup_create <reason> [include_app] [include_core] [salvage]
+#
+# salvage=true is for recovery paths only. A recovery runs precisely when the
+# live generation may already be invalid, and refusing to snapshot invalid data
+# would block the restore that fixes it. In salvage mode a *validation* failure
+# downgrades the backup to a marked salvage snapshot instead of aborting.
+# Injected faults and real copy, permission or metadata failures stay fatal in
+# every mode, so this does not weaken the backup-atomicity guarantees.
 backup_create() (
     local reason="${1:-manual}" include_app="${2:-false}" include_core="${3:-false}"
+    local salvage="${4:-false}" salvage_used=false
     local id candidate final current_target
     id="$(date -u '+%Y%m%dT%H%M%SZ')-$$-$(openssl rand -hex 3)"
     safe_mkdir "$SB_BACKUP_DIR" || return 1
@@ -98,6 +125,10 @@ backup_create() (
         return 1
     }
     [[ -d "$current_target" ]] || return 1
+    # Decide salvage from the live source before anything is copied.
+    if [[ "$salvage" == "true" ]] && ! backup_live_source_valid "$current_target"; then
+        salvage_used=true
+    fi
     backup_copy_tree generation-copy "$current_target" "$candidate/generation" || return 1
     backup_fault state-copy || return 1
     cp -- "$current_target/instances.json" "$candidate/generation/instances.json" || return 1
@@ -125,17 +156,24 @@ backup_create() (
 
     backup_fault metadata-write || return 1
     jq -n --arg id "$id" --arg reason "$reason" --arg created_at "$(now_iso)" \
-      --arg project_version "$SB_PROJECT_VERSION" --arg core_version "$SB_CORE_VERSION" '{
+      --arg project_version "$SB_PROJECT_VERSION" --arg core_version "$SB_CORE_VERSION" \
+      --argjson salvage "$salvage_used" '{
         schema_version:1,id:$id,reason:$reason,created_at:$created_at,
-        project_version:$project_version,sing_box_version:$core_version
+        project_version:$project_version,sing_box_version:$core_version,
+        salvage:$salvage
       }' | atomic_write "$candidate/metadata.json" 600 || return 1
 
     find "$candidate" -type d -exec chmod 700 {} + || return 1
     find "$candidate" -type f -exec chmod go-rwx {} + || return 1
-    backup_validate "$candidate" || {
-        err "backup candidate validation failed"
-        return 1
-    }
+    if [[ "$salvage_used" == "true" ]]; then
+        warn "live data did not validate; keeping an unvalidated salvage snapshot"
+        warn "salvage snapshot is for forensics only and is not restorable: ${id}"
+    else
+        backup_validate "$candidate" || {
+            err "backup candidate validation failed"
+            return 1
+        }
+    fi
     [[ ! -e "$final" ]] || return 1
     mv -- "$candidate" "$final" || return 1
     candidate=""

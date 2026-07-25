@@ -1,6 +1,30 @@
 #!/usr/bin/env bash
 set -u
 
+# Mock systemd for isolated verifier tests.
+#
+# Observed runtime facts are NEVER read from output/manifest.json. That file is
+# the *expected* side of service_verify_listeners; deriving the *observed* side
+# from it too would prove only that the manifest equals itself.
+#
+# Instead this mock binds what a real sing-box would bind: it reads the inbound
+# list out of output/config.json and maps each inbound type to the transport it
+# actually listens on. config.json is produced by the PROTO_INBOUND renderers
+# and manifest.json by the independent PROTO_EXPECTED renderers, so the two
+# sides of the comparison now come from genuinely different code paths and a
+# disagreement between them is a real, detectable defect.
+#
+# Tests can additionally override the observed world outright:
+#
+#   $SB_TEST_RUNTIME_DIR/observed-sockets.tsv
+#       network<TAB>address<TAB>port<TAB>pid<TAB>generation
+#       The literal token MAINPID is replaced with the PID this mock starts.
+#       When present this file fully replaces the config-derived socket table.
+#   $SB_TEST_RUNTIME_DIR/observed-generation
+#       Directory the service reports as its cwd (its loaded generation).
+#   $SB_TEST_RUNTIME_DIR/observed-mainpid
+#       MainPID reported by `systemctl show`, independent of the real child.
+
 runtime="${SB_TEST_RUNTIME_DIR:?}"
 mkdir -p "$runtime"
 printf '%s\n' "$*" >>"$runtime/systemctl.log"
@@ -20,27 +44,57 @@ stop_process() {
 }
 
 start_process() {
-    local output="${SB_TEST_DATA_DIR:?}/current/output" pid address generation
+    local output="${SB_TEST_DATA_DIR:?}/current/output" pid workdir
     [[ -d "$output" ]] || return 1
     if [[ -f "$runtime/stale-generation" && -f "$runtime/service.pid" ]]; then
         touch "$runtime/active"
         return 0
     fi
     stop_process
+
+    # The working directory is what service_generation_loaded observes through
+    # /proc/<pid>/cwd. A test can point it somewhere other than the current
+    # generation to simulate a process that never reloaded.
+    workdir="$output"
+    if [[ -f "$runtime/observed-generation" ]]; then
+        workdir=$(cat "$runtime/observed-generation")
+    fi
+    [[ -d "$workdir" ]] || return 1
     (
-        cd "$output" || exit 1
+        cd "$workdir" || exit 1
         exec sleep 3600
     ) </dev/null >/dev/null 2>&1 &
     pid=$!
     printf '%s\n' "$pid" >"$runtime/service.pid"
     touch "$runtime/active"
-    address=$(jq -r '.listen.address' "$output/manifest.json")
-    generation=$(jq -r '.generation_id' "$output/manifest.json")
-    [[ ! -f "$runtime/wrong-address" ]] || address=127.0.0.1
-    jq -r --arg address "$address" --arg pid "$pid" --arg generation "$generation" '
-      .expected_listeners[] |
-      [.network,$address,(.port|tostring),$pid,$generation] | @tsv
-    ' "$output/manifest.json" >"$runtime/sockets.tsv"
+
+    if [[ -f "$runtime/observed-sockets.tsv" ]]; then
+        sed "s/\bMAINPID\b/${pid}/g" "$runtime/observed-sockets.tsv" \
+          >"$runtime/sockets.tsv"
+        return 0
+    fi
+
+    # Bind what config.json asks for, the way sing-box would. Deliberately does
+    # not consult manifest.json.
+    local generation
+    generation=$(jq -r '.generation_id // "unknown"' "$workdir/manifest.json" 2>/dev/null)
+    jq -r --arg pid "$pid" --arg generation "$generation" '
+      .inbounds[]
+      | . as $inbound
+      | (if   $inbound.type == "shadowsocks" then ["tcp","udp"]
+         elif $inbound.type == "hysteria2"   then ["udp"]
+         elif $inbound.type == "vless"       then ["tcp"]
+         elif $inbound.type == "anytls"      then ["tcp"]
+         else [] end)[]
+      | [., $inbound.listen, ($inbound.listen_port|tostring), $pid, $generation]
+      | @tsv
+    ' "$workdir/config.json" >"$runtime/sockets.tsv" || : >"$runtime/sockets.tsv"
+
+    if [[ -f "$runtime/wrong-address" ]]; then
+        awk -F '\t' -v OFS='\t' '{$2="127.0.0.1"; print}' "$runtime/sockets.tsv" \
+          >"$runtime/sockets.new"
+        mv "$runtime/sockets.new" "$runtime/sockets.tsv"
+    fi
     if [[ -f "$runtime/wrong-pid" ]]; then
         awk -F '\t' -v OFS='\t' '{$4=99999; print}' "$runtime/sockets.tsv" \
           >"$runtime/sockets.new"
@@ -87,7 +141,13 @@ case "$command" in
         ;;
     stop) stop_process ;;
     show)
-        [[ -f "$runtime/service.pid" ]] && cat "$runtime/service.pid" || printf '0\n'
+        if [[ -f "$runtime/observed-mainpid" ]]; then
+            cat "$runtime/observed-mainpid"
+        elif [[ -f "$runtime/service.pid" ]]; then
+            cat "$runtime/service.pid"
+        else
+            printf '0\n'
+        fi
         ;;
     status) [[ -f "$runtime/active" ]] ;;
     *)

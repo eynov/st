@@ -58,8 +58,8 @@ generic_install() (
             return 1
         }
     fi
-    mkdir -p -- "$base"
-    stage=$(mktemp -d "${base}/.${project}.stage.XXXXXX")
+    mkdir -p -- "$base" || return 1
+    stage=$(mktemp -d "${base}/.${project}.stage.XXXXXX") || return 1
     trap '[[ -z "${stage:-}" ]] || rm -rf -- "$stage"' EXIT
     cp -a -- "$source_dir/." "$stage/" || return 1
     find "$stage" -type f \( -name '*.sh' -o -name '*.py' -o ! -name '*.*' \) \
@@ -80,7 +80,7 @@ generic_install() (
         return 1
     fi
     if [[ -n "$command_name" ]]; then
-        mkdir -p -- "$command_root"
+        mkdir -p -- "$command_root" || return 1
         if ! ln -sfn "$target/$command_name" "$command_root/${command_name%.*}"; then
             rm -rf -- "$target"
             [[ -z "$previous" ]] || mv -- "$previous" "$target"

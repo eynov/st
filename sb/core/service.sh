@@ -41,8 +41,11 @@ service_generate_unit() (
             '[Install]' \
             'WantedBy=multi-user.target'
     } >"$tmp"
-    chmod 644 "$tmp"
-    mv -fT "$tmp" "$SB_SERVICE_FILE"
+    chmod 644 "$tmp" || return 1
+    mv -fT "$tmp" "$SB_SERVICE_FILE" || {
+        err "failed to install the systemd unit: $SB_SERVICE_FILE"
+        return 1
+    }
     tmp=""
     "$SB_SYSTEMCTL" daemon-reload || return 1
     "$SB_SYSTEMCTL" enable "$SB_SERVICE" >/dev/null || return 1

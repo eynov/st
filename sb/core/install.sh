@@ -125,12 +125,12 @@ core_stage_binary() (
     binary_sha=$(core_expected_binary_sha256 "$arch") || return 1
     url=$(core_asset_url "$arch") || return 1
     asset_dir="sing-box-${SB_CORE_VERSION}-${arch}"
-    archive=$(mktemp)
-    extracted=$(mktemp -d)
+    archive=$(mktemp) || return 1
+    extracted=$(mktemp -d) || return 1
     trap 'rm -f -- "$archive"; rm -rf -- "$extracted"' EXIT
 
     if [[ -n "${SB_CORE_ARCHIVE:-}" ]]; then
-        cp -- "$SB_CORE_ARCHIVE" "$archive"
+        cp -- "$SB_CORE_ARCHIVE" "$archive" || return 1
     else
         curl -fL --retry 3 --connect-timeout 10 --max-time 300 "$url" -o "$archive" || return 1
     fi
@@ -152,7 +152,7 @@ core_stage_binary() (
     tar -xzf "$archive" -C "$extracted" --no-same-owner \
       "${asset_dir}/sing-box" || return 1
     [[ -x "$extracted/${asset_dir}/sing-box" ]] ||
-        chmod 700 "$extracted/${asset_dir}/sing-box"
+        chmod 700 "$extracted/${asset_dir}/sing-box" || return 1
     actual=$(sha256sum "$extracted/${asset_dir}/sing-box" | awk '{print $1}')
     [[ "$actual" == "$binary_sha" ]] || {
         err "staged sing-box binary SHA256 mismatch"
@@ -162,8 +162,8 @@ core_stage_binary() (
         err "staged sing-box reports an unexpected version"
         return 1
     }
-    cp -- "$extracted/${asset_dir}/sing-box" "$destination"
-    chmod 755 "$destination"
+    cp -- "$extracted/${asset_dir}/sing-box" "$destination" || return 1
+    chmod 755 "$destination" || return 1
 )
 
 core_switch() (
@@ -190,21 +190,40 @@ core_switch() (
         }
     fi
     if [[ -x "$SB_BIN" ]]; then
-        backup_bin=$(mktemp "${bin_dir}/.sing-box.backup.XXXXXX")
-        cp -a "$SB_BIN" "$backup_bin"
+        backup_bin=$(mktemp "${bin_dir}/.sing-box.backup.XXXXXX") || return 1
+        cp -a "$SB_BIN" "$backup_bin" || return 1
     fi
     if [[ -f "$SB_CORE_RECEIPT" ]]; then
-        backup_receipt=$(mktemp "${SB_DATA_DIR}/.core-receipt.backup.XXXXXX")
+        backup_receipt=$(mktemp "${SB_DATA_DIR}/.core-receipt.backup.XXXXXX") || return 1
         cp -- "$SB_CORE_RECEIPT" "$backup_receipt" || return 1
     fi
     if ! mv -fT "$stage" "$SB_BIN"; then
         rm -f "$stage" "$backup_bin"
         return 1
     fi
-    if ! core_receipt_write || ! core_validate_installed false; then
-        [[ -n "$backup_bin" ]] && mv -fT "$backup_bin" "$SB_BIN"
+    if fault_armed core-post-switch-verify ||
+      ! core_receipt_write || ! core_validate_installed false; then
+        local restore_target="$SB_BIN"
+        if fault_armed core-backup-restore; then
+            restore_target="${SB_BIN%/*}/.sb-fault-missing/sing-box"
+        fi
+        if [[ -n "$backup_bin" ]] && ! mv -fT "$backup_bin" "$restore_target"; then
+            err "CRITICAL: the previous sing-box binary could not be restored"
+            err "manual recovery: move ${backup_bin} back to ${SB_BIN}"
+            # The EXIT trap would delete the only surviving copy of the old
+            # binary. Drop it from the cleanup set so the path just printed
+            # still exists when the process is gone.
+            backup_bin=""
+            backup_receipt=""
+            return "$SB_EX_UNRECOVERABLE"
+        fi
         if [[ -n "$backup_receipt" ]]; then
-            mv -fT "$backup_receipt" "$SB_CORE_RECEIPT"
+            mv -fT "$backup_receipt" "$SB_CORE_RECEIPT" || {
+                err "CRITICAL: the sing-box receipt could not be restored"
+                err "manual recovery: move ${backup_receipt} to ${SB_CORE_RECEIPT}"
+                backup_receipt=""
+                return "$SB_EX_UNRECOVERABLE"
+            }
         else
             rm -f -- "$SB_CORE_RECEIPT"
         fi
@@ -238,7 +257,7 @@ core_upgrade() (
     service_is_active && was_active=true
     [[ ! -f "$SB_CURRENT_STATE" ]] ||
         enabled=$(state_enabled_count_file "$SB_CURRENT_STATE") || return 1
-    core_switch upgrade || return 1
+    core_switch upgrade || return $?
     if [[ "$was_active" == "true" ]]; then
         if service_restart &&
             { [[ "${SB_SKIP_LISTENER_CHECK:-false}" == "true" ]] || service_verify_listeners; }; then
@@ -246,15 +265,28 @@ core_upgrade() (
         fi
         err "new core failed runtime verification; restoring previous binary"
         [[ -x "$backup/sing-box" ]] || return 1
-        restore_stage=$(mktemp "$(dirname "$SB_BIN")/.sing-box.restore.XXXXXX")
-        cp --preserve=mode,timestamps "$backup/sing-box" "$restore_stage"
-        chmod 755 "$restore_stage"
-        mv -fT "$restore_stage" "$SB_BIN"
+        restore_stage=$(mktemp "$(dirname "$SB_BIN")/.sing-box.restore.XXXXXX") || return 1
+        cp --preserve=mode,timestamps "$backup/sing-box" "$restore_stage" || return 1
+        chmod 755 "$restore_stage" || return 1
+        local upgrade_restore_target="$SB_BIN"
+        if fault_armed core-upgrade-restore; then
+            upgrade_restore_target="${SB_BIN%/*}/.sb-fault-missing/sing-box"
+        fi
+        mv -fT "$restore_stage" "$upgrade_restore_target" || {
+            err "CRITICAL: the previous sing-box binary could not be restored"
+            err "manual recovery: move ${restore_stage} to ${SB_BIN}"
+            # Keep the staged copy: the EXIT trap must not delete the artifact
+            # the operator was just told to move into place.
+            restore_stage=""
+            return "$SB_EX_UNRECOVERABLE"
+        }
         restore_stage=""
         if [[ -f "$backup/core.json" ]]; then
             cp -- "$backup/core.json" "${SB_CORE_RECEIPT}.restore" || return 1
-            chmod 600 "${SB_CORE_RECEIPT}.restore"
-            mv -fT "${SB_CORE_RECEIPT}.restore" "$SB_CORE_RECEIPT"
+            chmod 600 "${SB_CORE_RECEIPT}.restore" ||
+                { rm -f -- "${SB_CORE_RECEIPT}.restore"; return 1; }
+            mv -fT "${SB_CORE_RECEIPT}.restore" "$SB_CORE_RECEIPT" ||
+                { rm -f -- "${SB_CORE_RECEIPT}.restore"; return 1; }
         else
             rm -f -- "$SB_CORE_RECEIPT"
         fi

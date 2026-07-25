@@ -69,6 +69,30 @@ flock
 未通过候选校验的 state 永远不会成为 current。运行验收失败时，新 generation
 会被移除；settings、state、服务端配置和全部客户端输出作为一个整体回滚。
 
+### 失败传播与错误码
+
+事务内每个 `mkdir`/`cp`/`ln`/`mv` 都显式检查退出码，不依赖调用方上下文中的 `set -e`：
+`transaction_run` 与 `manager_install_source` 都会被 `if ...; then` 或 `... || return`
+调用，Bash 在这类条件上下文中会关闭被调函数内部的 errexit。符号链接的原子切换统一经由
+`symlink_switch <target> <link> <staging>`，其 `rm`/`ln -s`/`mv -fT` 三步各自传播失败。
+
+发布过程按阶段划分，每个阶段的失败都有确定后果：
+
+| 阶段 | 失败后果 |
+|---|---|
+| candidate → final 重命名 | 丢弃 candidate；current 与 live 数据完全未变 |
+| current 链接切换 | 删除尚未被引用的 final；current 仍指向旧 generation |
+| 服务 reload/restart 或监听验收 | 进入回滚 |
+| 回滚：current 链接恢复**失败** | 返回 `SB_EX_UNRECOVERABLE`(70)，保留新旧 generation 与候选证书，打印人工恢复路径 |
+| 回滚：链接已恢复但服务未恢复 | 返回 1，状态记 `service-restore-failed`，**保留**被拒 generation（服务可能仍在其中运行） |
+
+只有回滚完整成功时才清理被拒 generation。业务成功信息（`publish completed`、
+`instance created` 等）只在整个事务成功后输出。`sb doctor` 的 `generation_drift` 与
+`last_publish` 检查用于发现 current、state 与运行服务之间的漂移。
+
+同样的原则适用于管理器自身：`manager_install_source` 的 release 发布、app 链接切换、
+CLI 链接创建全部显式检查，回滚失败同样返回 70 并保留被拒 release。
+
 ## 无节点行为
 
 零个启用节点时生成合法的 `{"inbounds":[]}` 配置，`sb-core` 保持 enabled 但

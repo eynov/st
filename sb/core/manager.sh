@@ -33,63 +33,162 @@ manager_validate_source() {
     }
 }
 
+# Undo an application link switch and discard the rejected release.
+#
+# Returns 0 when the previous application state was fully restored, and
+# SB_EX_UNRECOVERABLE when the link itself could not be restored. In the latter
+# case the rejected release is deliberately kept: it is the only artifact an
+# operator can use to work out what the app link is currently pointing at.
+manager_rollback_app() {
+    local previous_link="$1" release_dir="$2" reason="$3"
+    if [[ -n "$previous_link" ]]; then
+        if ! symlink_switch "$previous_link" "$SB_APP_LINK" \
+          "${SB_INSTALL_ROOT}/.app.rollback.$$" app-rollback; then
+            err "CRITICAL: ${reason}, and the application link could not be restored"
+            err "CRITICAL: ${SB_APP_LINK} may still reference the rejected release"
+            err "manual recovery: point ${SB_APP_LINK} at ${previous_link}"
+            err "rejected release retained at: ${release_dir}"
+            return "$SB_EX_UNRECOVERABLE"
+        fi
+    elif ! rm -f -- "$SB_APP_LINK"; then
+        err "CRITICAL: ${reason}, and the partial application link could not be removed"
+        err "manual recovery: remove ${SB_APP_LINK}"
+        err "rejected release retained at: ${release_dir}"
+        return "$SB_EX_UNRECOVERABLE"
+    fi
+    if ! rm -rf -- "$release_dir"; then
+        err "failed to remove the rejected release: $release_dir"
+        return 1
+    fi
+    err "${reason}; application link rolled back"
+    return 1
+}
+
+# Classify the management command path before touching it, so an unrelated file
+# or another project's symlink is never silently replaced.
+manager_command_link_conflict() {
+    local target
+    if [[ -L "$SB_COMMAND_LINK" ]]; then
+        target=$(readlink -- "$SB_COMMAND_LINK") || return 0
+        case "$target" in
+            "${SB_APP_LINK}/sb"|"${SB_INSTALL_ROOT}"/*) return 1 ;;
+        esac
+        err "$SB_COMMAND_LINK is a symlink to ${target}, which sb does not manage"
+        err "remove it explicitly, then rerun the installation"
+        return 0
+    fi
+    if [[ -e "$SB_COMMAND_LINK" ]]; then
+        err "$SB_COMMAND_LINK exists and is not a managed symlink; refusing replacement"
+        return 0
+    fi
+    return 1
+}
+
 manager_install_source() {
     local source="$1" source_version release_id release_dir stage previous_link=""
+    local rollback_rc
     manager_validate_source "$source" || return 1
-    source_version=$(jq -r '.project_version' "$source/version.json")
-    safe_mkdir "$SB_INSTALL_ROOT" 755
-    safe_mkdir "$SB_RELEASES_DIR" 755
-    release_id="${source_version}-$(date -u '+%Y%m%dT%H%M%SZ')-$(openssl rand -hex 3)"
-    stage=$(mktemp -d "${SB_RELEASES_DIR}/.stage-${release_id}.XXXXXX")
-    cp -a -- "$source/." "$stage/" || {
-        rm -rf -- "$stage"
+    source_version=$(jq -r '.project_version' "$source/version.json") || return 1
+    safe_mkdir "$SB_INSTALL_ROOT" 755 || return 1
+    safe_mkdir "$SB_RELEASES_DIR" 755 || return 1
+    release_id="${source_version}-$(date -u '+%Y%m%dT%H%M%SZ')-$(openssl rand -hex 3)" || return 1
+
+    local stage_template="${SB_RELEASES_DIR}/.stage-${release_id}.XXXXXX"
+    if fault_armed release-stage-mkdir; then
+        stage_template="${SB_RELEASES_DIR}/.sb-fault-missing/.stage.XXXXXX"
+    fi
+    stage=$(mktemp -d "$stage_template") || {
+        err "failed to create the release staging directory"
         return 1
     }
-    manager_validate_source "$stage" || {
+    # Redirect the copy into a directory that does not exist so cp(1) fails with
+    # a real errno; a mode-based fault would be bypassed when running as root.
+    local copy_dest="${stage}/"
+    if fault_armed release-copy; then
+        copy_dest="${stage}/.sb-fault-missing/"
+    fi
+    if ! cp -a -- "$source/." "$copy_dest"; then
+        err "failed to copy the source tree into the release staging directory"
         rm -rf -- "$stage"
         return 1
-    }
+    fi
+    if fault_armed release-validate; then
+        rm -f -- "$stage/version.json"
+    fi
+    if ! manager_validate_source "$stage"; then
+        err "the staged release failed validation"
+        rm -rf -- "$stage"
+        return 1
+    fi
     release_dir="${SB_RELEASES_DIR}/${release_id}"
-    mv -- "$stage" "$release_dir" || {
+    if fault_armed release-final-mv; then
+        mkdir -p -- "$release_dir" && : >"${release_dir}/.occupied"
+    fi
+    if ! mv -T -- "$stage" "$release_dir"; then
+        err "failed to publish the staged release: $release_dir"
         rm -rf -- "$stage"
         return 1
-    }
+    fi
     SB_MANAGER_INSTALLED_RELEASE="$release_dir"
     export SB_MANAGER_INSTALLED_RELEASE
 
-    [[ -L "$SB_APP_LINK" ]] && previous_link=$(readlink "$SB_APP_LINK")
-    if [[ -e "$SB_APP_LINK" && ! -L "$SB_APP_LINK" ]]; then
+    if [[ -L "$SB_APP_LINK" ]]; then
+        previous_link=$(readlink -- "$SB_APP_LINK") || previous_link=""
+    elif [[ -e "$SB_APP_LINK" ]]; then
         err "$SB_APP_LINK exists and is not a managed symlink; refusing replacement"
-        rm -rf -- "$release_dir"
-        return 1
-    fi
-    ln -s "releases/${release_id}" "${SB_INSTALL_ROOT}/.app.new.$$"
-    mv -fT "${SB_INSTALL_ROOT}/.app.new.$$" "$SB_APP_LINK"
-    if ! env -u SB_APP_DIR "$SB_APP_LINK/sb" self-check >/dev/null; then
-        if [[ -n "$previous_link" ]]; then
-            ln -s "$previous_link" "${SB_INSTALL_ROOT}/.app.rollback.$$"
-            mv -fT "${SB_INSTALL_ROOT}/.app.rollback.$$" "$SB_APP_LINK"
-        else
-            rm -f "$SB_APP_LINK"
-        fi
-        rm -rf -- "$release_dir"
-        err "new manager self-check failed; application link rolled back"
-        return 1
-    fi
-    safe_mkdir "$(dirname "$SB_COMMAND_LINK")" 755
-    if [[ -e "$SB_COMMAND_LINK" && ! -L "$SB_COMMAND_LINK" ]]; then
-        err "$SB_COMMAND_LINK exists and is not a managed symlink; refusing replacement"
-        if [[ -n "$previous_link" ]]; then
-            ln -s "$previous_link" "${SB_INSTALL_ROOT}/.app.rollback.$$"
-            mv -fT "${SB_INSTALL_ROOT}/.app.rollback.$$" "$SB_APP_LINK"
-        else
-            rm -f -- "$SB_APP_LINK"
-        fi
         rm -rf -- "$release_dir"
         SB_MANAGER_INSTALLED_RELEASE=""
         export SB_MANAGER_INSTALLED_RELEASE
         return 1
     fi
-    ln -sfn "$SB_APP_LINK/sb" "$SB_COMMAND_LINK"
+
+    # Refuse before the app link moves, so a conflicting command path never
+    # leaves a half-installed manager behind.
+    if manager_command_link_conflict; then
+        rm -rf -- "$release_dir"
+        SB_MANAGER_INSTALLED_RELEASE=""
+        export SB_MANAGER_INSTALLED_RELEASE
+        return 1
+    fi
+
+    if ! symlink_switch "releases/${release_id}" "$SB_APP_LINK" \
+      "${SB_INSTALL_ROOT}/.app.new.$$" app-new; then
+        err "failed to switch the application link; the previous release stays live"
+        rm -rf -- "$release_dir"
+        SB_MANAGER_INSTALLED_RELEASE=""
+        export SB_MANAGER_INSTALLED_RELEASE
+        return 1
+    fi
+
+    if fault_armed app-selfcheck ||
+      ! env -u SB_APP_DIR "$SB_APP_LINK/sb" self-check >/dev/null; then
+        manager_rollback_app "$previous_link" "$release_dir" \
+          "new manager self-check failed"
+        rollback_rc=$?
+        SB_MANAGER_INSTALLED_RELEASE=""
+        export SB_MANAGER_INSTALLED_RELEASE
+        return "$rollback_rc"
+    fi
+
+    if ! safe_mkdir "$(dirname "$SB_COMMAND_LINK")" 755; then
+        manager_rollback_app "$previous_link" "$release_dir" \
+          "failed to create the management command directory"
+        rollback_rc=$?
+        SB_MANAGER_INSTALLED_RELEASE=""
+        export SB_MANAGER_INSTALLED_RELEASE
+        return "$rollback_rc"
+    fi
+
+    # Stage the command link beside its target and rename it into place so a
+    # failure can never leave a dangling /usr/local/bin/sb behind.
+    if ! symlink_switch "${SB_APP_LINK}/sb" "$SB_COMMAND_LINK" \
+      "${SB_COMMAND_LINK}.new.$$" cli-link; then
+        manager_rollback_app "$previous_link" "$release_dir" \
+          "failed to create the management command link"
+        rollback_rc=$?
+        SB_MANAGER_INSTALLED_RELEASE=""
+        export SB_MANAGER_INSTALLED_RELEASE
+        return "$rollback_rc"
+    fi
     ok "sb manager installed: $release_dir"
 }

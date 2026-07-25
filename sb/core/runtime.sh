@@ -111,7 +111,7 @@ runtime_render() {
         enabled_instances:$count,expected_listeners:$listeners
       }' | atomic_write "$output_dir/manifest.json" 600
 
-    chmod 600 "$uri_file" "$surge_file"
+    chmod 600 "$uri_file" "$surge_file" || return 1
     runtime_validate_outputs "$output_dir"
 }
 

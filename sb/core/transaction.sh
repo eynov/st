@@ -42,10 +42,25 @@ transaction_show_dry_run() (
     find "$output" -type f -exec sha256sum {} + | sed "s#${output}/##"
 )
 
+# Restore the current generation link to its pre-publish target.
+# Every step is checked; the caller must treat a non-zero status as an
+# unrecoverable rollback failure rather than an ordinary publish failure.
 transaction_restore_link() {
     local old_link="$1"
-    ln -s "$old_link" "${SB_DATA_DIR}/.current.rollback.$$"
-    mv -fT "${SB_DATA_DIR}/.current.rollback.$$" "$SB_CURRENT_LINK"
+    symlink_switch "$old_link" "$SB_CURRENT_LINK" \
+      "${SB_DATA_DIR}/.current.rollback.$$" current-rollback
+}
+
+# Report an unrecoverable rollback failure with the operator-actionable paths
+# needed for manual recovery. Deliberately prints no credentials.
+transaction_report_unrecoverable() {
+    local old_link="$1" old_generation="$2" new_generation="$3" id="$4"
+    err "CRITICAL: the current generation link could not be restored"
+    err "CRITICAL: ${SB_CURRENT_LINK} may still reference the unverified generation ${id}"
+    err "manual recovery: point ${SB_CURRENT_LINK} at ${old_link}"
+    err "previous generation retained at: ${old_generation}"
+    err "unverified generation retained at: ${new_generation}"
+    err "run 'sb doctor' after recovery to confirm state, current and service agree"
 }
 
 # Usage: transaction_run <description> <mutator_function> [args...]
@@ -70,22 +85,31 @@ transaction_run() (
 
     local old_link old_generation id candidate final state settings enabled backup rc
     local created_paths_file old_manifest
-    old_link=$(readlink "$SB_CURRENT_LINK")
-    old_generation=$(readlink -f "$SB_CURRENT_LINK")
-    id=$(new_generation_id)
-    candidate=$(mktemp -d "${SB_GENERATIONS_DIR}/.txn-${id}.XXXXXX")
-    created_paths_file=$(mktemp)
+    old_link=$(readlink "$SB_CURRENT_LINK") || return 1
+    old_generation=$(readlink -f "$SB_CURRENT_LINK") || return 1
+    id=$(new_generation_id) || return 1
+    candidate=$(mktemp -d "${SB_GENERATIONS_DIR}/.txn-${id}.XXXXXX") || {
+        err "failed to create the candidate generation directory"
+        return 1
+    }
+    created_paths_file=$(mktemp) || return 1
     SB_TXN_CREATED_PATHS="$created_paths_file"
     export SB_TXN_CREATED_PATHS
     trap 'transaction_cleanup_created_paths; [[ -n "${candidate:-}" ]] && rm -rf -- "$candidate"; rm -f -- "${created_paths_file:-}"' EXIT
 
-    cp -a -- "$old_generation/." "$candidate/"
+    cp -a -- "$old_generation/." "$candidate/" || {
+        err "failed to seed the candidate generation from: $old_generation"
+        return 1
+    }
     state="${candidate}/instances.json"
     settings="${candidate}/settings.json"
     SB_TXN_SETTINGS_FILE="$settings"
     export SB_TXN_SETTINGS_FILE
     old_manifest="${old_generation}/output/manifest.json"
-    rm -rf -- "${candidate}/output"
+    rm -rf -- "${candidate}/output" || {
+        err "failed to reset the candidate output directory"
+        return 1
+    }
 
     "$mutator" "$state" "$@" || {
         transaction_status_write "failed" "$description" "" false
@@ -118,15 +142,38 @@ transaction_run() (
         return 0
     fi
 
-    backup=$(backup_create "pre-publish: ${description}" false) || return 1
+    local salvage_allowed=false
+    [[ -n "${SB_TXN_SALVAGE_BACKUP:-}" &&
+       "${SB_TXN_SALVAGE_BACKUP}" == "$SB_INTERNAL_MARKER" ]] && salvage_allowed=true
+    backup=$(backup_create "pre-publish: ${description}" false false \
+      "$salvage_allowed") || return 1
     info "backup created: $backup"
     final="${SB_GENERATIONS_DIR}/${id}"
-    mv -- "$candidate" "$final"
-    candidate=""
-    ln -s "generations/${id}" "${SB_DATA_DIR}/.current.new.$$"
-    mv -fT "${SB_DATA_DIR}/.current.new.$$" "$SB_CURRENT_LINK"
 
-    enabled=$(state_enabled_count_file "$SB_CURRENT_STATE")
+    # Stage 1: candidate becomes a final generation directory. Nothing observes
+    # it yet, so a failure here only has to discard the candidate.
+    if fault_armed generation-final-mv; then
+        mkdir -p -- "$final" && : >"${final}/.occupied"
+    fi
+    if ! mv -T -- "$candidate" "$final"; then
+        err "failed to publish the candidate generation: $final"
+        transaction_status_write "failed" "$description" "$id" false
+        return 1
+    fi
+    candidate=""
+
+    # Stage 2: the current link starts resolving to the new generation. Until
+    # this rename succeeds the live generation is unchanged, so a failure must
+    # discard the final directory and leave no trace of a publish.
+    if ! symlink_switch "generations/${id}" "$SB_CURRENT_LINK" \
+      "${SB_DATA_DIR}/.current.new.$$" current-new; then
+        err "failed to switch the current generation link; live generation unchanged"
+        rm -rf -- "$final"
+        transaction_status_write "failed" "$description" "$id" false
+        return 1
+    fi
+
+    enabled=$(state_enabled_count_file "$SB_CURRENT_STATE") || return 1
     rc=0
     if ((enabled == 0)); then
         service_stop || rc=$?
@@ -146,9 +193,19 @@ transaction_run() (
 
     if ((rc != 0)); then
         err "publish verification failed; rolling back generation and service"
-        transaction_restore_link "$old_link"
+        # Stage 3 rollback: restore the current link first. If this fails the
+        # manager cannot guarantee anything about the live installation, so it
+        # reports an unrecoverable failure and preserves every artifact that a
+        # human might need, including the candidate certificate material.
+        if ! transaction_restore_link "$old_link"; then
+            transaction_report_unrecoverable "$old_link" "$old_generation" "$final" "$id"
+            transaction_status_write "rollback-failed" "$description" "$id" true \
+              "current-link-restore-failed"
+            SB_TXN_CREATED_PATHS=""
+            return "$SB_EX_UNRECOVERABLE"
+        fi
         local old_enabled rollback_rc=0 rollback_result
-        old_enabled=$(state_enabled_count_file "$SB_CURRENT_STATE")
+        old_enabled=$(state_enabled_count_file "$SB_CURRENT_STATE") || rollback_rc=$?
         if ((old_enabled == 0)); then
             service_stop || rollback_rc=$?
             if ((rollback_rc == 0)) &&
@@ -167,13 +224,24 @@ transaction_run() (
                     rollback_rc=$?
             fi
         fi
-        transaction_cleanup_created_paths
-        rm -rf -- "$final"
         if ((rollback_rc == 0)); then
+            # The old generation is fully live again; the rejected generation is
+            # now unreferenced and safe to discard.
             rollback_result="success"
+            transaction_cleanup_created_paths
+            rm -rf -- "$final"
         else
-            rollback_result="failed"
-            err "rollback restored files but service verification failed"
+            # Files were restored but the service did not come back cleanly, so
+            # it may still be running out of the rejected generation. Keep that
+            # directory: deleting it could pull the filesystem out from under a
+            # live process and destroy recovery evidence.
+            rollback_result="service-restore-failed"
+            err "rollback restored the current link but service verification failed"
+            err "the rejected generation is retained for recovery: $final"
+            err "run 'sb doctor' to compare current, state and the running service"
+            # That generation is only useful with the certificate material it
+            # references, so the EXIT trap must not reclaim those paths either.
+            SB_TXN_CREATED_PATHS=""
         fi
         transaction_status_write "rolled-back" "$description" "$id" true "$rollback_result"
         return 1
