@@ -89,15 +89,23 @@ validate_state() {
     }
 
     jq -e '
+        def valid_port_spec:
+            type == "string"
+            and test("^[0-9]+(-[0-9]+)?$")
+            and (
+                capture("^(?<start>[0-9]+)(-(?<end>[0-9]+))?$") as $port
+                | ($port.start | tonumber) >= 1
+                and ($port.start | tonumber) <= 65535
+                and (($port.end // $port.start) | tonumber) >= ($port.start | tonumber)
+                and (($port.end // $port.start) | tonumber) <= 65535
+            );
         (.forwards | type == "array") and
         (.open_ports | type == "object") and
         (.open_ports.tcp | type == "array") and
         (.open_ports.udp | type == "array") and
         (.blacklist | type == "array") and
         ((.nat_mode // "auto") | IN("auto", "snat", "masquerade")) and
-        ([.open_ports.tcp[], .open_ports.udp[]] |
-            all(type == "string" and test("^[0-9]+$")
-                and ((tonumber >= 1) and (tonumber <= 65535)))) and
+        ([.open_ports.tcp[], .open_ports.udp[]] | all(valid_port_spec)) and
         (.forwards | all(
             (.proto | IN("tcp", "udp")) and
             (.sport | type == "string" and test("^[0-9]+$")) and
@@ -195,8 +203,24 @@ fi
 
 BLACKLIST=$(jq -r '.blacklist | join(", ")' "$STATE_FILE")
 [[ -n "$BLACKLIST" ]] || BLACKLIST=127.0.0.2
-TCP_PORTS=$(jq -r '.open_ports.tcp | map(tonumber) | unique | sort | join(", ")' "$STATE_FILE")
-UDP_PORTS=$(jq -r '.open_ports.udp | map(tonumber) | unique | sort | join(", ")' "$STATE_FILE")
+TCP_PORTS=$(jq -r '
+    .open_ports.tcp
+    | unique
+    | sort_by(
+        capture("^(?<start>[0-9]+)(-(?<end>[0-9]+))?$")
+        | [(.start | tonumber), ((.end // .start) | tonumber)]
+      )
+    | join(", ")
+' "$STATE_FILE")
+UDP_PORTS=$(jq -r '
+    .open_ports.udp
+    | unique
+    | sort_by(
+        capture("^(?<start>[0-9]+)(-(?<end>[0-9]+))?$")
+        | [(.start | tonumber), ((.end // .start) | tonumber)]
+      )
+    | join(", ")
+' "$STATE_FILE")
 [[ -n "$TCP_PORTS" ]] || TCP_PORTS=65535
 [[ -n "$UDP_PORTS" ]] || UDP_PORTS=65535
 

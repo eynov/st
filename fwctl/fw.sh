@@ -52,54 +52,117 @@ trigger_render() {
 }
 
 validate_protocol() {
-    case "$1" in
-        tcp|udp) ;;
+    local proto=${1,,}
+    case "$proto" in
+        tcp|udp|both)
+            printf '%s\n' "$proto"
+            ;;
         *)
-            echo "❌ 非法协议 '$1'；只允许 tcp 或 udp" >&2
+            echo "❌ 非法协议 '$1'；只允许 tcp、udp 或 both" >&2
             return 1
             ;;
     esac
 }
 
-validate_port() {
-    local port=$1
-    if [[ ! "$port" =~ ^[0-9]+$ ]] || ((10#$port < 1 || 10#$port > 65535)); then
-        echo "❌ 非法端口 '$port'；必须是 1-65535 的整数" >&2
+normalize_port_spec() {
+    local spec=$1 start end
+    if [[ ! "$spec" =~ ^([0-9]+)(-([0-9]+))?$ ]]; then
+        echo "❌ 非法端口 '$spec'；必须是 1-65535 的整数或 START-END 范围" >&2
         return 1
+    fi
+
+    start=${BASH_REMATCH[1]}
+    end=${BASH_REMATCH[3]:-${BASH_REMATCH[1]}}
+    while [[ ${#start} -gt 1 && ${start:0:1} == 0 ]]; do start=${start:1}; done
+    while [[ ${#end} -gt 1 && ${end:0:1} == 0 ]]; do end=${end:1}; done
+
+    if [[ ${#start} -gt 5 || ${#end} -gt 5 ]] ||
+        ((10#$start < 1 || 10#$start > 65535 ||
+          10#$end < 1 || 10#$end > 65535)); then
+        echo "❌ 非法端口 '$spec'；端口必须位于 1-65535" >&2
+        return 1
+    fi
+    if ((10#$start > 10#$end)); then
+        echo "❌ 非法端口范围 '$spec'；起始端口必须小于或等于结束端口" >&2
+        return 1
+    fi
+
+    if [[ "$start" == "$end" ]]; then
+        printf '%s\n' "$start"
+    else
+        printf '%s-%s\n' "$start" "$end"
     fi
 }
 
 port_list() {
-    echo "TCP: $(jq -r '.open_ports.tcp | map(tonumber) | unique | sort | join(", ")' "$STATE_FILE")"
-    echo "UDP: $(jq -r '.open_ports.udp | map(tonumber) | unique | sort | join(", ")' "$STATE_FILE")"
+    jq -r '
+        def sorted:
+            unique
+            | sort_by(
+                capture("^(?<start>[0-9]+)(-(?<end>[0-9]+))?$")
+                | [(.start | tonumber), ((.end // .start) | tonumber)]
+              );
+        (.open_ports.tcp // []) as $tcp
+        | (.open_ports.udp // []) as $udp
+        | ($tcp - $udp | sorted | join(", ")) as $tcp_only
+        | ($udp - $tcp | sorted | join(", ")) as $udp_only
+        | ([$tcp[] | select(. as $port | $udp | index($port))] | sorted | join(", ")) as $both
+        | "TCP: \($tcp_only)\nUDP: \($udp_only)\nBOTH: \($both)"
+    ' "$STATE_FILE"
 }
 
 port_update() {
-    local action=$1 proto=$2 port=$3 candidate action_label
-    validate_protocol "$proto" || return 1
-    validate_port "$port" || return 1
+    local action=$1 requested_proto=$2 requested_port=$3
+    local proto port candidate action_label targets_json
+    proto=$(validate_protocol "$requested_proto") || return 1
+    port=$(normalize_port_spec "$requested_port") || return 1
+    if [[ "$proto" == both ]]; then
+        targets_json='["tcp","udp"]'
+    else
+        targets_json="[\"$proto\"]"
+    fi
 
-    if [[ "$action" == add ]] && jq -e --arg proto "$proto" --arg port "$port" \
-        '.open_ports[$proto] | index($port) != null' "$STATE_FILE" >/dev/null; then
+    if [[ "$action" == add ]] && jq -e --argjson targets "$targets_json" --arg port "$port" \
+        '. as $state
+         | all($targets[]; . as $proto | $state.open_ports[$proto] | index($port) != null)' \
+        "$STATE_FILE" >/dev/null; then
         echo "ℹ️ $proto/$port 已存在，无需重复添加"
         return 0
     fi
-    if [[ "$action" == remove ]] && ! jq -e --arg proto "$proto" --arg port "$port" \
-        '.open_ports[$proto] | index($port) != null' "$STATE_FILE" >/dev/null; then
+    if [[ "$action" == remove ]] && ! jq -e --argjson targets "$targets_json" --arg port "$port" \
+        '. as $state
+         | any($targets[]; . as $proto | $state.open_ports[$proto] | index($port) != null)' \
+        "$STATE_FILE" >/dev/null; then
         echo "ℹ️ $proto/$port 不存在，未做修改"
         return 0
     fi
 
     candidate=$(mktemp "$(dirname "$STATE_FILE")/.state.json.XXXXXX")
     if [[ "$action" == add ]]; then
-        jq --arg proto "$proto" --arg port "$port" \
-            '.open_ports[$proto] += [$port]
-             | .open_ports[$proto] |= (map(tonumber) | unique | sort | map(tostring))' \
+        jq --argjson targets "$targets_json" --arg port "$port" '
+            def sorted_ports:
+                unique
+                | sort_by(
+                    capture("^(?<start>[0-9]+)(-(?<end>[0-9]+))?$")
+                    | [(.start | tonumber), ((.end // .start) | tonumber)]
+                  );
+            reduce $targets[] as $proto (.;
+                .open_ports[$proto] = ((.open_ports[$proto] + [$port]) | sorted_ports)
+            )
+        ' \
             "$STATE_FILE" > "$candidate"
     else
-        jq --arg proto "$proto" --arg port "$port" \
-            '.open_ports[$proto] -= [$port]
-             | .open_ports[$proto] |= (map(tonumber) | unique | sort | map(tostring))' \
+        jq --argjson targets "$targets_json" --arg port "$port" '
+            def sorted_ports:
+                unique
+                | sort_by(
+                    capture("^(?<start>[0-9]+)(-(?<end>[0-9]+))?$")
+                    | [(.start | tonumber), ((.end // .start) | tonumber)]
+                  );
+            reduce $targets[] as $proto (.;
+                .open_ports[$proto] = ((.open_ports[$proto] - [$port]) | sorted_ports)
+            )
+        ' \
             "$STATE_FILE" > "$candidate"
     fi
     chmod 0644 "$candidate"
@@ -121,8 +184,8 @@ cli_usage() {
     cat <<'EOF'
 用法：
 EOF
-    echo "  $command_name port add tcp|udp PORT"
-    echo "  $command_name port remove tcp|udp PORT"
+    echo "  $command_name port add tcp|udp|both PORT|START-END"
+    echo "  $command_name port remove tcp|udp|both PORT|START-END"
     echo "  $command_name port list"
     echo "  $command_name render"
 }
@@ -231,21 +294,20 @@ show_forward() {
 }
 
 add_port() {
-    read -p "🔹 请输入放行端口 (1-65535): " port
-    read -p "🔹 协议类型 (tcp/udp): " proto
+    read -p "🔹 请输入放行端口或范围 (例如 443 或 60000-61000): " port
+    read -p "🔹 协议类型 (tcp/udp/both): " proto
     port_update add "$proto" "$port"
 }
 
 del_port() {
-    read -p "❌ 请输入要取消放行的端口: " port
-    read -p "🔹 协议类型 (tcp/udp): " proto
+    read -p "❌ 请输入要取消放行的端口或范围: " port
+    read -p "🔹 协议类型 (tcp/udp/both): " proto
     port_update remove "$proto" "$port"
 }
 
 show_ports() {
     echo -e "\n=== 🔓 开放端口一览 ==="
-    echo "TCP 开放: $(jq -r '.open_ports.tcp? | join(", ")' "$STATE_FILE" 2>/dev/null)"
-    echo "UDP 开放: $(jq -r '.open_ports.udp? | join(", ")' "$STATE_FILE" 2>/dev/null)"
+    port_list
     echo ""
 }
 

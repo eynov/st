@@ -58,13 +58,25 @@ SSH 和普通 TCP 业务端口的 accept 规则位于全局 SYN 限速之前，�
 
 ```bash
 fw port add tcp 443
-fw port add udp 443
+fw port add udp 60000-61000
+fw port add both 443
 fw port remove tcp 443
 fw port list
 ```
 
-协议只能是 `tcp` 或 `udp`，端口必须是 `1-65535` 的整数。命令会自动去重和数值排序。
-删除不存在的端口会明确提示且不修改状态。
+放行端口支持单端口（如 `443`）和闭区间范围（如 `60000-61000`）；协议支持
+`tcp`、`udp`、`both`，输入大小写不敏感并统一按小写语义处理。`both` 是一次逻辑操作，
+会在现有 `open_ports.tcp[]` 与 `open_ports.udp[]` 中各保存一份相同端口规范，并渲染为
+TCP、UDP 两个 nftables interval set，不会把范围展开成独立端口。命令会自动去重并按范围
+起止端口排序；删除不存在的端口会明确提示且不修改状态。
+
+HY2 Port Hopping 的通用放行示例（fwctl 不依赖 HY2）：
+
+```bash
+fw port add udp 60000-61000
+```
+
+对应输入为端口 `60000-61000`、协议 `udp`。
 
 端口操作采用事务流程：先生成候选状态和临时 nft 配置，执行 `nft -c -f`，成功加载后才保存
 状态。语法检查或加载失败时，原状态、运行 ruleset 和持久配置保持不变。
@@ -140,5 +152,5 @@ fwctl/tests/test_fwctl.sh
 nft -c -f /etc/nftables.conf
 ```
 
-测试覆盖 NAT 模式选择、非法模式和地址、TCP/UDP 端口增删、重复添加、非法协议、端口越界和
-连续 render 幂等性。
+测试覆盖 NAT 模式选择、非法模式和地址、TCP/UDP/both 单端口及范围增删、边界值、重复添加、
+非法协议、非法端口规范、旧配置兼容和连续 render 幂等性。
