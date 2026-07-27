@@ -1,3 +1,21 @@
+# Development Source
+
+This directory is the only development source for fwctl.
+
+The Gitea repository is authoritative. GitHub is a mirror only.
+
+Back production deployment:
+
+    /opt/fwctl
+
+Back production configuration:
+
+    /srv/docker/host-config/fwctl
+
+Do not develop directly inside production directories.
+
+---
+
 # fwctl
 
 `fwctl` 项目安装后的命令名为 `fw`。它使用持久状态生成 nftables 的 input、forward 和
