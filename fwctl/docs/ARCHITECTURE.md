@@ -1,7 +1,8 @@
-# fwctl v4 架构
+# fwctl 架构
 
-本文档描述 fwctl v4 的目标架构。v4 是一次架构重写，不是对 v3 的增量修补；但
-v3 的全部能力、CLI 入口和 `state.json` 都必须继续可用。
+本文档描述 fwctl 的目标架构。它源自一次架构重写而非对旧实现的增量修补，但旧版本
+的全部能力、CLI 入口和 `state.json` 都必须继续可用。重写前后的差异见
+[MIGRATION.md](MIGRATION.md) 与各 ADR 的背景小节。
 
 ## 项目边界
 
@@ -30,7 +31,7 @@ CLI 层        fw.sh  →  core/cli.sh
               Target / Service / Rule 的 CRUD、引用解析、唯一性与语义校验。
 
 迁移层        core/migration.sh
-              schema_version 探测与 v1 → v4 升级。只在加载路径上运行一次。
+              schema_version 探测与旧格式升级。只在加载路径上运行一次。
 
 渲染层        core/render.sh
               纯函数：state（JSON）→ nftables 配置文本。不触碰内核，不写系统文件。
@@ -95,6 +96,7 @@ fwctl/
 ```text
 /var/lib/fwctl/backups/<backup-id>/   备份
 /var/lib/fwctl/rollback.nft           最近一次 apply 前的 ruleset 快照
+/var/lib/fwctl/journal.json           未完成事务的日志，正常结束后删除
 /run/lock/fwctl/fwctl.lock            全局写锁
 /etc/nftables.conf                    持久化 ruleset
 ```
@@ -115,6 +117,10 @@ table ip fwctl { ... }    # 用新内容重建
 云 agent 写入的规则）完全不受影响。参见
 [ADR 0002](adr/0002-own-table-no-flush.md)。
 
+旧表的收编有前提：只删除通过**结构指纹**确认属于旧 fwctl 的表，且只在首次迁移时
+执行一次。指纹不匹配的同名表一律保留并持续告警，绝不删除。详见
+[ADR 0002](adr/0002-own-table-no-flush.md)。
+
 表内同时容纳 filter 与 nat 两类 chain：
 
 ```text
@@ -131,8 +137,18 @@ table ip fwctl {
 是稳定句柄：`fw stats` 通过 `nft -j list table ip fwctl` 读回 counter 并按
 comment 关联回对象。counter 可以在 settings 中整体关闭。
 
-渲染必须是确定性的：相同 state 加相同外部事实，逐字节产出相同文件。对象按
-`(priority, id)` 排序，端口按区间起止排序，集合元素去重。
+### 渲染确定性
+
+渲染必须是确定性的，且**与对象的插入历史无关**：相同 state 加相同外部事实，逐字节
+产出相同文件。
+
+- `state.json` 内各对象数组按 `id` 升序规范化存储；
+- 规则按 `(priority, id)` 升序渲染；
+- set 元素按区间起止数值排序并去重；
+- chain 按固定顺序输出。
+
+目的是让无关的变更不产生 diff 噪声：`fw diff` 中出现的每一行差异都对应一次真实的
+语义变化，而不是某个对象恰好被后添加。
 
 ## 事务模型
 
@@ -140,15 +156,19 @@ comment 关联回对象。counter 可以在 settings 中整体关闭。
 
 ```text
 flock（全局写锁，非阻塞，冲突返回退出码 4）
+  → 崩溃恢复：若存在未完成的 journal，先收敛它
   → 复制 state.json 为同目录候选文件
   → 在候选上应用变更
   → schema 校验 + 语义校验（引用可解析、地址合法、SNAT 地址在本机）
   → 渲染候选 → build/candidate.nft
   → nft -c -f candidate.nft            语法与内核可接受性检查
   → 快照当前 ruleset → rollback.nft    记录表此前是否存在
+  → 写 journal（阶段=prepared，含候选路径、快照路径、是否含旧表接管）
   → nft -f candidate.nft               原子应用
+  → journal 标记 applied
   → 应用后验证（表存在、chain 齐全、规则条数符合预期）
   → commit：原子替换 state.json、build/nft.conf、/etc/nftables.conf
+  → journal 标记 committed 并删除
   → 释放锁
 ```
 
@@ -159,8 +179,24 @@ flock（全局写锁，非阻塞，冲突返回退出码 4）
   候选文件。若表在事务前不存在，回滚即删除该表。
 - commit 阶段失败 → 同上回滚内核，并保留原 `state.json`。
 
-成功提示只在全部步骤通过后输出，失败一律返回非零。参见
-[ADR 0003](adr/0003-single-transaction-boundary.md)。
+### 崩溃恢复
+
+进程可能在 apply 与 commit 之间被 kill、OOM 或断电。这个窗口里内核已改而磁盘未改，
+仅靠退出路径上的回滚无法覆盖。
+
+因此事务在 apply 前写入 `journal.json`，其中带 `journal_version` 字段——日志格式
+从第一天起就是有版本的，未来演进不会与旧日志产生歧义。恢复逻辑遇到未知的更高
+`journal_version` 时拒绝自动恢复并明确报错，而不是按当前格式误解析。
+
+任何 fwctl 命令启动时若发现处于非终态的 journal，先执行恢复：依据记录的阶段与
+rollback 快照判定停在哪一步，要么重放回滚、要么完成提交，并把恢复结果输出给用户。
+
+`metadata.legacy_adopted_at` 必须在这个边界内原子化：它只能在 `nft apply` 成功后
+随事务提交写入。若在 apply 前预写，一次失败的首次迁移会让旧表永久失去被接管的
+机会——下次 render 认为已接管、不再输出删除语句，旧表就此滞留。
+
+成功提示只在全部步骤通过后输出，失败一律返回非零。退出码语义见 [CLI.md](CLI.md)，
+完整决策见 [ADR 0003](adr/0003-single-transaction-boundary.md)。
 
 ## 只读路径
 
@@ -182,5 +218,4 @@ flock（全局写锁，非阻塞，冲突返回退出码 4）
 
 `sb` 不管理防火墙（见 `sb/docs/adr/0002-firewall-is-an-external-responsibility.md`），
 只输出端口需求。fwctl 是消费方，但两个项目之间没有代码依赖，也没有共享状态：
-用户或运维把 sb 的端口需求通过 `fw port add` 写入 fwctl。这条边界在 v4 保持
-不变。
+用户或运维把 sb 的端口需求通过 `fw port add` 写入 fwctl。这条边界保持不变。
