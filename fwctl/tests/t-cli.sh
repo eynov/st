@@ -375,6 +375,124 @@ assert_eq "真实差异（速率不同）仍被检出" \
             <(_cli_semantic_lines "$BURST_DIR/live-real-drift.nft") >/dev/null || echo differs)" "differs"
 rm -rf "$BURST_DIR"
 
+# ── fw diff 对折行 elements 的归一化 ──────────────────────────────────
+#
+# 元素较多时 nft 回读会把集合折成多行，而我们渲染成一行。不归一化的话，端口一多
+# fw diff 就永远报告一条并不存在的差异（真实主机 sharon 上 8 个端口即触发）。
+
+WRAP_DIR=$(mktemp -d)
+# 我们渲染出的形态：单行
+cat > "$WRAP_DIR/rendered.nft" <<'EOF'
+table ip fwctl {
+    set allowed_ports_tcp {
+        type inet_service
+        flags interval
+        elements = { 80, 323, 443, 25831, 30029, 30092, 37091, 39379 }
+    }
+}
+EOF
+# nft 1.0.6 回读的形态：同样的元素，但折行且带 tab 缩进
+cat > "$WRAP_DIR/live-wrapped.nft" <<'EOF'
+table ip fwctl {
+	set allowed_ports_tcp {
+		type inet_service
+		flags interval
+		elements = { 80, 323, 443, 25831, 30029,
+			     30092, 37091, 39379 }
+	}
+}
+EOF
+assert_eq "折行的元素列表与单行渲染等价" \
+    "$(diff <(_cli_semantic_lines "$WRAP_DIR/rendered.nft") \
+            <(_cli_semantic_lines "$WRAP_DIR/live-wrapped.nft") >/dev/null && echo same)" "same"
+
+# 折成三行同样要能拼回。
+cat > "$WRAP_DIR/live-wrapped3.nft" <<'EOF'
+table ip fwctl {
+	set allowed_ports_tcp {
+		type inet_service
+		flags interval
+		elements = { 80, 323, 443,
+			     25831, 30029,
+			     30092, 37091, 39379 }
+	}
+}
+EOF
+assert_eq "折成多行也能正确拼回" \
+    "$(diff <(_cli_semantic_lines "$WRAP_DIR/rendered.nft") \
+            <(_cli_semantic_lines "$WRAP_DIR/live-wrapped3.nft") >/dev/null && echo same)" "same"
+
+# 真实差异必须仍然被检出——归一化不得掩盖元素本身的不同。
+cat > "$WRAP_DIR/live-drift.nft" <<'EOF'
+table ip fwctl {
+	set allowed_ports_tcp {
+		type inet_service
+		flags interval
+		elements = { 80, 323, 443, 25831, 30029,
+			     30092, 37091, 39999 }
+	}
+}
+EOF
+assert_eq "元素内容不同仍报告漂移" \
+    "$(diff <(_cli_semantic_lines "$WRAP_DIR/rendered.nft") \
+            <(_cli_semantic_lines "$WRAP_DIR/live-drift.nft") >/dev/null || echo differs)" "differs"
+
+# 少一个元素也必须被检出。
+cat > "$WRAP_DIR/live-missing.nft" <<'EOF'
+table ip fwctl {
+	set allowed_ports_tcp {
+		type inet_service
+		flags interval
+		elements = { 80, 323, 443, 25831, 30029,
+			     30092, 37091 }
+	}
+}
+EOF
+assert_eq "元素缺失仍报告漂移" \
+    "$(diff <(_cli_semantic_lines "$WRAP_DIR/rendered.nft") \
+            <(_cli_semantic_lines "$WRAP_DIR/live-missing.nft") >/dev/null || echo differs)" "differs"
+
+# 短的单行集合（de 上的情形）必须继续正常工作。
+cat > "$WRAP_DIR/short-rendered.nft" <<'EOF'
+table ip fwctl {
+    set allowed_ports_tcp {
+        type inet_service
+        flags interval
+        elements = { 80, 443 }
+    }
+}
+EOF
+cat > "$WRAP_DIR/short-live.nft" <<'EOF'
+table ip fwctl {
+	set allowed_ports_tcp {
+		type inet_service
+		flags interval
+		elements = { 80, 443 }
+	}
+}
+EOF
+assert_eq "短的未折行集合继续等价" \
+    "$(diff <(_cli_semantic_lines "$WRAP_DIR/short-rendered.nft") \
+            <(_cli_semantic_lines "$WRAP_DIR/short-live.nft") >/dev/null && echo same)" "same"
+assert_eq "短集合的真实差异仍被检出" \
+    "$(printf 'table ip fwctl {\n set s {\n elements = { 80, 8443 }\n }\n}\n' > "$WRAP_DIR/short-drift.nft"
+       diff <(_cli_semantic_lines "$WRAP_DIR/short-rendered.nft") \
+            <(_cli_semantic_lines "$WRAP_DIR/short-drift.nft") >/dev/null || echo differs)" "differs"
+
+# 归一化只针对 elements：其他多行结构不得被误拼接。
+cat > "$WRAP_DIR/rules.nft" <<'EOF'
+table ip fwctl {
+	chain input {
+		type filter hook input priority filter; policy drop;
+		tcp dport 80 counter accept comment "fwctl:a"
+		tcp dport 443 counter accept comment "fwctl:b"
+	}
+}
+EOF
+assert_eq "普通规则行不会被误拼成一行" \
+    "$(_cli_semantic_lines "$WRAP_DIR/rules.nft" | grep -c '^tcp dport')" "2"
+rm -rf "$WRAP_DIR"
+
 # ── validate 与 diff ──────────────────────────────────────────────────
 
 setup_env validate

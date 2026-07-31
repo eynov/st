@@ -502,14 +502,32 @@ cli_diff() {
 
 # 提取可比较的语义行：去掉表声明、计数值与排版差异。
 #
-# `burst N packets` 必须一并归一化：nftables 1.0.6 在回读时省略它，1.1.x 会打印，
-# 因此不归一化的话 fw diff 会在 1.0.6 上永远报告一条并不存在的差异。
+# 两处排版差异必须归一化，否则 fw diff 会报告并不存在的漂移，从而失去发现真实
+# 漂移的作用：
+#
+#   * `burst N packets`：nftables 1.0.6 回读时省略它，1.1.x 会打印。
+#   * 换行的 `elements = { ... }`：元素较多时 nft 会把集合折行输出，而我们渲染
+#     成一行。折行阈值取决于元素个数，因此端口一多就必然触发。
 _cli_semantic_lines() {
+    # 先把折行的 elements 块拼回一行，再做既有的空白归一化。
+    # 只处理 elements 构造本身，其余行原样透传，避免掩盖真实差异。
+    awk '
+        joining {
+            buf = buf " " $0
+            if (index($0, "}")) { print buf; joining = 0 }
+            next
+        }
+        /elements[[:space:]]*=[[:space:]]*\{/ && index($0, "}") == 0 {
+            buf = $0; joining = 1; next
+        }
+        { print }
+        END { if (joining) print buf }
+    ' "$1" |
     sed -e '/^table ip .* { }$/d' -e '/^delete table/d' \
         -e 's/counter packets [0-9]* bytes [0-9]*/counter/' \
         -e 's/ burst [0-9]* packets//' \
-        -e 's/[[:space:]]\+/ /g' -e 's/^ //' -e 's/ $//' \
-        "$1" | grep -v '^$'
+        -e 's/[[:space:]]\+/ /g' -e 's/^ //' -e 's/ $//' |
+    grep -v '^$'
 }
 
 
