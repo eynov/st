@@ -1,0 +1,164 @@
+#!/bin/bash
+# tests/fixtures/fake-nft —— 无内核环境下的 nft 替身
+#
+# 支持事务层需要的三种调用：
+#   nft -c -f FILE          语法检查
+#   nft -f FILE             应用
+#   nft -j list table ip T  以 JSON 读回（供 stats 与应用后验证）
+#   nft list table ip T     以文本读回（供回滚快照）
+#
+# 状态保存在 FAKE_NFT_STATE 指向的目录里，因此测试可以观察「内核」当前有什么。
+#
+# 失败注入：
+#   FAKE_NFT_FAIL_CHECK=1   让 -c 失败
+#   FAKE_NFT_FAIL_APPLY=1   让 -f 失败
+#   FAKE_NFT_FAIL_APPLY_ONCE=<path>  首次 -f 失败并删除该标记文件，之后成功
+#   FAKE_NFT_CORRUPT_APPLY=1 让 -f 声称成功但实际不改变「内核」状态
+
+set -u
+
+STATE_DIR="${FAKE_NFT_STATE:-/tmp/fake-nft-state}"
+mkdir -p "$STATE_DIR"
+
+# 校验一份配置文本的基本结构：占位符是否展开、花括号是否配对。
+validate_file() {
+    local file=$1
+
+    if [[ ! -f "$file" ]]; then
+        echo "fake-nft: no such file: $file" >&2
+        return 1
+    fi
+    if grep -Eq '#(BLACKLIST|TCP_PORTS|UDP_PORTS|SSH_PORT|DNAT_RULES|SNAT_RULES)#' "$file"; then
+        echo "fake-nft: unexpanded template placeholder" >&2
+        return 1
+    fi
+    if grep -q 'dnat to @' "$file"; then
+        echo "fake-nft: Error: unknown raw payload base (dnat to a set)" >&2
+        return 1
+    fi
+    awk '
+        { opens += gsub(/\{/, "{"); closes += gsub(/\}/, "}") }
+        END { exit opens == closes ? 0 : 1 }
+    ' "$file" || {
+        echo "fake-nft: unbalanced braces" >&2
+        return 1
+    }
+    return 0
+}
+
+# 把配置文本应用到「内核」状态：逐表记录最终内容。
+# 处理 `table ip X { }` / `delete table ip X` / `table ip X { ... }` 三种语句。
+#
+# 用 bash 而不是 awk 实现：awk 的文件输出与 system() 混用在 mawk 下不可靠，
+# 而这里的解析逻辑本身很简单。
+apply_file() {
+    local file=$1
+    local line current="" depth=0 name opens closes
+
+    while IFS= read -r line; do
+        if [[ "$line" =~ ^table[[:space:]]+ip[[:space:]]+([A-Za-z0-9_]+)[[:space:]]*\{[[:space:]]*\}[[:space:]]*$ ]]; then
+            # 预声明：确保表存在，已存在则不动它。
+            name=${BASH_REMATCH[1]}
+            [[ -f "$STATE_DIR/table-$name" ]] || : > "$STATE_DIR/table-$name"
+            continue
+        fi
+        if [[ "$line" =~ ^delete[[:space:]]+table[[:space:]]+ip[[:space:]]+([A-Za-z0-9_]+) ]]; then
+            name=${BASH_REMATCH[1]}
+            rm -f "$STATE_DIR/table-$name"
+            continue
+        fi
+        if [[ -z "$current" &&
+              "$line" =~ ^table[[:space:]]+ip[[:space:]]+([A-Za-z0-9_]+)[[:space:]]*\{[[:space:]]*$ ]]; then
+            current=${BASH_REMATCH[1]}
+            : > "$STATE_DIR/table-$current"
+            depth=1
+            continue
+        fi
+        if [[ -n "$current" ]]; then
+            opens=${line//[!\{]/}
+            closes=${line//[!\}]/}
+            depth=$((depth + ${#opens} - ${#closes}))
+            if ((depth <= 0)); then
+                current=""
+                continue
+            fi
+            printf '%s\n' "$line" >> "$STATE_DIR/table-$current"
+        fi
+    done < "$file"
+}
+
+case "${1:-}" in
+    -c)
+        [[ "${2:-}" == "-f" ]] || { echo "fake-nft: expected -f" >&2; exit 2; }
+        [[ "${FAKE_NFT_FAIL_CHECK:-0}" == 1 ]] && {
+            echo "fake-nft: injected check failure" >&2
+            exit 1
+        }
+        validate_file "${3:-}"
+        exit $?
+        ;;
+    -f)
+        [[ "${FAKE_NFT_FAIL_APPLY:-0}" == 1 ]] && {
+            echo "fake-nft: injected apply failure" >&2
+            exit 1
+        }
+        if [[ -n "${FAKE_NFT_FAIL_APPLY_ONCE:-}" && -f "${FAKE_NFT_FAIL_APPLY_ONCE}" ]]; then
+            rm -f "$FAKE_NFT_FAIL_APPLY_ONCE"
+            echo "fake-nft: injected one-shot apply failure" >&2
+            exit 1
+        fi
+        validate_file "${2:-}" || exit 1
+        # 声称成功但不改变状态，用于测试应用后验证能否发现问题。
+        [[ "${FAKE_NFT_CORRUPT_APPLY:-0}" == 1 ]] && exit 0
+        apply_file "${2:-}"
+        exit 0
+        ;;
+    -j)
+        # nft -j list table ip <name>
+        [[ "${2:-}" == "list" && "${3:-}" == "table" ]] || {
+            echo "fake-nft: unsupported json query" >&2
+            exit 2
+        }
+        name=${5:-}
+        path="$STATE_DIR/table-$name"
+        [[ -f "$path" ]] || {
+            echo "fake-nft: No such file or directory" >&2
+            exit 1
+        }
+        # 把记录下来的规则行转成带 comment 与 counter 的 JSON，
+        # 供 stats 关联对象与应用后验证统计规则数。
+        {
+            printf '{"nftables": ['
+            first=1
+            while IFS= read -r line; do
+                [[ "$line" == *comment* ]] || continue
+                comment=$(sed -n 's/.*comment "\([^"]*\)".*/\1/p' <<< "$line")
+                [[ -n "$comment" ]] || continue
+                ((first)) || printf ','
+                first=0
+                printf '{"rule":{"comment":"%s","expr":[{"counter":{"packets":0,"bytes":0}}]}}' \
+                    "$comment"
+            done < "$path"
+            printf ']}'
+        }
+        exit 0
+        ;;
+    list)
+        # nft list table ip <name>
+        [[ "${2:-}" == "table" ]] || { echo "fake-nft: unsupported list" >&2; exit 2; }
+        name=${4:-}
+        path="$STATE_DIR/table-$name"
+        [[ -f "$path" ]] || {
+            echo "fake-nft: No such file or directory" >&2
+            exit 1
+        }
+        printf 'table ip %s {\n' "$name"
+        cat "$path"
+        printf '}\n'
+        exit 0
+        ;;
+    *)
+        echo "fake-nft: unsupported invocation: $*" >&2
+        exit 2
+        ;;
+esac

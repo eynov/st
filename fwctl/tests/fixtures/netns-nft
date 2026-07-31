@@ -1,0 +1,21 @@
+#!/bin/bash
+# tests/fixtures/netns-nft —— 在隔离 network namespace 中执行真实 nft
+#
+# FWCTL_TEST_NETNS=1 时作为 FWCTL_NFT_BIN 使用，让 apply、回滚和崩溃恢复跑在
+# 真实内核上，而不是停留在 mock 断言。netns 提供完整的 netfilter 子系统，但与
+# 宿主机的规则完全隔离，因此测试不会影响这台机器上的任何服务。
+#
+# 需要 root 与 iproute2。namespace 由 tests/run.sh 负责创建与销毁。
+
+set -u
+
+NETNS="${FWCTL_TEST_NETNS_NAME:-fwctl-test}"
+
+if ! ip netns list 2>/dev/null | grep -qw "$NETNS"; then
+    ip netns add "$NETNS" || {
+        echo "netns-nft: 无法创建 network namespace $NETNS" >&2
+        exit 1
+    }
+fi
+
+exec ip netns exec "$NETNS" nft "$@"
