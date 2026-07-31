@@ -29,6 +29,9 @@ provided/trusted 轮换必须同时传入新的 `--certificate` 和 `--key`。�
 `sb status` 显示运行概况，`sb doctor` 逐节点检查证书可读性和到期天数；少于 30 天
 按失败报告。日志、state export 与 dry-run 默认不显示完整密码、UUID、私钥或 URI。
 
+VLESS 只有 `--mode ws` 使用本章的普通 TLS/证书模型；两个 Reality mode 使用 REALITY
+keypair，不读取普通 TLS 证书。WS 与 Reality/Vision 字段不能混用。
+
 并非所有客户端生态都支持相同的 pin 字段。本项目只输出经过固定核心/矩阵验证的
 映射；无法安全表达 pin 的 Surge 组合会被禁用，而不是退化为无提示 insecure。
 

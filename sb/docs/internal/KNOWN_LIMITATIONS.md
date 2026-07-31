@@ -6,7 +6,7 @@
 - 项目无法从本机证明云安全组、上游 NAT、DDoS 清洗或外部防火墙允许 UDP。
 - HY2 Port Hopping interval 固定为 30 秒，以保证不携带 interval 的标准 URI 与
   其他客户端输出语义一致。
-- AnyTLS 没有启用未经版本化验证的通用 URI；AnyTLS、SS2022、VLESS Reality 的
+- AnyTLS 没有启用未经版本化验证的通用 URI；AnyTLS、SS2022、VLESS 三模式的
   Surge 输出禁用；HY2 自签/用户证书的 Surge 输出禁用。
 - `clash.yaml` 使用 JSON 表示；JSON 是 YAML 1.2 的可解析子集，但文件不是手写
   YAML 风格。

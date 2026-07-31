@@ -91,6 +91,8 @@ OPT_KEY=""
 OPT_ROTATE_CERTIFICATE=false
 OPT_MASQUERADE=""
 OPT_SERVER_NAME=""
+OPT_MODE=""
+OPT_PATH=""
 OPT_HOP_MODE="unchanged"
 OPT_HOP_RANGE=""
 OPT_HOP_INTERVAL=""
@@ -99,7 +101,7 @@ OPT_HOP_ACK=false
 parse_instance_options() {
     OPT_PORT=""; OPT_METHOD=""; OPT_PASSWORD_FILE=""; OPT_ROTATE_PASSWORD=false
     OPT_SNI=""; OPT_TLS_MODE=""; OPT_CERT=""; OPT_KEY=""; OPT_ROTATE_CERTIFICATE=false
-    OPT_MASQUERADE=""; OPT_SERVER_NAME=""
+    OPT_MASQUERADE=""; OPT_SERVER_NAME=""; OPT_MODE=""; OPT_PATH=""
     OPT_HOP_MODE="unchanged"; OPT_HOP_RANGE=""; OPT_HOP_INTERVAL=""; OPT_HOP_ACK=false
     while (($#)); do
         case "$1" in
@@ -123,6 +125,10 @@ parse_instance_options() {
                 OPT_MASQUERADE="$2"; shift 2 ;;
             --server-name) (($# >= 2)) || { err "--server-name requires a value"; return 64; }
                 OPT_SERVER_NAME="$2"; shift 2 ;;
+            --mode) (($# >= 2)) || { err "--mode requires a value"; return 64; }
+                OPT_MODE="$2"; shift 2 ;;
+            --path) (($# >= 2)) || { err "--path requires a value"; return 64; }
+                OPT_PATH="$2"; shift 2 ;;
             --hop-range) (($# >= 2)) || { err "--hop-range requires a value"; return 64; }
                 OPT_HOP_MODE="enabled"; OPT_HOP_RANGE="$2"; shift 2 ;;
             --hop-interval) (($# >= 2)) || { err "--hop-interval requires a value"; return 64; }
@@ -200,6 +206,7 @@ options_build() {
       --arg certificate_path "$OPT_CERT" --arg key_path "$OPT_KEY" \
       --argjson rotate_certificate "$OPT_ROTATE_CERTIFICATE" \
       --arg masquerade "$OPT_MASQUERADE" --arg server_name "$OPT_SERVER_NAME" \
+      --arg mode "$OPT_MODE" --arg path "$OPT_PATH" \
       --argjson hop "$hop" '
       {}
       + (if $port!="" then {port:($port|tonumber)} else {} end)
@@ -212,6 +219,8 @@ options_build() {
       + (if $rotate_certificate then {rotate_certificate:true} else {} end)
       + (if $masquerade!="" then {masquerade:$masquerade} else {} end)
       + (if $server_name!="" then {server_name:$server_name} else {} end)
+      + (if $mode!="" then {mode:$mode} else {} end)
+      + (if $path!="" then {path:$path} else {} end)
       + (if $hop!=null then {hop:$hop} else {} end)'
 }
 
@@ -240,11 +249,32 @@ options_complete_add() {
             fi
             ;;
         VLESS)
-            [[ -n "$OPT_SERVER_NAME" ]] ||
-                OPT_SERVER_NAME=$(prompt_value "Reality handshake server name") || {
-                    err "--server-name is required"
+            [[ -n "$OPT_MODE" ]] || OPT_MODE="vision-reality"
+            case "$OPT_MODE" in
+                vision-reality|reality)
+                    [[ -n "$OPT_SERVER_NAME" ]] ||
+                        OPT_SERVER_NAME=$(prompt_value "Reality handshake server name") || {
+                            err "--server-name is required for VLESS Reality modes"
+                            return 1
+                        }
+                    ;;
+                ws)
+                    [[ -n "$OPT_PATH" ]] || {
+                        err "--path is required for VLESS WS mode"
+                        return 1
+                    }
+                    [[ -n "$OPT_SNI" ]] ||
+                        OPT_SNI=$(prompt_value "TLS SNI") || {
+                            err "--sni is required for VLESS WS mode"
+                            return 1
+                        }
+                    [[ -n "$OPT_TLS_MODE" ]] || OPT_TLS_MODE="self-signed"
+                    ;;
+                *)
+                    err "VLESS mode must be vision-reality, reality, or ws"
                     return 1
-                }
+                    ;;
+            esac
             ;;
     esac
 }
@@ -333,6 +363,32 @@ mutator_restore() {
     mv -fT "${SB_TXN_SETTINGS_FILE}.restore" "$SB_TXN_SETTINGS_FILE" ||
         { rm -f -- "${SB_TXN_SETTINGS_FILE}.restore"; return 1; }
     return 0
+}
+
+mutator_state_import() {
+    local state="$1" import_file="$2"
+    cp -- "$import_file" "${state}.import" || return 1
+    chmod 600 "${state}.import" || { rm -f -- "${state}.import"; return 1; }
+    mv -fT "${state}.import" "$state" || { rm -f -- "${state}.import"; return 1; }
+    return 0
+}
+
+cmd_state_import() {
+    local import_file="$1"
+    require_root
+    [[ -f "$import_file" && -r "$import_file" ]] || {
+        err "state import file is not readable: $import_file"
+        return 1
+    }
+    state_validate_file "$import_file" || {
+        err "state import rejected before publication"
+        return 1
+    }
+    if [[ "$SB_DRY_RUN" != "true" ]]; then
+        confirm "Import state from $import_file and replace all instances" || return 1
+    fi
+    transaction_run "state import $(basename "$import_file")" \
+      mutator_state_import "$import_file"
 }
 
 show_hy2_notice() {
@@ -564,6 +620,7 @@ cmd_validate() {
     state_validate_file "$SB_CURRENT_STATE"
     runtime_validate_outputs "$SB_CURRENT_OUTPUT"
     runtime_check_config "$SB_CURRENT_CONFIG"
+    runtime_check_client_config "$SB_CURRENT_OUTPUT/clients/sing-box.json"
     if [[ "$SB_JSON" == "true" ]]; then
         printf '{"valid":true}\n'
     else
@@ -578,6 +635,7 @@ cmd_render() (
     trap 'rm -rf -- "$temp"' EXIT
     runtime_render "$SB_CURRENT_STATE" "$temp/output"
     runtime_check_config "$temp/output/config.json"
+    runtime_check_client_config "$temp/output/clients/sing-box.json"
     if [[ "$SB_JSON" == "true" ]]; then
         jq -n --arg path "$temp/output" --slurpfile manifest "$temp/output/manifest.json" \
           '{valid:true,manifest:$manifest[0],temporary_path:$path}'
@@ -875,7 +933,7 @@ Commands:
   sb firewall
   sb backup
   sb restore BACKUP_ID [--restore-unvalidated-salvage]
-  sb state validate|export
+  sb state validate|export|import FILE
   sb doctor
   sb version
 
@@ -888,6 +946,12 @@ HY2 options:
   --masquerade HTTPS_URL
   --hop-range START-END --hop-interval 30 --ack-port-hopping
   --no-hop
+
+VLESS options:
+  --mode vision-reality|reality|ws
+  default: vision-reality (TCP + REALITY + flow=xtls-rprx-vision)
+  Reality modes: --server-name DOMAIN
+  WS mode: --path PATH --sni DOMAIN [TLS protocol options]
 EOF
 }
 
@@ -1049,7 +1113,12 @@ case "$CMD" in
         case "${1:-}" in
             validate) state_validate_file "$SB_CURRENT_STATE"; ok "state is valid" ;;
             export) state_export_file "$SB_CURRENT_STATE" "$SB_SHOW_SECRETS" ;;
-            *) err "usage: sb state validate|export"; exit 64 ;;
+            import)
+                [[ -n "${2:-}" && $# -eq 2 ]] ||
+                    { err "usage: sb state import FILE"; exit 64; }
+                cmd_state_import "$2"
+                ;;
+            *) err "usage: sb state validate|export|import FILE"; exit 64 ;;
         esac
         ;;
     doctor) require_layout; doctor_run ;;

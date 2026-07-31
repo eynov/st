@@ -134,6 +134,7 @@ runtime_validate_generation() {
     }
     if [[ "$require_core_check" == "true" ]]; then
         runtime_check_config "$generation/output/config.json" || return 1
+        runtime_check_client_config "$generation/output/clients/sing-box.json" || return 1
     fi
     find "$generation" -type f -exec sh -c '
       for file do
@@ -175,6 +176,15 @@ runtime_validate_outputs() {
 }
 
 runtime_check_config() {
+    local config="$1"
+    core_validate_installed false || {
+        err "fixed sing-box binary version/digest/receipt validation failed"
+        return 1
+    }
+    "$SB_BIN" check -c "$config"
+}
+
+runtime_check_client_config() {
     local config="$1"
     core_validate_installed false || {
         err "fixed sing-box binary version/digest/receipt validation failed"

@@ -45,6 +45,12 @@ doctor_run_json() {
     else
         results=$(doctor_add "$results" config fail "sing-box check failed")
     fi
+    if [[ -f "$SB_CURRENT_OUTPUT/clients/sing-box.json" ]] &&
+      runtime_check_client_config "$SB_CURRENT_OUTPUT/clients/sing-box.json" >/dev/null 2>&1; then
+        results=$(doctor_add "$results" client_config pass "sing-box client check passed")
+    else
+        results=$(doctor_add "$results" client_config fail "sing-box client check failed")
+    fi
 
     if endpoint_get >/dev/null 2>&1; then
         message="$(endpoint_get) ($(jq -r '.endpoint.source' "$SB_SETTINGS_FILE"))"
@@ -165,7 +171,8 @@ doctor_run_json() {
             results=$(doctor_add "$results" "tls_mode_${tls_id}" info "explicit insecure compatibility mode; server identity is not verified")
         fi
     done < <(jq -r '.instances | to_entries[] |
-      select(.value.protocol=="HY2" or .value.protocol=="ANYTLS") | .key' \
+      select(.value.protocol=="HY2" or .value.protocol=="ANYTLS" or
+        (.value.protocol=="VLESS" and .value.mode=="ws")) | .key' \
       "$SB_CURRENT_STATE" 2>/dev/null || true)
 
     hop_count=$(jq -r '[.instances[] | select(.enabled and .protocol=="HY2" and .hop.enabled)] | length' \

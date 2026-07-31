@@ -7,7 +7,7 @@
 | 协议 | 要求 |
 |---|---|
 | SS / SS2022 | 同一基础端口 TCP+UDP |
-| AnyTLS / VLESS Reality | 基础端口 TCP |
+| AnyTLS / VLESS（三种模式） | 基础端口 TCP |
 | Hysteria2 无跳跃 | 基础端口 UDP |
 | Hysteria2 有跳跃 | 基础端口 UDP + 完整跳跃范围 UDP + 范围到基础端口转发 |
 

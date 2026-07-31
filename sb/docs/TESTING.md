@@ -25,16 +25,21 @@ SB_TEST_SSURL_BIN=/path/to/shadowsocks-rust-v1.24.0/ssurl \
   sb/tests/run.sh
 ```
 
-`sb/tests/run.sh` 当前注册 29 个测试函数。最近一次独立复审实际执行结果为：
+`sb/tests/run.sh` 当前注册 30 个测试函数。VLESS 三模式新增专项入口
+`test_vless_three_mode_contract`，覆盖 add/edit/enable/disable/delete、非法组合、旧 state
+兼容、backup/restore、state export/import、manager upgrade、URI、Mihomo，以及固定核心对
+服务端和客户端配置的真实 check。
+
+本轮实现后的实际执行结果为：
 
 ```text
-RESULT: pass=241 fail=0
+RESULT: pass=595 fail=0
 skip=0
 xfail=0
 ```
 
-这个 pass 数不覆盖当前已知的两个 High；它说明现有断言通过，不等于所有安全关键
-失败路径已被正确建模。当前准入状态见 [`AI_HANDOFF.md`](internal/AI_HANDOFF.md)。
+这个 pass 数说明现有断言通过，不等于所有真实 systemd、cgroup、reboot 或 VPS 网络行为
+已经验收。当前准入状态见 [`AI_HANDOFF.md`](internal/AI_HANDOFF.md)。
 
 ## 静态检查
 

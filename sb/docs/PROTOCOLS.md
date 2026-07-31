@@ -8,7 +8,9 @@
 | SS AEAD | 支持 | 支持 | 支持 | 支持 | 支持 | TCP+UDP |
 | SS2022 | 支持 | SIP002 | 禁用 | 支持 | 支持 | TCP+UDP |
 | AnyTLS | 支持 | 禁用 | 禁用 | 支持 | 支持 | TCP |
-| VLESS Reality | 支持 | 支持 | 禁用 | 支持 | 支持 | TCP |
+| VLESS Vision Reality（默认） | 支持 | 支持 | 禁用 | 支持 | 支持 | TCP |
+| VLESS Reality（无 flow） | 支持 | 支持 | 禁用 | 支持 | 支持 | TCP |
+| VLESS WebSocket TLS | 支持 | 支持 | 禁用 | 支持 | 支持 | TCP/WS |
 | Hysteria2 | 支持 | 支持 | 条件支持 | 支持 | 支持 | UDP |
 
 Hysteria2 Surge 只在 `trusted` 或明确 `insecure` 模式输出。项目没有建立 Surge
@@ -21,7 +23,7 @@ Hysteria2 Surge 只在 `trusted` 或明确 `insecure` 模式输出。项目没�
 | SS | port、method、password | inbound、URI、Surge、Mihomo、outbound 完全同源 |
 | SS2022 | port、method、定长 Base64 PSK | inbound、SIP002、Mihomo、outbound 完全同源 |
 | AnyTLS | port、password、TLS mode、SNI、cert/pin | inbound、Mihomo、outbound 完全同源 |
-| VLESS | port、UUID、Reality keypair、short ID、server name | inbound、URI、Mihomo、outbound 完全同源 |
+| VLESS | mode、port、UUID；Reality keypair/short ID/server name，或 WS path/TLS | inbound、URI、Mihomo、outbound 完全同源 |
 | HY2 | base port、password、masquerade、TLS、hop range/interval | inbound 与全部可用客户端输出同源 |
 
 所有 tag 都由稳定节点 ID 生成：服务端 `in-<id>`，客户端 `<PROTOCOL>-<id>`。
@@ -36,8 +38,13 @@ UDP，AnyTLS/VLESS 只占用 TCP，因此相同数字的 TCP 与 UDP 端口可�
   Base64 PSK。IPv4、IPv6、域名、`+`/`/`/`=` 和 Unicode/空格 tag 已通过官方
   shadowsocks-rust v1.24.0 `ssurl` 真实解析。
 - AnyTLS：不再臆造 URI/Surge；TLS pin 进入 sing-box/Mihomo 输出。
-- VLESS Reality：UUID、public/private key、short ID、SNI 在 inbound/outbound/URI
-  保持配对；未验证的 Surge 映射被禁用。
+- VLESS：`vision-reality` 固定在 inbound user 和 outbound 顶层同时写入
+  `flow=xtls-rprx-vision`；`reality` 两端均不写 flow；`ws` 两端均写相同 WS path 和
+  TLS。UUID、Reality keypair、short ID、SNI 或 WS TLS 参数在 URI、Mihomo 与 sing-box
+  输出保持同源。未验证的 Surge 映射被禁用。
+
+VLESS 明确不支持 XHTTP、gRPC、HTTPUpgrade、H2、QUIC、Vision + 普通 TLS、
+`packet_encoding` 自定义、`spiderX` 或 uTLS 自定义。
 - HY2：基础监听与跳跃范围分离；无跳跃时不输出任何 hopping 残留；URI
   `pinSHA256` 使用完整叶证书指纹，sing-box SPKI pin 保持为独立字段。
 

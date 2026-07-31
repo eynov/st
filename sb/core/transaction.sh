@@ -131,6 +131,10 @@ transaction_run() (
         transaction_status_write "failed" "$description" "" false
         return 1
     }
+    runtime_check_client_config "$candidate/output/clients/sing-box.json" || {
+        transaction_status_write "failed" "$description" "" false
+        return 1
+    }
     runtime_validate_generation "$candidate" false "$id" || {
         transaction_status_write "failed" "$description" "" false
         return 1

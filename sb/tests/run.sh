@@ -630,6 +630,194 @@ test_protocol_parameter_matrix() {
       '[.proxies[].type] | sort == ["anytls","hysteria2","ss","ss","vless"]' "$clash"
 }
 
+test_vless_three_mode_contract() {
+    local root state server client clash vision_id reality_id ws_id
+    local backup_id before export_file invalid_file legacy_file uri
+    new_env
+    root="$TEST_ROOT"
+    init_env
+
+    sb add VLESS --port 21101 --server-name www.microsoft.com --yes >/dev/null
+    sb add VLESS --port 21102 --mode reality \
+      --server-name www.apple.com --yes >/dev/null
+    sb add VLESS --port 21103 --mode ws --path /vless \
+      --sni ws.example.com --tls-mode self-signed --yes >/dev/null
+
+    state="$root/data/current/instances.json"
+    server="$root/data/current/output/config.json"
+    client="$root/data/current/output/clients/sing-box.json"
+    clash="$root/data/current/output/clients/clash.yaml"
+    vision_id=is01
+    reality_id=is02
+    ws_id=is03
+
+    assert "VLESS default mode is vision-reality" jq -e \
+      --arg id "$vision_id" '.instances[$id].mode=="vision-reality"' "$state"
+    assert "VLESS compatibility mode is plain Reality" jq -e \
+      --arg id "$reality_id" '.instances[$id].mode=="reality"' "$state"
+    assert "VLESS WS mode stores only WS/TLS fields" jq -e --arg id "$ws_id" '
+      .instances[$id] |
+      .mode=="ws" and .path=="/vless" and (.tls|type=="object") and
+      (has("private_key")|not) and (has("public_key")|not) and
+      (has("short_id")|not) and (has("server_name")|not)
+    ' "$state"
+
+    assert "Vision Reality inbound and outbound flows match" jq -e \
+      --arg id "$vision_id" --slurpfile c "$client" '
+      (.inbounds[] | select(.tag=="in-"+$id) |
+        .users[0].flow=="xtls-rprx-vision" and
+        .tls.reality.enabled==true and (has("transport")|not)) and
+      ($c[0].outbounds[] | select(.tag=="VLESS-"+$id) |
+        .flow=="xtls-rprx-vision" and .tls.reality.enabled==true and
+        (has("transport")|not))
+    ' "$server"
+    assert "plain Reality omits flow on both sides" jq -e \
+      --arg id "$reality_id" --slurpfile c "$client" '
+      (.inbounds[] | select(.tag=="in-"+$id) |
+        (.users[0]|has("flow")|not) and .tls.reality.enabled==true) and
+      ($c[0].outbounds[] | select(.tag=="VLESS-"+$id) |
+        (has("flow")|not) and .tls.reality.enabled==true)
+    ' "$server"
+    assert "WS TLS inbound and outbound transports match" jq -e \
+      --arg id "$ws_id" --slurpfile c "$client" '
+      (.inbounds[] | select(.tag=="in-"+$id) |
+        .transport=={type:"ws",path:"/vless"} and .tls.enabled==true and
+        (.tls|has("reality")|not) and (.users[0]|has("flow")|not)) and
+      ($c[0].outbounds[] | select(.tag=="VLESS-"+$id) |
+        .transport=={type:"ws",path:"/vless"} and .tls.enabled==true and
+        (.tls|has("reality")|not) and (has("flow")|not))
+    ' "$server"
+
+    assert "fixed core accepts all three VLESS server modes" \
+      "$REAL_CORE" check -c "$server"
+    assert "fixed core accepts all three VLESS client outbounds" \
+      "$REAL_CORE" check -c "$client"
+
+    uri=$(sb output "$vision_id" uri)
+    assert "Vision Reality URI carries flow and Reality keys" sh -c \
+      'case "$1" in *"security=reality"*"pbk="*"sid="*"type=tcp"*"flow=xtls-rprx-vision"*) exit 0;; *) exit 1;; esac' \
+      sh "$uri"
+    uri=$(sb output "$reality_id" uri)
+    assert "plain Reality URI omits flow" sh -c \
+      'case "$1" in *"security=reality"*"type=tcp"*) case "$1" in *"flow="*) exit 1;; *) exit 0;; esac;; *) exit 1;; esac' \
+      sh "$uri"
+    uri=$(sb output "$ws_id" uri)
+    assert "WS TLS URI carries WS path, host and TLS" sh -c \
+      'case "$1" in *"security=tls"*"type=ws"*"host=ws.example.com"*"path=%2Fvless"*) exit 0;; *) exit 1;; esac' \
+      sh "$uri"
+
+    assert "Mihomo three-mode VLESS contract" jq -e '
+      (.proxies[] | select(.name=="VLESS-is01") |
+        .network=="tcp" and .flow=="xtls-rprx-vision" and
+        ((."reality-opts"."public-key"|length)>20)) and
+      (.proxies[] | select(.name=="VLESS-is02") |
+        .network=="tcp" and (has("flow")|not) and
+        (."reality-opts"."short-id"|length)>0) and
+      (.proxies[] | select(.name=="VLESS-is03") |
+        .network=="ws" and .tls==true and ."ws-opts".path=="/vless" and
+        (has("flow")|not) and (has("reality-opts")|not))
+    ' "$clash"
+
+    sb edit "$vision_id" --mode reality --yes >/dev/null
+    assert "edit Vision Reality to plain Reality removes both flows" jq -e \
+      --arg id "$vision_id" --slurpfile c "$root/data/current/output/clients/sing-box.json" '
+      (.inbounds[] | select(.tag=="in-"+$id) | .users[0]|has("flow")|not) and
+      ($c[0].outbounds[] | select(.tag=="VLESS-"+$id)|has("flow")|not)
+    ' "$root/data/current/output/config.json"
+    sb edit "$vision_id" --mode vision-reality --yes >/dev/null
+    sb edit "$ws_id" --path /vless-edited --yes >/dev/null
+    assert "edit WS path updates both render sides" jq -e \
+      --arg id "$ws_id" --slurpfile c "$root/data/current/output/clients/sing-box.json" '
+      (.inbounds[] | select(.tag=="in-"+$id) | .transport.path=="/vless-edited") and
+      ($c[0].outbounds[] | select(.tag=="VLESS-"+$id) |
+        .transport.path=="/vless-edited")
+    ' "$root/data/current/output/config.json"
+    sb edit "$reality_id" --mode ws --path /converted \
+      --sni converted.example.com --tls-mode self-signed --yes >/dev/null
+    assert "edit Reality to WS removes Reality material" jq -e \
+      --arg id "$reality_id" '
+      .instances[$id] |
+      .mode=="ws" and .path=="/converted" and (.tls|type=="object") and
+      (has("private_key")|not) and (has("server_name")|not)
+    ' "$state"
+    sb edit "$reality_id" --mode reality \
+      --server-name www.apple.com --yes >/dev/null
+    assert "edit WS to Reality regenerates Reality material" jq -e \
+      --arg id "$reality_id" '
+      .instances[$id] |
+      .mode=="reality" and (.private_key|length)>20 and
+      (.public_key|length)>20 and (.short_id|length)>0 and
+      (has("tls")|not) and (has("path")|not)
+    ' "$state"
+
+    if sb add VLESS --port 21104 --mode ws --path /bad --sni bad.example.com \
+      --tls-mode self-signed --server-name forbidden.example.com --yes >/dev/null 2>&1; then
+        fail "WS plus Reality fields is rejected"
+    else
+        pass "WS plus Reality fields is rejected"
+    fi
+    if sb add VLESS --port 21104 --mode reality --server-name www.example.com \
+      --path /bad --yes >/dev/null 2>&1; then
+        fail "Reality plus WS fields is rejected"
+    else
+        pass "Reality plus WS fields is rejected"
+    fi
+    before=$(sha256sum "$root/data/current/instances.json" | awk '{print $1}')
+    invalid_file="$root/invalid-vless-state.json"
+    jq '.instances.is03.private_key="forbidden-mode-mix"' "$state" >"$invalid_file"
+    if sb state import "$invalid_file" --yes >/dev/null 2>&1; then
+        fail "state import rejects mixed WS and Reality schema"
+    else
+        pass "state import rejects mixed WS and Reality schema"
+    fi
+    assert "rejected VLESS import leaves state unchanged" test \
+      "$(sha256sum "$root/data/current/instances.json" | awk '{print $1}')" = "$before"
+
+    legacy_file="$root/legacy-vless-state.json"
+    jq 'del(.instances.is02.mode)' "$state" >"$legacy_file"
+    sb state import "$legacy_file" --yes >/dev/null
+    assert "pre-mode VLESS state remains plain Reality after import" jq -e \
+      --arg id "$reality_id" --slurpfile c "$root/data/current/output/clients/sing-box.json" '
+      (.inbounds[] | select(.tag=="in-"+$id) | .users[0]|has("flow")|not) and
+      ($c[0].outbounds[] | select(.tag=="VLESS-"+$id)|has("flow")|not)
+    ' "$root/data/current/output/config.json"
+    sb edit "$reality_id" --mode reality --yes >/dev/null
+
+    for vision_id in is01 is02 is03; do
+        sb disable "$vision_id" --yes >/dev/null
+        sb enable "$vision_id" --yes >/dev/null
+    done
+    assert "three VLESS modes survive disable-enable" jq -e \
+      '[.instances[].enabled] | all' "$state"
+
+    backup_id=$(basename "$(sb backup)")
+    before=$(sha256sum "$state" | awk '{print $1}')
+    sb edit "$reality_id" --port 21112 --yes >/dev/null
+    sb restore "$backup_id" --yes >/dev/null
+    assert "VLESS backup restore preserves complete three-mode state" test \
+      "$(sha256sum "$state" | awk '{print $1}')" = "$before"
+
+    export_file="$root/vless-state-export.json"
+    sb state export --show-secrets >"$export_file"
+    sb delete "$reality_id" --yes >/dev/null
+    sb state import "$export_file" --yes >/dev/null
+    assert "VLESS state export import round-trip is lossless" test \
+      "$(sha256sum "$state" | awk '{print $1}')" = "$before"
+
+    sb upgrade --source "$APP_DIR" --yes >/dev/null
+    assert "manager upgrade preserves complete VLESS state" test \
+      "$(sha256sum "$state" | awk '{print $1}')" = "$before"
+    assert "post-upgrade fixed core accepts VLESS server config" \
+      "$REAL_CORE" check -c "$root/data/current/output/config.json"
+    assert "post-upgrade fixed core accepts VLESS client config" \
+      "$REAL_CORE" check -c "$root/data/current/output/clients/sing-box.json"
+
+    for vision_id in is01 is02 is03; do
+        sb delete "$vision_id" --yes >/dev/null
+    done
+    assert "all three VLESS modes delete cleanly" jq -e '.instances=={}' "$state"
+}
+
 test_backup_restore_schema_json_doctor() {
     local root id backup_id before
     new_env
@@ -2039,6 +2227,7 @@ TESTS=(
     test_settings_schema_migration
     test_version_and_failure_messages
     test_protocol_parameter_matrix
+    test_vless_three_mode_contract
     test_backup_restore_schema_json_doctor
     test_certificate_rotation_transaction
     test_tls_mode_contracts

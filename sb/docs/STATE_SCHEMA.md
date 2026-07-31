@@ -15,7 +15,7 @@
 
 每个实例都有稳定的 `id`、protocol、port、enabled、created_at 和 updated_at，
 以及协议专属凭据。加载时校验类型、ID/tag、端口、传输层冲突、密码/PSK、UUID、
-Reality key、TLS 引用、证书有效性和 HY2 跳跃范围。
+Reality key、VLESS mode、TLS 引用、证书有效性和 HY2 跳跃范围。
 
 schema v1→v2 迁移保留 ID、密码、UUID、证书、Reality key 和节点标识。未知的更高
 schema 会被拒绝，旧程序不会覆盖它。
@@ -24,9 +24,28 @@ schema 会被拒绝，旧程序不会覆盖它。
 sb state validate
 sb state export
 sb state export --show-secrets
+sb state import state.json
 ```
 
-export 默认脱敏。只有明确使用 `--show-secrets` 才输出敏感字段。
+export 默认脱敏。只有明确使用 `--show-secrets` 才输出敏感字段。import 会先执行完整
+state 与协议校验，再在全局锁和 generation 事务内整体重建服务端与客户端输出；默认脱敏
+export 因凭据被替换而不能导入。
+
+### VLESS mode
+
+新建 VLESS 实例必须保存以下枚举之一：
+
+| mode | 唯一合法语义 |
+|---|---|
+| `vision-reality` | TCP + REALITY；两端 flow=`xtls-rprx-vision` |
+| `reality` | TCP + REALITY；两端均无 flow |
+| `ws` | WebSocket + TLS；两端均无 REALITY 和 flow |
+
+为保证无中断 manager upgrade，旧 state 中缺少 `mode` 的 VLESS 节点按历史语义
+`reality` 读取，不会被静默升级为 Vision。下一次显式 edit 可以写入 mode。
+
+Reality mode 保存 `server_name`、private/public key 和 short ID，且禁止出现 `tls`/`path`。
+WS mode 保存 `path` 与通用 `tls` 对象，且禁止出现 Reality 字段。非法混合在发布前拒绝。
 
 ## Settings schema v2
 

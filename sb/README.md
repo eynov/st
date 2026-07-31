@@ -17,7 +17,8 @@ nftables/iptables 示例，绝不默认执行防火墙命令。
 - Shadowsocks AEAD
 - Shadowsocks 2022
 - AnyTLS
-- VLESS Reality
+- VLESS TCP Reality（默认 XTLS-Vision；可选纯 Reality）
+- VLESS WebSocket TLS
 - Hysteria2
 - Hysteria2 显式 Port Hopping
 - sing-box、Mihomo/Clash、标准 URI，以及经过测试的 Surge 子集
@@ -71,12 +72,42 @@ sb add|edit|delete|enable|disable
 sb list|status|validate|render|doctor
 sb reload|restart
 sb backup|restore
-sb state validate|export
+sb state validate|export|import
 sb version
 ```
 
 全局选项：`--yes`、`--json`、`--dry-run`、`--show-secrets`。节点变更和 endpoint/
 listen 变更支持只读 dry-run；state export 默认脱敏。
+
+## VLESS 三模式
+
+VLESS 只实现三个经过固定 sing-box `1.13.14` 检查的模式，不提供其他 transport 或
+参数组合：
+
+```bash
+# 默认：TCP + REALITY + flow=xtls-rprx-vision
+sb add vless --port 443 --server-name www.microsoft.com
+
+# 兼容模式：TCP + REALITY，无 flow
+sb add vless --port 8443 --mode reality --server-name www.microsoft.com
+
+# WebSocket + TLS；TLS 默认 self-signed，也可使用通用 TLS 参数
+sb add vless --port 9443 --mode ws --path /vless \
+  --sni ws.example.com --tls-mode self-signed
+```
+
+模式名分别是 `vision-reality`（默认）、`reality` 和 `ws`。WS 不支持 REALITY 或
+Vision；Reality 模式不支持 WS、gRPC、XHTTP、HTTPUpgrade、H2、QUIC。项目也不提供
+`packet_encoding`、`spiderX` 或 uTLS 自定义。
+
+完整 state 可以显式导出后通过同一事务边界导入：
+
+```bash
+sb state export --show-secrets > state.json
+sb state import state.json
+```
+
+默认脱敏的 export 不能重新导入；WS state 中的证书路径必须仍指向本机有效的受管证书。
 
 ## 升级、备份与恢复
 

@@ -32,6 +32,23 @@
 
 **Repository Production Candidate — Not Production Ready**
 
+### VLESS 三模式升级（2026-07-31）
+
+VLESS 插件现只允许三个 mode：
+
+- `vision-reality`（新建默认）：TCP + REALITY，服务端 user 与客户端 outbound 同时写
+  `flow=xtls-rprx-vision`；
+- `reality`：TCP + REALITY，两端均不写 flow；
+- `ws`：WebSocket + TLS，两端均不写 REALITY/flow。
+
+旧 state 中没有 mode 的 VLESS 节点继续按 `reality` 解释，manager upgrade 不会改变既有节点
+语义。新增事务式 `sb state import FILE`；WS 证书纳入 backup/restore 与 doctor。发布、
+`validate`、`render` 和 doctor 现在都用固定 sing-box 同时检查服务端 `config.json` 与客户端
+`sing-box.json`。
+
+完整隔离套件实测 `595 pass / 0 fail`，其中 VLESS 专项 `28 pass / 0 fail`；固定核心仍为
+sing-box `1.13.14`。本轮没有修改 HY2、SS、SS2022、AnyTLS 协议插件。
+
 - 第一次独立复审的 2 个 High + 4 个 Medium：已修复（第二轮）。
 - 第二次独立复审的 4 个阻断 High（HIGH-A..D）与 2 个阻断 Medium（M1、M2），外加被点名的
   M3（IPv4 前导零）与 M4（非 root `generation_drift` 误报）：已修复。四个 High 在整改前
@@ -92,7 +109,8 @@
 `atomic_write`、`state_set_file` 等包装函数，正是这个盲区放过了 HIGH-A。第三次复审复扫后
 确认剩余 13 处包装调用点当前都不会掩盖失败。
 
-**当前阻断项：无自测阻断项。** commit/push 需用户明确授权；真实 systemd 验收仍未完成。
+**当前阻断项：无自测阻断项。** 本轮 VLESS 任务已获用户明确 commit/push 授权；真实
+systemd 验收仍未完成。
 
 ## 当前禁止事项
 
@@ -115,7 +133,7 @@
 SB_TEST_REAL_CORE=/path/to/sing-box-1.13.14 \
 SB_TEST_HYSTERIA_BIN=/path/to/hysteria-v2.10.0-linux-amd64 \
 SB_TEST_SSURL_BIN=/path/to/shadowsocks-rust-v1.24.0/ssurl \
-  sb/tests/run.sh                    # 期望 567 pass / 0 fail
+  sb/tests/run.sh                    # 期望 595 pass / 0 fail
 
 sb/tests/errexit-audit.sh            # 期望 0 blocking
 shellcheck --severity=warning --external-sources \

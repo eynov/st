@@ -603,3 +603,48 @@ Medium   : 0 blocking（第一轮 4 个 + 第二次复审的 M1/M2/M3/M4 + 第�
 - 云安全组、外部 NAT/UDP、DDoS 限制均不属于仓库隔离测试可证明范围。
 
 本轮未连接或修改任何生产 VPS，未执行生产部署、服务重启、防火墙操作、Git commit 或 push。
+
+---
+
+## 2026-07-31 VLESS 三模式升级证据
+
+### 范围与设计
+
+本轮只扩展 VLESS 及其必要公共边界：
+
+- 新建默认 `vision-reality`：TCP + REALITY +
+  `flow=xtls-rprx-vision`；
+- `reality`：TCP + REALITY，无 flow；
+- `ws`：WebSocket + TLS，无 REALITY/flow。
+
+没有增加 XHTTP、gRPC、HTTPUpgrade、H2、QUIC、Vision + 普通 TLS、
+`packet_encoding` 自定义、`spiderX` 或 uTLS 自定义。mode 是 state 中的唯一选择源，
+renderer 从它同时推导 inbound、sing-box outbound、URI 和 Mihomo，避免两端 flow 漂移。
+旧 VLESS state 缺 mode 时保持历史纯 REALITY 语义。
+
+### 公共事务边界
+
+- 新增 `sb state import FILE`：导入前完整 schema/协议校验，导入与所有派生输出在全局锁和
+  generation 事务中整体发布或回滚。
+- VLESS WS 的受管 TLS 证书进入既有 backup/restore 校验与 doctor。
+- 固定核心检查从服务端扩展到客户端 `clients/sing-box.json`，覆盖 publish、validate、
+  render、generation validation 和 doctor。
+
+### 实际验证
+
+```text
+完整隔离测试：595 pass / 0 fail
+VLESS 三模式专项：28 pass / 0 fail
+固定 sing-box：1.13.14
+服务端三模式 sing-box check：通过
+客户端三模式 sing-box check：通过
+errexit audit：0 blocking / 49 advisory
+```
+
+专项实际覆盖三种 add、mode/path 与跨模式 edit、enable/disable/delete、非法模式混合拒绝、
+旧无-mode state、backup/restore、state export/import、manager upgrade、URI、Mihomo、
+服务端 inbound 和 sing-box outbound。
+
+第一次在受限 sandbox 中运行全量套件时，最后的 Hysteria 本地 UDP 回环因 sandbox 禁止创建
+socket 而中止；同一固定版本套件在允许本地 socket 的隔离执行环境重跑后取得上述
+`595 pass / 0 fail`。未访问公网节点或生产服务。

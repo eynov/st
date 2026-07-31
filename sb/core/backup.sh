@@ -61,7 +61,8 @@ backup_tls_files_validate() {
           -fingerprint -sha256 | cut -d= -f2-) || return 1
         [[ "$actual_fingerprint" == "$expected_fingerprint" ]] || return 1
     done < <(jq -r '.instances | to_entries[] | .value |
-      select(.protocol=="HY2" or .protocol=="ANYTLS") |
+      select(.protocol=="HY2" or .protocol=="ANYTLS" or
+        (.protocol=="VLESS" and .mode=="ws")) |
       [.id,.tls.certificate_path,.tls.key_path,.tls.sni,.tls.certificate_sha256] |
       @tsv' "$dir/generation/instances.json")
 }
