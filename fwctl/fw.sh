@@ -47,6 +47,12 @@ source "$BASE_DIR/core/migration.sh"
 source "$BASE_DIR/core/render.sh"
 # shellcheck source=core/transaction.sh
 source "$BASE_DIR/core/transaction.sh"
+# shellcheck source=core/backup.sh
+source "$BASE_DIR/core/backup.sh"
+# shellcheck source=core/doctor.sh
+source "$BASE_DIR/core/doctor.sh"
+# shellcheck source=core/stats.sh
+source "$BASE_DIR/core/stats.sh"
 # shellcheck source=core/cli.sh
 source "$BASE_DIR/core/cli.sh"
 
@@ -235,6 +241,22 @@ menu_objects() {
     echo ""
 }
 
+menu_backup() {
+    local choice id
+    echo "1. 创建备份   2. 查看备份列表   3. 从备份恢复"
+    read -r -p "请选择 [1-3]: " choice
+    case "$choice" in
+        1) cli_backup create ;;
+        2) cli_backup list ;;
+        3)
+            cli_backup list
+            read -r -p "请输入要恢复的 backup-id: " id
+            [ -n "$id" ] && cli_restore "$id"
+            ;;
+        *) echo "❌ 无效输入" ;;
+    esac
+}
+
 run_menu() {
     local opt
     while true; do
@@ -252,11 +274,12 @@ run_menu() {
         echo "12. 重载配置  (强制重新编译)"
         echo "-------------------------------------------------"
         echo "13. 对象管理  (target / service / rule)"
-        echo "14. 校验状态  (validate)"
-        echo "15. 查看差异  (diff)"
+        echo "14. 体检      (doctor)"
+        echo "15. 备份与恢复 (backup / restore)"
+        echo "16. 流量统计  (stats)"
         echo "0. 退出"
         echo "========================="
-        read -r -p "请选择操作 [0-15]: " opt
+        read -r -p "请选择操作 [0-16]: " opt
         case $opt in
             1) menu_add_forward ;;
             2) menu_del_forward ;;
@@ -270,8 +293,9 @@ run_menu() {
             10|11) echo "ℹ️ 防护逻辑由 settings.policy 控制，默认与旧版本一致。" ;;
             12) cli_render ;;
             13) menu_objects ;;
-            14) cli_validate 0 ;;
-            15) cli_diff 0 ;;
+            14) cli_doctor ;;
+            15) menu_backup ;;
+            16) cli_stats ;;
             0) exit 0 ;;
             *) echo "❌ 无效输入" ;;
         esac

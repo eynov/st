@@ -591,11 +591,23 @@ model_comment_set() {
         fwctl_err "注释不得包含双引号或换行"
         return 1
     fi
-    # nftables 的 comment 上限是 128 字节，超出会在 apply 时报错，
-    # 因此在写入时就截断而不是等到渲染。
-    if ((${#text} > 128)); then
-        text=${text:0:128}
-        fwctl_warn "注释超过 128 字节，已截断"
+    # nftables 的 comment 上限是 128 **字节**而不是字符：43 个中文字就超限。
+    # 渲染时还要加上 "fwctl:<id> " 前缀，因此这里按可用字节数截断，保证存进去
+    # 的内容渲染出来一定能被内核接受。
+    local prefix_bytes=24   # "fwctl:" + rule-<12 位十六进制> + 空格
+    local budget=$((128 - prefix_bytes))
+    if (($(printf '%s' "$text" | wc -c) > budget)); then
+        # 逐字符累加，保证不在多字节字符中间截断。
+        local truncated="" char used=0 size
+        while IFS= read -r -n1 char; do
+            [[ -n "$char" ]] || continue
+            size=$(printf '%s' "$char" | wc -c)
+            ((used + size > budget)) && break
+            truncated+=$char
+            used=$((used + size))
+        done <<< "$text"
+        text=$truncated
+        fwctl_warn "注释超过 $budget 字节的可用长度，已按字节截断"
     fi
 
     jq --arg key "$key" --arg text "$text" '

@@ -144,6 +144,14 @@ case "${1:-}" in
         exit 0
         ;;
     list)
+        # nft list tables
+        if [[ "${2:-}" == "tables" ]]; then
+            for path in "$STATE_DIR"/table-*; do
+                [[ -e "$path" ]] || continue
+                printf 'table ip %s\n' "$(basename "$path" | sed 's/^table-//')"
+            done
+            exit 0
+        fi
         # nft list table ip <name>
         [[ "${2:-}" == "table" ]] || { echo "fake-nft: unsupported list" >&2; exit 2; }
         name=${4:-}

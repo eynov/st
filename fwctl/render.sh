@@ -40,6 +40,12 @@ source "$BASE_DIR/core/migration.sh"
 source "$BASE_DIR/core/render.sh"
 # shellcheck source=core/transaction.sh
 source "$BASE_DIR/core/transaction.sh"
+# shellcheck source=core/backup.sh
+source "$BASE_DIR/core/backup.sh"
+# shellcheck source=core/doctor.sh
+source "$BASE_DIR/core/doctor.sh"
+# shellcheck source=core/stats.sh
+source "$BASE_DIR/core/stats.sh"
 # shellcheck source=core/cli.sh
 source "$BASE_DIR/core/cli.sh"
 

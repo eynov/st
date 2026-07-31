@@ -284,11 +284,23 @@ assert_eq "孤儿注释被清理" "$(jq -r '.comments | has("gone")' "$pruned")"
 assert_eq "有效注释被保留" "$(jq -r '.comments | has("rule-7a0e4b19cc85")' "$pruned")" "true"
 assert_eq "合成键注释被保留" "$(jq -r '.comments | has("tcp:443")' "$pruned")" "true"
 
+# nftables 的 comment 上限是 128 **字节**，而渲染时还要加上 "fwctl:<id> "
+# 前缀（24 字节），因此写入时按剩余预算截断，保证渲染结果一定能被内核接受。
 truncated="$WORK/truncated.json"
 long=$(printf 'x%.0s' {1..200})
 model_comment_set "$BASE" rule-7a0e4b19cc85 "$long" 2>/dev/null > "$truncated"
-assert_eq "超长注释被截断到 128 字节" \
-    "$(jq -r '.comments["rule-7a0e4b19cc85"] | length' "$truncated")" "128"
+assert_eq "超长注释按可用字节预算截断" \
+    "$(jq -r '.comments["rule-7a0e4b19cc85"] | utf8bytelength' "$truncated")" "104"
+
+# 中文注释必须按字节而不是字符截断：43 个中文字就超过 128 字节。
+cjk_truncated="$WORK/cjk-truncated.json"
+cjk=$(printf '中%.0s' {1..200})
+model_comment_set "$BASE" rule-7a0e4b19cc85 "$cjk" 2>/dev/null > "$cjk_truncated"
+cjk_bytes=$(jq -r '.comments["rule-7a0e4b19cc85"] | utf8bytelength' "$cjk_truncated")
+assert_eq "中文注释按字节截断" "$([[ "$cjk_bytes" -le 104 ]] && echo yes)" "yes"
+assert_eq "截断不切断多字节字符" \
+    "$(jq -r '.comments["rule-7a0e4b19cc85"]' "$cjk_truncated" |
+       iconv -f UTF-8 -t UTF-8 >/dev/null 2>&1 && echo valid)" "valid"
 
 assert_fails "含引号的注释被 model 层拒绝" 0 \
     model_comment_set "$BASE" rule-7a0e4b19cc85 'say "hi"'

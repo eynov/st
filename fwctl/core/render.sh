@@ -166,12 +166,23 @@ def protocols($p):
 # 这两个 def 必须放在上面的绑定之后：jq 的 def 只能引用已经绑定的变量。
 | def counter_frag:
       if $render.counters then " counter" else "" end;
+  # nftables 的 comment 上限是 128 **字节**（不是字符）：43 个中文字就是 129
+  # 字节，会被内核拒绝。因此必须按字节截断，否则一条中文注释就能产生加载不了
+  # 的 ruleset。
+  def clamp_bytes($max):
+      . as $s
+      | if ($s | utf8bytelength) <= $max then $s
+        else ([ range(0; ($s | length) + 1) ]
+              | map(select(($s[0:.] | utf8bytelength) <= $max))
+              | last) as $n
+             | $s[0:$n]
+        end;
   def comment_frag($id):
       if $render.comments | not then ""
       else
           ($comments[$id] // "") as $text
           | (if $text == "" then "fwctl:\($id)" else "fwctl:\($id) \($text)" end)
-          | .[0:128]
+          | clamp_bytes(128)
           | " comment \"\(.)\""
       end;
   # block 规则的来源：始终引用与 Target 同名的 set。

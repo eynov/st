@@ -508,6 +508,104 @@ _cli_semantic_lines() {
         "$1" | grep -v '^$'
 }
 
+
+# ── doctor ────────────────────────────────────────────────────────────
+
+cli_doctor() {
+    local work current rc
+    work=$(mktemp -d) || return "$FWCTL_EXIT_RUNTIME"
+    current="$work/current.json"
+    if ! cli_read_state "$current"; then
+        rm -rf "$work"
+        return "$FWCTL_EXIT_VALIDATION"
+    fi
+    doctor_run "$current"
+    doctor_report
+    doctor_exit_code
+    rc=$?
+    rm -rf "$work"
+    return "$rc"
+}
+
+# ── backup / restore ──────────────────────────────────────────────────
+
+cli_backup() {
+    local verb=${1:-create} id
+    shift 2>/dev/null || true
+
+    case "$verb" in
+        create)
+            local label=""
+            [[ "${1:-}" == "--label" ]] && label=${2:-}
+            if id=$(backup_create "$label"); then
+                fwctl_ok "已创建备份 $id"
+                return "$FWCTL_EXIT_OK"
+            fi
+            return "$FWCTL_EXIT_RUNTIME"
+            ;;
+        list)
+            backup_list
+            ;;
+        show)
+            [[ $# -eq 1 ]] || { cli_usage >&2; return "$FWCTL_EXIT_USAGE"; }
+            backup_show "$1" || return "$FWCTL_EXIT_VALIDATION"
+            ;;
+        *)
+            cli_usage >&2
+            return "$FWCTL_EXIT_USAGE"
+            ;;
+    esac
+}
+
+_cli_restore_mutator() {
+    local current=$1 candidate=$2 source=$3
+    local resolved
+    resolved=$(backup_resolve_state "$source") || return 1
+    # 恢复的内容同样要先迁移到当前 schema，旧备份因此依然可用。
+    migration_to_current "$resolved" > "$candidate"
+}
+
+cli_restore() {
+    local source=$1 id rc
+
+    # 恢复前先备份当前状态，避免「恢复错了备份」变成不可逆操作。
+    if id=$(backup_create "before-restore"); then
+        fwctl_info "已备份当前状态为 $id"
+    else
+        fwctl_err "恢复前备份失败，未做任何变更"
+        return "$FWCTL_EXIT_RUNTIME"
+    fi
+
+    cli_transact _cli_restore_mutator "$source"
+    rc=$?
+    if ((rc == FWCTL_EXIT_OK)); then
+        fwctl_ok "已从 $source 恢复"
+    fi
+    return "$rc"
+}
+
+# ── stats ─────────────────────────────────────────────────────────────
+
+cli_stats() {
+    local ref=${1:-} work current rc
+    work=$(mktemp -d) || return "$FWCTL_EXIT_RUNTIME"
+    current="$work/current.json"
+    if ! cli_read_state "$current"; then
+        rm -rf "$work"
+        return "$FWCTL_EXIT_VALIDATION"
+    fi
+    if [[ "$ref" == "--reset" ]]; then
+        stats_reset
+        rc=$?
+    else
+        stats_report "$current" "$ref"
+        rc=$?
+    fi
+    rm -rf "$work"
+    ((rc == 0)) || return "$FWCTL_EXIT_RUNTIME"
+    return "$FWCTL_EXIT_OK"
+}
+
 # ── 用法 ──────────────────────────────────────────────────────────────
 
 cli_usage() {
@@ -525,6 +623,10 @@ cli_usage() {
 
   $command_name validate [--offline]
   $command_name diff [--exit-code]
+  $command_name doctor
+  $command_name backup [create [--label TEXT] | list | show ID]
+  $command_name restore <backup-id>|--file PATH
+  $command_name stats [RULE|--reset]
 
 选项：
   --dry-run    只校验与渲染，不应用
@@ -601,6 +703,24 @@ cli_main() {
             local want_code=0
             [[ "${1:-}" == "--exit-code" ]] && want_code=1
             cli_diff "$want_code"
+            ;;
+        doctor)
+            cli_doctor
+            ;;
+        backup)
+            cli_backup "$@"
+            ;;
+        restore)
+            [[ $# -ge 1 ]] || { cli_usage >&2; return "$FWCTL_EXIT_USAGE"; }
+            if [[ "$1" == "--file" ]]; then
+                [[ $# -ge 2 ]] || { cli_usage >&2; return "$FWCTL_EXIT_USAGE"; }
+                cli_restore "$2"
+            else
+                cli_restore "$1"
+            fi
+            ;;
+        stats)
+            cli_stats "${1:-}"
             ;;
         -h|--help|help)
             cli_usage
