@@ -500,10 +500,14 @@ cli_diff() {
     return "$rc"
 }
 
-# 提取可比较的语义行：去掉表声明、计数值与排版。
+# 提取可比较的语义行：去掉表声明、计数值与排版差异。
+#
+# `burst N packets` 必须一并归一化：nftables 1.0.6 在回读时省略它，1.1.x 会打印，
+# 因此不归一化的话 fw diff 会在 1.0.6 上永远报告一条并不存在的差异。
 _cli_semantic_lines() {
     sed -e '/^table ip .* { }$/d' -e '/^delete table/d' \
         -e 's/counter packets [0-9]* bytes [0-9]*/counter/' \
+        -e 's/ burst [0-9]* packets//' \
         -e 's/[[:space:]]\+/ /g' -e 's/^ //' -e 's/ $//' \
         "$1" | grep -v '^$'
 }

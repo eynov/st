@@ -52,13 +52,15 @@ backup_create() {
     local conf="${FWCTL_BUILD_DIR:-$(txn_var_dir)/build}/nft.conf"
     [[ -f "$conf" ]] && cp "$conf" "$dir/nft.conf"
 
+    # jq 变量名不能用 jq 的保留字：`label` 在 jq 1.6（Debian 12 自带）里是关键字，
+    # 用 --arg label 会让整段程序无法解析。输出的 JSON 键仍然是 label。
     if ! jq -n \
         --arg id "$id" \
-        --arg label "$label" \
+        --arg backup_label "$label" \
         --arg at "$(fwctl_now)" \
         --argjson generation "$(jq -r '.metadata.generation // 0' "$state")" \
         --arg version "$(jq -r '.metadata.fwctl_version // ""' "$state")" \
-        '{id: $id, label: $label, created_at: $at,
+        '{id: $id, label: $backup_label, created_at: $at,
           generation: $generation, fwctl_version: $version}' \
         > "$dir/metadata.json"; then
         rm -rf "$dir"

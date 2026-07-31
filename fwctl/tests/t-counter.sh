@@ -178,6 +178,35 @@ assert_eq "旧格式的转发被正确分解" \
     "$([[ "$(jq '.targets | length' "$FWCTL_STATE_FILE")" -gt "$before_count" ]] && echo yes)" \
     "yes"
 
+# ── jq 保留字回归（Debian 12 的 jq 1.6）─────────────────────────────────
+#
+# jq 的关键字不能用作 --arg 的变量名：`--arg label` 在 jq 1.6 上会让整段程序
+# 无法解析，而 jq 1.7 接受它。开发机是 1.7、生产是 1.6，因此这个缺陷只在真实
+# 主机上暴露。这里既回归具体问题，也扫描整类问题。
+
+setup_env jq-reserved
+build_sample
+
+# 具体回归：带 label 的备份必须能创建、查看、恢复。
+labelled=$(fw backup create --label "with-label" 2>&1)
+assert_contains "带 --label 的备份创建成功" "$labelled" "已创建备份"
+labelled_id=$(sed -n 's/.*已创建备份 //p' <<< "$labelled")
+assert_eq "备份目录含 metadata.json" \
+    "$([[ -f "$FWCTL_VAR_DIR/backups/$labelled_id/metadata.json" ]] && echo yes)" "yes"
+assert_eq "metadata 中的 label 键名未变" \
+    "$(jq -r '.label' "$FWCTL_VAR_DIR/backups/$labelled_id/metadata.json")" "with-label"
+assert_ok "带 label 的备份可 show" fw backup show "$labelled_id"
+assert_ok "带 label 的备份可 restore" fw restore "$labelled_id"
+
+# 整类防护：任何 --arg/--argjson 的变量名都不得是 jq 保留字。
+reserved_hits=$(grep -rhvE '^[[:space:]]*#' \
+        "$TEST_PROJECT_DIR"/core/ "$TEST_PROJECT_DIR"/tests/*.sh 2>/dev/null |
+    grep -oE '\-\-arg(json)? +[a-z_]+' |
+    awk '{print $2}' | sort -u |
+    grep -xE 'def|as|if|then|else|elif|end|and|or|not|reduce|foreach|try|catch|label|import|include|__loc__' |
+    tr '\n' ' ')
+assert_eq "没有 jq 变量名与保留字冲突" "$reserved_hits" ""
+
 # ── doctor ────────────────────────────────────────────────────────────
 
 setup_env doctor

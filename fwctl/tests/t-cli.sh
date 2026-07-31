@@ -310,6 +310,68 @@ assert_eq "dry-run 不改动持久化配置" "$(sha256sum "$FWCTL_SYSTEM_CONF")"
 assert_eq "dry-run 不产生新对象" \
     "$(jq -r '[.targets[] | select(.name=="other")] | length' "$FWCTL_STATE_FILE")" "0"
 
+# ── fw diff 的版本无关归一化 ──────────────────────────────────────────
+#
+# nftables 1.0.6 在回读规则时省略 `burst N packets`，1.1.x 会打印它。若不归一化，
+# fw diff 会在 1.0.6 上永远报告一条并不存在的差异，从而无法用来发现真实漂移。
+
+source "$TEST_PROJECT_DIR/core/common.sh"
+source "$TEST_PROJECT_DIR/core/state.sh"
+source "$TEST_PROJECT_DIR/core/render.sh"
+source "$TEST_PROJECT_DIR/core/transaction.sh"
+source "$TEST_PROJECT_DIR/core/cli.sh"
+
+BURST_DIR=$(mktemp -d)
+# 我们渲染出的形态（含 burst），以及 nft 1.0.6 回读的形态（省略 burst，带计数值）
+cat > "$BURST_DIR/rendered.nft" <<'EOF'
+table ip fwctl {
+    chain input {
+        type filter hook input priority filter; policy drop;
+        tcp flags syn limit rate over 50/second burst 5 packets counter drop comment "fwctl:syn-limit"
+    }
+}
+EOF
+cat > "$BURST_DIR/live-1.0.6.nft" <<'EOF'
+table ip fwctl {
+	chain input {
+		type filter hook input priority filter; policy drop;
+		tcp flags syn limit rate over 50/second counter packets 0 bytes 0 drop comment "fwctl:syn-limit"
+	}
+}
+EOF
+cat > "$BURST_DIR/live-1.1.x.nft" <<'EOF'
+table ip fwctl {
+	chain input {
+		type filter hook input priority filter; policy drop;
+		tcp flags syn limit rate over 50/second burst 5 packets counter packets 7 bytes 400 drop comment "fwctl:syn-limit"
+	}
+}
+EOF
+
+assert_eq "nft 1.0.6 回读（省略 burst）与渲染结果等价" \
+    "$(diff <(_cli_semantic_lines "$BURST_DIR/rendered.nft") \
+            <(_cli_semantic_lines "$BURST_DIR/live-1.0.6.nft") >/dev/null && echo same)" "same"
+assert_eq "nft 1.1.x 回读（打印 burst）与渲染结果等价" \
+    "$(diff <(_cli_semantic_lines "$BURST_DIR/rendered.nft") \
+            <(_cli_semantic_lines "$BURST_DIR/live-1.1.x.nft") >/dev/null && echo same)" "same"
+assert_eq "两种 nft 版本的回读彼此等价" \
+    "$(diff <(_cli_semantic_lines "$BURST_DIR/live-1.0.6.nft") \
+            <(_cli_semantic_lines "$BURST_DIR/live-1.1.x.nft") >/dev/null && echo same)" "same"
+
+# 归一化不得掩盖真实差异。
+cat > "$BURST_DIR/live-real-drift.nft" <<'EOF'
+table ip fwctl {
+	chain input {
+		type filter hook input priority filter; policy drop;
+		tcp flags syn limit rate over 20/second counter packets 0 bytes 0 drop comment "fwctl:syn-limit"
+	}
+}
+EOF
+assert_eq "真实差异（速率不同）仍被检出" \
+    "$(diff <(_cli_semantic_lines "$BURST_DIR/rendered.nft") \
+            <(_cli_semantic_lines "$BURST_DIR/live-real-drift.nft") >/dev/null || echo differs)" "differs"
+rm -rf "$BURST_DIR"
+
 # ── validate 与 diff ──────────────────────────────────────────────────
 
 setup_env validate
