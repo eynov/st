@@ -48,4 +48,3 @@ sha256sum fwctl/tests/fixtures/render-v3.sh
   可注入失败。随测试需要演进。
 - `netns-nft`：`ip netns exec` 包装，`FWCTL_TEST_NETNS=1` 时让 apply、回滚和崩溃
   恢复跑在真实内核上。
-- `golden/*.nft`：渲染黄金文件。渲染行为有意变更时同步更新。

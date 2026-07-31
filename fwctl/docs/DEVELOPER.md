@@ -78,9 +78,9 @@
 | `t-render.sh` | 无 `flush ruleset`；预声明 + delete 惯用法存在；指纹匹配的遗留表被收编删除、不匹配的保留；已接管后不再输出旧表语句；filter/nat chain 齐全；单地址渲染为字面量、多地址渲染为 set；空 set 无占位元素；`protocol=both` 展开为两条规则；端口范围渲染为 interval；`translate.port` 有值与为 `null` 的两种 dnat 形态；规则按 `(priority, id)` 排序；禁用对象不渲染；**渲染确定性**：打乱对象插入顺序后渲染结果逐字节一致；重复渲染逐字节一致 |
 | `t-transaction.sh` | 校验失败返回 1 且不触碰内核与磁盘；`nft -c` 失败返回 3 且不 apply；apply 失败重放 rollback 并返回 5；应用后验证失败同样回滚；commit 失败回滚内核并保留原状态；候选文件在各失败路径均被清理；锁冲突返回 4；表此前不存在时回滚等于删表；**崩溃恢复**：journal 停在 applied 时下次调用正确收敛；未知的更高 `journal_version` 拒绝自动恢复；首次迁移接管旧表时崩溃不会写入 `legacy_adopted_at`；`ip_forward` 只开不关且原值被记录 |
 | `t-cli.sh` | 旧命令逐字兼容（`port add/remove/list`、`render`、`--help`、退出码）；`port delete` 别名可用；新增名词的七个动词各自可用；`service` 无 `enable`/`disable`；`service edit --ports` 缺少 `--refs`/`--all-refs` 时返回 2 并列出引用方；输出优先显示 name；`--json` 输出可被 jq 解析且同时含 id 与 name；用法错误返回 2；`--dry-run` 不改变任何文件 |
-| `t-counter.sh` | 渲染产物中每条对象规则都带 `counter`；`render.counters=false` 时不带；`nft -j` 解析路径能按 comment 关联回对象；`fw stats` 在 counter 关闭时明确报错而非输出全零 |
-| `t-comment.sh` | comment 渲染为 `fwctl:<id>`；用户注释写入与截断到 128 字节；含引号与换行的注释被拒；孤儿注释在写事务中清理；`render.comments=false` 时不渲染 |
-| `t-compat.sh` | v1 状态文件直接可用；v3 的 `render.sh --render-only` 入口仍工作；交互菜单编号 1–12 未变；`fw port` 的提示文本与 v3 一致；生产状态快照端到端通过 |
+| `t-counter.sh` | 渲染产物中每条对象规则都带 `counter`；`render.counters=false` 时不带；`nft -j` 解析路径能按 comment 关联回对象且 `both` 规则的两条计数被合并；`fw stats` 在 counter 关闭时明确报错而非输出全零；backup/restore 走同一事务且恢复前自动备份；doctor 的报告项与「只报告不修改」 |
+| `t-comment.sh` | comment 渲染为 `fwctl:<id>`；`description` 与 `comments` 的分工（前者不渲染）；**按字节而非字符截断**——nftables 的上限是 128 字节，43 个中文字即超限，因此 ASCII 与中文两种输入都要断言，并用真实 nft 复核截断后的产物可加载；含引号的注释被拒；孤儿注释在写事务中清理；合成键注释不被误清理；`render.comments=false` 时内建规则也不带注释 |
+| `t-compat.sh` | 旧格式状态文件直接可用；`render.sh --render-only` 入口仍工作；交互菜单编号 1–12 未变；`fw port` 的提示文本与旧版逐字一致（含九类非法输入的文案）；只读命令不写盘；`install.sh` 的主脚本探测仍选中 `fw.sh` |
 
 固件：
 
@@ -91,7 +91,6 @@
 - `tests/fixtures/netns-nft`：`ip netns exec fwctl-test nft "$@"` 包装，
   `FWCTL_TEST_NETNS=1` 时作为 `FWCTL_NFT_BIN`，让 apply / 回滚 / 崩溃恢复跑在真实
   内核上而不是 mock 上。测试结束销毁 netns。
-- `tests/fixtures/golden/*.nft`：渲染黄金文件。
 
 前两项是长期资产：任何渲染改动都必须继续通过
 `v1 → 迁移 → 新状态 → 渲染 → 归一化 → 比对` 这条链路，否则「升级不改变防火墙
