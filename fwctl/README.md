@@ -1,78 +1,45 @@
-# Development Source
-
-This directory is the only development source for fwctl.
-
-The Gitea repository is authoritative. GitHub is a mirror only.
-
-Back production deployment:
-
-    /opt/fwctl
-
-Back production configuration:
-
-    /srv/docker/host-config/fwctl
-
-Do not develop directly inside production directories.
-
----
-
 # fwctl
 
-`fwctl` 项目安装后的命令名为 `fw`。它使用持久状态生成 nftables 的 input、forward 和
-NAT 规则。业务端口和端口转发必须写入
-`state.json`，不要只修改运行中的 ruleset。
+声明式 nftables 管理器。用持久状态描述防火墙、NAT 和端口转发，编译成 nftables
+规则并事务化地发布。
 
-## NAT 出站模式
+安装后的命令名是 `fw`。
 
-`state.json` 支持：
+## 开发与生产目录
 
-```json
-{
-  "nat_mode": "auto",
-  "snat_address": null
-}
+本目录是 fwctl 的唯一开发源。Gitea 仓库是权威源，GitHub 只是镜像。
+
+生产部署位于 `/opt/fwctl`，生产配置位于 `/srv/docker/host-config/fwctl`。
+不要直接在生产目录里开发。
+
+## 升级须知（重要）
+
+从旧版本升级时，**状态会在第一次写操作时自动迁移**，不需要手工改
+`state.json`，也不需要执行任何迁移命令。迁移前会自动备份。
+
+有一处需要人工检查的变化：
+
+> **表名从 `sb_filter` / `sb_nat` 变成了 `fwctl`。**
+> 任何按旧表名采集规则或计数的脚本、监控和告警都必须改为 `table ip fwctl`，
+> 否则会静默采集不到数据。
+
+旧表会在首次迁移时被识别、接管并删除，但只删除结构指纹确认属于旧版 fwctl 的
+表——同名但来源未知的表会被保留并持续告警。
+
+其余变化对用户不可见：`fw port`、`fw render`、交互菜单的用法和输出都没有变。
+完整说明见 [docs/MIGRATION.md](docs/MIGRATION.md)。
+
+## 快速开始
+
+```bash
+fw                      # 交互式菜单
+fw port add tcp 443     # 放行端口
+fw port list
+fw render               # 重新编译并应用
+fw doctor               # 体检
 ```
 
-允许的 `nat_mode`：
-
-- `auto`：优先使用 `snat_address`，未配置时查询公网 IPv4。只有候选地址真实存在于
-  `ip -4 -o addr show` 的本机接口列表中，才生成 `snat to <地址>`；否则生成
-  `masquerade`。
-- `snat`：必须设置合法的 `snat_address`，而且该地址必须存在于本机 IPv4 接口；
-  不满足条件时拒绝生成和加载。
-- `masquerade`：始终使用出口接口地址做源 NAT。
-
-普通 VPS 通常直接把公网 IPv4 配置在网卡上，`auto` 会选择显式 SNAT。AWS EC2 的 EIP
-等 1:1 NAT 地址不出现在实例网卡中；实例只看到 ENI 私网地址。把 EIP 直接写入
-`snat to` 会产生源地址不属于 ENI 的数据包，可能被云网络丢弃，因此 `auto` 会选择
-`masquerade`。
-
-检测公网地址失败或结果不明确时，`auto` 会输出日志并安全回退到 `masquerade`。判断不依赖
-AWS Metadata Service。
-
-AWS 推荐：
-
-```json
-{
-  "nat_mode": "auto",
-  "snat_address": null
-}
-```
-
-也可以明确设置：
-
-```json
-{
-  "nat_mode": "masquerade",
-  "snat_address": null
-}
-```
-
-## 公网业务端口
-
-SSH 管理端口由模板中的独立规则放行，不应重复加入普通业务端口。
-SSH 和普通 TCP 业务端口的 accept 规则位于全局 SYN 限速之前，因此已明确放行的端口不会
-被面向未放行端口的聚合限速提前丢弃。
+## 端口放行
 
 ```bash
 fw port add tcp 443
@@ -82,93 +49,165 @@ fw port remove tcp 443
 fw port list
 ```
 
-放行端口支持单端口（如 `443`）和闭区间范围（如 `60000-61000`）；协议支持
-`tcp`、`udp`、`both`，输入大小写不敏感并统一按小写语义处理。`both` 是一次逻辑操作，
-会在现有 `open_ports.tcp[]` 与 `open_ports.udp[]` 中各保存一份相同端口规范，并渲染为
-TCP、UDP 两个 nftables interval set，不会把范围展开成独立端口。命令会自动去重并按范围
-起止端口排序；删除不存在的端口会明确提示且不修改状态。
+支持单端口和闭区间范围；协议支持 `tcp`、`udp`、`both`，输入大小写不敏感。
+`both` 是一次逻辑操作，在 TCP 与 UDP 各存一份，渲染为两个 nftables interval
+set，不会把范围展开成独立端口。重复添加与删除不存在的端口都是幂等的。
 
-HY2 Port Hopping 的通用放行示例（fwctl 不依赖 HY2）：
+SSH 管理端口由独立规则放行，不需要再加进业务端口。SSH 和已放行端口的 accept
+规则位于全局 SYN 限速之前，因此明确放行的端口不会被面向未放行端口的聚合限速
+提前丢弃。
 
-```bash
-fw port add udp 60000-61000
-```
+## 对象模型
 
-对应输入为端口 `60000-61000`、协议 `udp`。
-
-端口操作采用事务流程：先生成候选状态和临时 nft 配置，执行 `nft -c -f`，成功加载后才保存
-状态。语法检查或加载失败时，原状态、运行 ruleset 和持久配置保持不变。
-
-## 端口转发
-
-运行交互入口并选择“添加端口转发”：
-
-```bash
-fw
-```
-
-选择协议 `both` 可为同一映射生成 TCP 和 UDP 两条规则。例如，将公网 `29312` 转发到
-`192.0.2.20:29312`：
+端口转发用三层对象表达，而不是一张扁平表：
 
 ```text
-目标落地 IP: 192.0.2.20
-起始端口: 29312
-结束端口: [回车]
-目标端口: 29312
-协议: both
+Target        Service
+      ↘      ↙
+        Rule
 ```
 
-## render/apply 安全行为
+- **Target**：命名地址对象。地址集中存放，换落地机 IP 只需要改一处。
+- **Service**：命名端口 + 协议对象，可被多条规则复用。
+- **Rule**：引用 Target 与 Service，自身不保存地址与端口。
 
 ```bash
-fw render
+fw target add edge 192.0.2.20
+fw service add https both 443
+fw rule add edge-https --type forward --service https --target edge
+
+fw target list
+fw rule list
+fw rule disable edge-https
 ```
 
-渲染过程：
+三类对象都有不可变 `id` 和可读 `name`。规则按 `id` 引用，因此重命名不破坏任何
+引用；CLI 输出一律优先显示 `name`。
 
-1. 验证 JSON schema、NAT 模式、协议和端口范围。
-2. 在 `build/` 中创建临时文件。
-3. 执行 `nft -c -f <临时文件>`。
-4. 将完整规则作为一个原子 nft netlink batch 加载。文件中的 `flush ruleset` 和新规则处于
-   同一事务，不会产生空规则窗口。
-5. 加载成功后，原子替换 `build/nft.conf` 和 `/etc/nftables.conf`。
-
-render 不执行 `systemctl restart nftables`，因此不会因 stop/flush/start 中断 SSH。
-
-只生成和检查、不加载：
+**Target 可变，Service 不可变。** 改 Target 的地址会传播到全部引用它的规则——
+这正是它存在的意义。Service 的 `(protocol, ports)` 是值，创建后冻结；改值等于
+新建对象并重写引用，因此必须显式声明范围：
 
 ```bash
-/opt/fwctl/render.sh --render-only
+fw service edit https --ports 8443 --refs edge-https
+fw service edit https --ports 8443 --all-refs
 ```
 
-## 回滚
+缺少 `--refs` / `--all-refs` 时命令会拒绝执行，并列出当前全部引用方。
+Service 没有 `enable` / `disable`：启用状态属于 Rule。
 
-修改前应备份整个项目和系统配置：
+## NAT 出站模式
+
+```json
+{ "settings": { "nat": { "mode": "auto", "snat_address": null } } }
+```
+
+- `auto`：优先使用 `snat_address`，未配置时查询公网 IPv4。只有候选地址确实存在
+  于本机接口，才生成 `snat to <地址>`；否则生成 `masquerade`。
+- `snat`：必须设置合法且存在于本机接口的 `snat_address`，否则拒绝生成。
+- `masquerade`：始终使用出口接口地址做源 NAT。
+
+普通 VPS 通常把公网 IPv4 直接配置在网卡上，`auto` 会选择显式 SNAT。AWS EC2 的
+EIP 等 1:1 NAT 地址不出现在实例网卡中，把它写进 `snat to` 会产生源地址不属于
+本机的数据包并可能被云网络丢弃，因此 `auto` 会选择 `masquerade`。判断不依赖
+云厂商的 Metadata Service。
+
+## 安全默认值与推荐配置
+
+`settings.policy` 的默认值刻意与旧版本保持一致，**升级和全新安装取同一套默认
+值**。升级不应该静默改变已生效的放行与拦截语义。
+
+| 字段 | 默认 | 效果 | 更严格的选择 |
+|---|---|---|---|
+| `input` | `drop` | 未放行的入站一律丢弃 | — |
+| `syn_limit.enabled` | `true` | 对未放行端口的 SYN 聚合限速 | — |
+| `ct_invalid` | `ignore` | 不处理 invalid 状态的包 | `drop` |
+| `icmp_echo` | `drop` | ping 不通 | `limit`（限速放行，便于排障） |
+
+推荐的两处调整及其影响：
+
+- **`ct_invalid: "drop"`**：丢弃 conntrack 判定为 invalid 的包。这类包通常是
+  扫描、乱序重传或连接跟踪表溢出的产物。风险很低，但在连接跟踪表被打满时可能
+  误伤正常连接。
+- **`icmp_echo: "limit"`**：以 10/s 的速率放行 ping。代价是主机变得可被探测
+  存活；收益是排障时能直接 ping 通。
+
+修改方式是编辑 `state.json` 的 `settings.policy` 后执行 `fw render`。
+`fw doctor` 会把这些作为建议输出，但**绝不会自动修改**。
+
+## 事务与回滚
+
+所有会改变状态、持久配置或运行中规则的操作都走同一条路径：
+
+```text
+全局锁 → 崩溃恢复 → 候选 → 校验 → 渲染 → nft -c → 内核快照
+      → apply → 应用后验证 → 提交
+```
+
+任何一步失败都回到变更前的状态。退出码区分「什么都没发生」和「发生了但已撤销」：
+
+| 码 | 含义 |
+|---|---|
+| 0 | 成功 |
+| 1 | 校验失败 |
+| 2 | 用法错误 |
+| 3 | 运行时失败（渲染、apply、系统调用）——发生在 apply 之前，系统未被改动 |
+| 4 | 锁冲突，另一个事务进行中 |
+| 5 | 已回滚——变更曾被应用但随后失败，**内核状态已恢复**，无需人工处理 |
+
+进程如果在 apply 与 commit 之间被 kill 或断电，下次执行任意 fwctl 命令时会自动
+收敛：依据事务日志判断 commit 是否真的完成，要么补齐提交，要么回滚内核。
+
+fwctl 只管理 `table ip fwctl` 一张表，**绝不执行 `flush ruleset`**，因此不会破坏
+同机 Docker、fail2ban 或云 agent 写入的规则。
+
+## 备份与恢复
 
 ```bash
-backup="/root/fwctl-backup-$(date +%Y%m%d-%H%M%S)"
-mkdir -m 700 "$backup"
-cp -a /opt/fwctl "$backup/fwctl"
-cp -a /etc/nftables.conf "$backup/nftables.conf"
+fw backup create --label before-change
+fw backup list
+fw restore <backup-id>
 ```
 
-回滚时恢复生成源和持久配置，再先检查、后原子加载：
+`restore` 走与其他写操作相同的事务，恢复前会自动备份当前状态。
+
+## 观测
 
 ```bash
-cp -a "$backup/fwctl/." /opt/fwctl/
-cp -a "$backup/nftables.conf" /etc/nftables.conf
-nft -c -f /etc/nftables.conf
-nft -f /etc/nftables.conf
+fw doctor          # 14 项体检，只报告不修改
+fw validate        # 校验状态
+fw diff            # 比较当前状态与运行中的规则
+fw stats           # 按规则统计流量
 ```
 
-不要以停止 nftables 作为长期回滚方案。
+每条由对象生成的规则都带 `counter` 和 `comment "fwctl:<id>"`，`fw stats` 依据
+这个前缀把内核计数器关联回对象并按名称显示。
+
+## 其他
+
+```bash
+/opt/fwctl/render.sh --render-only    # 只生成并检查，不加载（兼容入口）
+```
+
+`net.ipv4.ip_forward` 在存在启用的转发规则且当前为 0 时会被开启，**但不会被自动
+关闭**——它是全机共享的内核开关，Docker 或 WireGuard 可能正依赖它。需要恢复时
+`fw doctor` 会给出确切命令。
+
+## 文档
+
+| 文档 | 内容 |
+|---|---|
+| [ARCHITECTURE](docs/ARCHITECTURE.md) | 分层、事实来源、渲染契约、事务模型 |
+| [STATE_SCHEMA](docs/STATE_SCHEMA.md) | 状态结构、约束与校验清单 |
+| [CLI](docs/CLI.md) | 完整命令契约与退出码 ABI |
+| [MIGRATION](docs/MIGRATION.md) | 旧格式自动迁移与降级路径 |
+| [DEVELOPER](docs/DEVELOPER.md) | 模块约定、测试计划、提交前检查 |
+| [ADR](docs/adr/) | 架构决策记录 |
 
 ## 测试
 
 ```bash
-fwctl/tests/test_fwctl.sh
-nft -c -f /etc/nftables.conf
+fwctl/tests/run.sh                          # 默认：无 root、无内核
+FWCTL_TEST_REAL_NFT=1 fwctl/tests/run.sh    # 追加真实 nft -c 复核
+FWCTL_TEST_NETNS=1 fwctl/tests/run.sh       # 追加真实 apply / 回滚 / 崩溃恢复
 ```
-
-测试覆盖 NAT 模式选择、非法模式和地址、TCP/UDP/both 单端口及范围增删、边界值、重复添加、
-非法协议、非法端口规范、旧配置兼容和连续 render 幂等性。
