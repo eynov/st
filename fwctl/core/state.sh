@@ -445,6 +445,45 @@ def address_errors:
           | "\($what) 含非法地址 \(. | tostring)" ]
     ] | flatten;
 
+# 启用中的 forward 规则之间，入口端口不得重叠。
+#
+# forward 规则只按 (协议, 目的端口) 匹配，没有其他判别条件。两条规则的入口端口
+# 一旦重叠，就会生成两条匹配同一 dport 的 DNAT；而 dnat 是终结语句，第一条命中
+# 后链就不再继续，后一条**永远不会生效**且没有任何报错。这种"看起来配好了、实际
+# 从不生效"的规则必须在提交前被拒绝，而不是留到线上排查。
+#
+# 判定规则：
+#   协议  tcp 与 udp 互不重叠；both 与任何一方都重叠。
+#   端口  闭区间 [lo,hi] 与 [lo2,hi2] 在 lo <= hi2 且 lo2 <= hi 时重叠。
+# 只考虑启用的规则，且其引用的 Target 也必须启用——禁用的对象根本不渲染。
+def forward_overlap_errors:
+    ([ .services[] | {key: .id, value: .} ] | from_entries) as $svc
+    | ([ .targets[] | {key: .id, value: .} ] | from_entries) as $tgt
+    | ([ .rules[]
+         | select(.enabled and .type == "forward" and .service != null)
+         | select(.target == null
+                  or ($tgt[.target] != null and $tgt[.target].enabled))
+         | . as $r
+         | $svc[$r.service] as $s
+         | select($s != null and ($s.ports | type) == "array")
+         | (if $s.protocol == "both" then ["tcp","udp"] else [$s.protocol] end)[] as $proto
+         | $s.ports[] as $spec
+         | ($spec | capture("^(?<a>[0-9]+)(-(?<b>[0-9]+))?$")) as $p
+         | { rule: ($r.name // $r.id), proto: $proto,
+             lo: ($p.a | tonumber), hi: (($p.b // $p.a) | tonumber) }
+       ]
+       | sort_by([.proto, .lo, .hi, .rule])) as $spans
+    | [ range(0; $spans | length) as $i
+        | range($i + 1; $spans | length) as $j
+        | $spans[$i] as $x
+        | $spans[$j] as $y
+        | select($x.rule != $y.rule)
+        | select($x.proto == $y.proto and $x.lo <= $y.hi and $y.lo <= $x.hi)
+        | "Rule \($x.rule) 与 Rule \($y.rule) 的入口端口重叠"
+          + "（\($x.proto) \($x.lo)-\($x.hi) 与 \($y.lo)-\($y.hi)）；"
+          + "两条 DNAT 会匹配同一目的端口，后命中的一条永远不会生效"
+      ] | unique;
+
 # DNAT 的目的地必须是单个地址。
 # nftables 的 `dnat to` 不接受 set（`dnat to @set` 会报 unknown raw payload base），
 # 而且「转发到一组地址中的哪一个」本身也没有定义。多地址 Target 只能用作
@@ -496,7 +535,7 @@ def settings_semantic_errors($facts):
        else [] end);
 
 unique_errors + ref_errors + combo_errors + address_errors
-+ dnat_target_errors + reserved_name_errors
++ dnat_target_errors + forward_overlap_errors + reserved_name_errors
 + comment_key_errors + settings_semantic_errors($facts)
 JQ
 }

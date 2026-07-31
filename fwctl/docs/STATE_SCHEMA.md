@@ -386,6 +386,11 @@ fw service edit https --ports 8443 --all-refs
 13. `translate.port` 为单端口，不是范围。
 14. `comments` 的键要么是存在的对象 id，要么是合法的 `tcp:`/`udp:` 合成键。
 15. 对象图方向：Target 与 Service 对象内不含指向其他对象类型的字段。
+16. **启用中的 forward 规则之间入口端口不得重叠。** forward 只按
+    `(协议, 目的端口)` 匹配，而 `dnat` 是终结语句：入口端口一旦重叠，后命中的
+    那条 DNAT 永远不会生效且不会报错。协议上 `tcp` 与 `udp` 互不重叠，`both`
+    与两者都重叠；端口按闭区间判交。只统计启用的规则，且其引用的 Target 也必须
+    启用——禁用的对象根本不渲染。
 
 **警告（WARN，不阻断）**
 

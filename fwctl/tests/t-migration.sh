@@ -229,6 +229,47 @@ assert_eq "全部名称符合命名规则" \
 out=$(migrate_fixture blacklist-only)
 assert_ok "含 CIDR 的 blacklist 迁移后名称合法" state_validate "$out"
 
+# ── 入口端口冲突的消解 ────────────────────────────────────────────────
+#
+# 旧格式允许两条 forward 用同一入口端口指向不同落地机；旧渲染器照单生成两条
+# DNAT，后一条从来不会生效。迁移不能因此失败（那会让这类主机无法升级），而是
+# 保留全部规则、只禁用被遮蔽的一方，从而保持运行时行为完全一致。
+
+out=$(migrate_fixture shared-ports)
+assert_ok "存在冲突的旧状态仍能迁移" state_validate "$out"
+assert_eq "两条规则都被保留" \
+    "$(jq '[.rules[] | select(.type == "forward")] | length' "$out")" "2"
+assert_eq "渲染顺序靠前的一条保持启用" \
+    "$(jq -r '.rules[] | select(.name == "f-192-0-2-20-443") | .enabled' "$out")" "true"
+assert_eq "被遮蔽的一条被禁用" \
+    "$(jq -r '.rules[] | select(.name == "f-198-51-100-30-443") | .enabled' "$out")" "false"
+assert_contains "禁用原因被记录在 description 中" \
+    "$(jq -r '.rules[] | select(.enabled | not) | .description' "$out")" \
+    "入口端口与规则 f-192-0-2-20-443 重叠"
+assert_contains "description 说明它在旧版本中也从未生效" \
+    "$(jq -r '.rules[] | select(.enabled | not) | .description' "$out")" \
+    "从未生效"
+
+warn_output=$(migration_v1_to_current "$FIXTURES/state-v1-shared-ports.json" 2>&1 >/dev/null)
+assert_contains "迁移时发出明确告警" "$warn_output" "入口端口重叠"
+assert_contains "告警指名两条冲突规则" "$warn_output" "f-198-51-100-30-443"
+assert_contains "告警给出后续处置建议" "$warn_output" "不同的入口端口"
+
+# 保留的那一条必须与旧实现"先匹配先生效"的结果一致。
+assert_eq "保留的是 v1 数组中靠前的那条（priority 更小）" \
+    "$(jq -r '[.rules[] | select(.type=="forward" and .enabled)] | .[0].priority' "$out")" \
+    "$(jq -r '[.rules[] | select(.type=="forward")] | map(.priority) | min' "$out")"
+
+# 消解是确定性的：反复迁移结果一致。
+migration_v1_to_current "$FIXTURES/state-v1-shared-ports.json" > "$WORK/ov1.json" 2>/dev/null
+migration_v1_to_current "$FIXTURES/state-v1-shared-ports.json" > "$WORK/ov2.json" 2>/dev/null
+assert_files_eq "冲突消解是确定性的" "$WORK/ov1.json" "$WORK/ov2.json"
+
+# 无冲突的固件不应被误伤。
+clean_out=$(migrate_fixture shared-dip)
+assert_eq "无冲突时不禁用任何规则" \
+    "$(jq '[.rules[] | select(.enabled | not)] | length' "$clean_out")" "0"
+
 # ── 非法输入 ──────────────────────────────────────────────────────────
 
 echo '{"nat_mode":"bridge","forwards":[],"open_ports":{"tcp":[],"udp":[]},"blacklist":[]}' \
@@ -325,7 +366,35 @@ equivalence_sweep() {
             not_ok "[$label] $name 渲染等价" "新渲染器失败"
             continue
         fi
-        assert_ruleset_equivalent "[$label] $name 渲染等价" "$v3_out" "$v4_out"
+
+        # 旧状态中入口端口重叠的 forward 会被迁移禁用（它在旧版本中同样从未
+        # 生效）。这种固件不要求逐行相同，但差异必须**恰好**是那条被遮蔽规则
+        # 的行——不允许出现任何其他差异，也不允许新实现单方面多出规则。
+        local shadowed_addrs
+        shadowed_addrs=$(jq -r '
+            ([ .targets[] | {key: .id, value: .} ] | from_entries) as $t
+            | [ .rules[]
+                | select(.type == "forward" and (.enabled | not) and .target != null)
+                | $t[.target].addresses[] ] | unique | .[]' "$migrated" 2>/dev/null)
+
+        if [[ -z "$shadowed_addrs" ]]; then
+            assert_ruleset_equivalent "[$label] $name 渲染等价" "$v3_out" "$v4_out"
+            continue
+        fi
+
+        local delta only_v4 unexplained
+        delta=$(diff <(normalize_ruleset "$v3_out") <(normalize_ruleset "$v4_out") || true)
+        only_v4=$(grep -c '^> ' <<< "$delta" || true)
+        # 每一条仅存在于旧实现的行，都必须指向某个被遮蔽规则的落地地址。
+        unexplained=$(grep '^< ' <<< "$delta" | grep -vFf <(printf '%s\n' "$shadowed_addrs") || true)
+
+        if [[ "$only_v4" == 0 && -z "$unexplained" ]]; then
+            ok "[$label] $name 渲染等价（差异仅为被遮蔽的失效规则）"
+        else
+            not_ok "[$label] $name 渲染等价（差异仅为被遮蔽的失效规则）" \
+                "新实现多出的行数: $only_v4" \
+                "无法解释的差异: $(tr '\n' '|' <<< "$unexplained")"
+        fi
     done
 }
 

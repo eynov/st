@@ -489,6 +489,58 @@ assert_eq "没有转发规则时不修改 ip_forward" \
 assert_not_contains "实现中不存在关闭 ip_forward 的代码路径" \
     "$(grep -c 'ip_forward=0' "$TEST_PROJECT_DIR/core/transaction.sh")" "1"
 
+# ── 候选渲染产物必须在所有退出路径上被清理 ───────────────────────────
+#
+# 失败回滚之后如果留下一份从未生效的渲染结果，运维检查 build/ 时会把它误认成
+# 当前生效的配置。已发布的配置在 build/nft.conf。
+
+candidate_left() { [[ -f "$FWCTL_BUILD_DIR/candidate.nft" ]] && echo yes || echo no; }
+
+new_env candidate-success
+reset_kernel
+candidate="$dir/c.json"; make_candidate "$candidate" 8801
+txn_publish "$candidate" >/dev/null 2>&1
+assert_eq "成功后不残留 candidate.nft" "$(candidate_left)" "no"
+assert_eq "已发布的 nft.conf 仍在" \
+    "$([[ -f "$FWCTL_BUILD_DIR/nft.conf" ]] && echo yes)" "yes"
+
+new_env candidate-validation-fail
+reset_kernel
+jq '.rules[0].service = "svc-000000000000"' "$FWCTL_STATE_FILE" > "$dir/bad.json"
+txn_publish "$dir/bad.json" >/dev/null 2>&1
+assert_eq "校验失败后不残留 candidate.nft" "$(candidate_left)" "no"
+
+if [[ "${FWCTL_TEST_NETNS:-0}" != 1 ]]; then
+    new_env candidate-check-fail
+    reset_kernel
+    candidate="$dir/c.json"; make_candidate "$candidate" 8802
+    FAKE_NFT_FAIL_CHECK=1 txn_publish "$candidate" >/dev/null 2>&1
+    assert_eq "nft -c 失败后不残留 candidate.nft" "$(candidate_left)" "no"
+
+    new_env candidate-apply-fail
+    reset_kernel
+    candidate="$dir/c.json"; make_candidate "$candidate" 8803
+    FAKE_NFT_FAIL_APPLY=1 txn_publish "$candidate" >/dev/null 2>&1
+    rc=$?
+    assert_eq "apply 失败仍返回 5" "$rc" "5"
+    assert_eq "回滚后不残留 candidate.nft" "$(candidate_left)" "no"
+    # 这正是真实主机上发现的那个残留：被拒绝的候选内容不得留在 build/。
+    assert_eq "被拒绝的端口不出现在 build/ 的任何文件里" \
+        "$(grep -rl 8803 "$FWCTL_BUILD_DIR" 2>/dev/null | wc -l)" "0"
+
+    new_env candidate-verify-fail
+    reset_kernel
+    candidate="$dir/c.json"; make_candidate "$candidate" 8804
+    FAKE_NFT_CORRUPT_APPLY=1 txn_publish "$candidate" >/dev/null 2>&1
+    assert_eq "应用后验证失败也不残留 candidate.nft" "$(candidate_left)" "no"
+fi
+
+new_env candidate-dryrun
+reset_kernel
+candidate="$dir/c.json"; make_candidate "$candidate" 8805
+FWCTL_DRY_RUN=1 txn_publish "$candidate" >/dev/null 2>&1
+assert_eq "dry-run 后不残留 candidate.nft" "$(candidate_left)" "no"
+
 # ── 真实内核上的回滚 ──────────────────────────────────────────────────
 #
 # 上面的失败注入依赖 fake-nft，真实 nft 无法被这样驱动。但回滚本身可以在真实

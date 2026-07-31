@@ -163,8 +163,11 @@ noted_id=$(jq -r '.rules[] | select(.name=="noted") | .id' "$FWCTL_STATE_FILE")
 assert_eq "注释写入 comments 映射" \
     "$(jq -r --arg id "$noted_id" '.comments[$id]' "$FWCTL_STATE_FILE")" "对外入口"
 
+# 入口端口必须与 edge-https(443) 不同：两条 forward 规则的入口端口重叠会被
+# 校验拒绝（后命中的 DNAT 永远不会生效）。
+fw service add mapsvc tcp 8080 >/dev/null
 assert_ok "rule add 带 to-port" fw rule add mapped --type forward \
-    --service https --target edge --to-port 8443
+    --service mapsvc --target edge --to-port 8443
 assert_eq "to-port 写入 translate" \
     "$(jq -r '.rules[] | select(.name=="mapped") | .translate.port' "$FWCTL_STATE_FILE")" \
     "8443"

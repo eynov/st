@@ -267,6 +267,57 @@ accept "priority 边界 65535 合法" '.rules[0].priority = 65535'
 # 而不必截断——截断会让重叠规则的 DNAT 优先级在升级时静默改变。
 accept "priority 2000 合法（迁移大状态所需）" '.rules[0].priority = 2000'
 
+# ── 启用中的 forward 规则之间入口端口不得重叠 ─────────────────────────
+#
+# forward 只按 (协议, 目的端口) 匹配，dnat 又是终结语句：入口端口一旦重叠，
+# 后命中的那条永远不会生效且不报错。这种规则必须在提交前被拒绝。
+
+# 构造两条 forward 规则的辅助变换：svc2/tgt2 为第二条规则的服务与目标。
+two_forwards() {
+    local proto1=$1 ports1=$2 proto2=$3 ports2=$4 enabled2=${5:-true}
+    printf '%s' '
+      .targets += [{id:"tgt-111111111111", name:"edge2", description:"", kind:"ipv4",
+                    addresses:["203.0.113.9"], enabled:true,
+                    created_at:"2026-07-31T00:00:00Z", updated_at:"2026-07-31T00:00:00Z"}]
+    | .services[0].protocol = "'"$proto1"'" | .services[0].ports = '"$ports1"'
+    | .services += [{id:"svc-222222222222", name:"svc2", description:"",
+                     protocol:"'"$proto2"'", ports:'"$ports2"',
+                     created_at:"2026-07-31T00:00:00Z", updated_at:"2026-07-31T00:00:00Z"}]
+    | .rules += [{id:"rule-333333333333", name:"fwd2", description:"", type:"forward",
+                  enabled:'"$enabled2"', priority:200, service:"svc-222222222222",
+                  target:"tgt-111111111111", source:null, translate:{port:null},
+                  created_at:"2026-07-31T00:00:00Z", updated_at:"2026-07-31T00:00:00Z"}]'
+}
+
+reject "同协议同端口重叠被拒绝" "$(two_forwards tcp '["443"]' tcp '["443"]')" '入口端口重叠'
+reject "both 与 tcp 重叠被拒绝" "$(two_forwards both '["443"]' tcp '["443"]')" '入口端口重叠'
+reject "both 与 udp 重叠被拒绝" "$(two_forwards both '["443"]' udp '["443"]')" '入口端口重叠'
+reject "区间部分重叠被拒绝" "$(two_forwards tcp '["8000-8100"]' tcp '["8050-8200"]')" '入口端口重叠'
+reject "区间包含单端口被拒绝" "$(two_forwards tcp '["8000-8100"]' tcp '["8050"]')" '入口端口重叠'
+reject "多端口服务中任一端口重叠即被拒绝" \
+    "$(two_forwards tcp '["80","443"]' tcp '["443"]')" '入口端口重叠'
+
+# tcp 与 udp 不重叠；相邻但不相交的区间不重叠。
+accept "tcp 与 udp 同端口不算重叠" "$(two_forwards tcp '["443"]' udp '["443"]')"
+accept "相邻不相交的区间不算重叠" "$(two_forwards tcp '["8000-8100"]' tcp '["8101-8200"]')"
+accept "不同端口不算重叠" "$(two_forwards tcp '["443"]' tcp '["8443"]')"
+
+# 禁用的规则不渲染，因此不参与冲突判定。
+accept "被禁用的重叠规则不算冲突" "$(two_forwards tcp '["443"]' tcp '["443"]' false)"
+
+# 引用的 Target 被禁用时该规则同样不渲染。
+accept "Target 被禁用时其规则不算冲突" \
+    "$(two_forwards tcp '["443"]' tcp '["443"]')
+     | .targets |= map(if .name == \"edge2\" then .enabled = false else . end)"
+
+# accept 规则之间重叠是无害的（多条放行不会互相遮蔽）。
+accept "accept 规则重叠不被拒绝" \
+    '.rules[0].type = "accept" | .rules[0].target = null | .rules[0].translate.port = null
+     | .rules += [{id:"rule-444444444444", name:"acc2", description:"", type:"accept",
+                   enabled:true, priority:200, service:"svc-3d81c0be5f24",
+                   target:null, source:null, translate:{port:null},
+                   created_at:"2026-07-31T00:00:00Z", updated_at:"2026-07-31T00:00:00Z"}]'
+
 # ── 注释 ──────────────────────────────────────────────────────────────
 
 reject "含双引号的注释被拒绝" \

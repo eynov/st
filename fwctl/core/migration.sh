@@ -106,6 +106,63 @@ _migration_unique_name() {
 
 # ── 转换 ──────────────────────────────────────────────────────────────
 
+# 把被遮蔽的 forward 规则置为禁用，并说明原因。
+# 参数：$1=状态文件。输出：处理后的状态 JSON。
+_migration_resolve_overlaps() {
+    local state=$1 result disabled
+
+    result=$(jq '
+        ([ .services[] | {key: .id, value: .} ] | from_entries) as $svc
+        | ([ .rules[]
+             | select(.enabled and .type == "forward" and .service != null) ]
+           | sort_by([.priority, .id])) as $ordered
+        | (reduce $ordered[] as $r ({kept: [], shadowed: []};
+             ($svc[$r.service]) as $s
+             | (if $s.protocol == "both" then ["tcp","udp"] else [$s.protocol] end) as $protos
+             | ([ $protos[] as $p
+                  | $s.ports[] as $spec
+                  | ($spec | capture("^(?<a>[0-9]+)(-(?<b>[0-9]+))?$"))
+                  | {proto: $p, lo: (.a | tonumber), hi: ((.b // .a) | tonumber)} ]) as $spans
+             | ([ .kept[] as $k
+                  | $spans[] as $n
+                  | select($k.proto == $n.proto and $k.lo <= $n.hi and $n.lo <= $k.hi)
+                  | $k.rule ] | first) as $clash
+             | if $clash != null
+               then .shadowed += [{id: $r.id, name: $r.name, by: $clash}]
+               else .kept += ($spans | map(. + {rule: $r.name}))
+               end
+           )) as $outcome
+        | ($outcome.shadowed | map(.id)) as $ids
+        | {
+            state: (
+              .rules |= map(
+                . as $r
+                | if ($ids | index($r.id)) != null
+                  then .enabled = false
+                     | .description = (
+                         ($outcome.shadowed[] | select(.id == $r.id) | .by) as $by
+                         | "入口端口与规则 \($by) 重叠，迁移时自动禁用；" +
+                           "旧版本中它同样从未生效（DNAT 先匹配先生效）"
+                       )
+                  else . end
+              )
+            ),
+            shadowed: $outcome.shadowed
+          }
+    ' "$state") || return 1
+
+    disabled=$(jq -r '.shadowed[] | "  规则 \(.name) 与 \(.by) 的入口端口重叠"' <<< "$result")
+    if [[ -n "$disabled" ]]; then
+        fwctl_warn "旧状态中存在入口端口重叠的转发规则，已自动禁用被遮蔽的一方："
+        while IFS= read -r line; do
+            [[ -n "$line" ]] && fwctl_warn "$line"
+        done <<< "$disabled"
+        fwctl_warn "  这些规则在旧版本中同样从未生效；确认后可删除或改用不同的入口端口"
+    fi
+
+    jq '.state' <<< "$result"
+}
+
 # 把 v1 状态转换为当前 schema，结果输出到 stdout。
 # 参数：$1=v1 状态文件路径。
 #
@@ -325,6 +382,24 @@ migration_v1_to_current() {
         fi
         mv -f "$next" "$current" || { _migration_cleanup; return 1; }
     done < <(printf '%s\n' "$merged")
+
+    # ── 消解入口端口冲突 ──
+    # 旧格式允许两条 forward 用同一个入口端口指向不同落地机；旧渲染器会照单生成
+    # 两条 DNAT，而 dnat 是终结语句，后一条从来不会生效。新实现的校验会拒绝这种
+    # 状态，但迁移不能因此失败——那会让这类主机彻底无法升级。
+    #
+    # 因此这里保留全部规则，只把被遮蔽的那些置为 enabled=false：
+    #   * 运行时行为与旧版本完全一致（被遮蔽的规则本来就从未匹配到流量）；
+    #   * 升级保持自动完成；
+    #   * 原本静默的错误配置变得显式可见。
+    # 保留的是渲染顺序上排在前面的那条（priority 最小），与旧实现"先匹配先生效"
+    # 的语义一致。
+    if ! _migration_resolve_overlaps "$current" > "$next"; then
+        fwctl_err "消解入口端口冲突失败"
+        _migration_cleanup
+        return 1
+    fi
+    mv -f "$next" "$current" || { _migration_cleanup; return 1; }
 
     # 规范化输出，保证结果与处理顺序无关。
     if ! state_normalize "$current"; then

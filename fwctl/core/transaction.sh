@@ -395,7 +395,21 @@ txn_verify_applied() {
 #   FWCTL_APPLY=0     渲染并检查，但不触碰内核（兼容旧入口的 --render-only）
 #
 # 返回：docs/CLI.md 冻结的退出码。
+# 对外入口：执行发布并保证清理候选渲染产物。
+#
+# 内部实现有十几个返回点，逐个 rm 容易漏。这里统一包一层：无论成功还是失败，
+# 都删掉 build/candidate.nft。失败回滚之后留下一份从未生效的渲染结果，会让人
+# 误以为它就是当前生效的配置——已发布的配置在 build/nft.conf 与系统配置里。
+# 参数：$1=候选状态文件。
 txn_publish() {
+    local rc
+    _txn_publish_impl "$@"
+    rc=$?
+    rm -f "$(txn_build_dir)/candidate.nft"
+    return "$rc"
+}
+
+_txn_publish_impl() {
     local candidate=$1
     local facts rendered snapshot table_existed build_dir system_conf
     local state="${FWCTL_STATE_FILE:?FWCTL_STATE_FILE 未设置}"
