@@ -630,8 +630,37 @@ _cli_restore_mutator() {
     migration_to_current "$resolved" > "$candidate"
 }
 
+# 预检恢复来源：解析 → 迁移 → 校验，全程只读，不留下任何文件。
+#
+# 必须在创建 before-restore 安全备份之前调用。先备份再发现来源不存在，会让每一次
+# 拼错的 id 都在 /var/lib/fwctl/backups 里留下一份无人认领的备份。
+#
+# 这里用离线事实校验：离线只是跳过「SNAT 地址必须属于本机」这一条依赖本机接口的
+# 检查，其余与事务内的校验一致，因此它严格弱于事务自己的校验——本来能成功的恢复
+# 不会因为这道预检而失败。真正的完整校验仍由事务负责。
+# 参数：$1=备份 id 或状态文件路径。
+# 返回：0 来源可用；非 0 表示不可用，错误信息已由底层函数输出。
+_cli_restore_source_ok() {
+    local source=$1 resolved work rc=0
+
+    resolved=$(backup_resolve_state "$source") || return 1
+
+    work=$(mktemp -d) || return 1
+    if ! migration_to_current "$resolved" > "$work/candidate.json"; then
+        rc=1
+    elif ! state_validate "$work/candidate.json"; then
+        rc=1
+    fi
+    rm -rf "$work"
+
+    return "$rc"
+}
+
 cli_restore() {
     local source=$1 id rc
+
+    # 先确认来源确实可用，再动安全备份。
+    _cli_restore_source_ok "$source" || return "$FWCTL_EXIT_VALIDATION"
 
     # 恢复前先备份当前状态，避免「恢复错了备份」变成不可逆操作。
     if id=$(backup_create "before-restore"); then

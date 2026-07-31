@@ -158,6 +158,83 @@ assert_eq "restore 前自动创建了备份" \
 
 assert_fails "restore 不存在的备份失败" 0 fw restore backup-nonexistent
 
+# ── 失败的 restore 不得留下任何痕迹 ───────────────────────────────────
+#
+# 曾经的行为：先创建 before-restore 安全备份，再去解析来源。于是每一次拼错
+# 备份 id 都在 /var/lib/fwctl/backups 里留下一份无人认领的备份，越积越多。
+# 现在来源必须先解析并通过校验，才允许动安全备份。
+
+# 统计备份目录中的备份数量。
+count_backups() {
+    find "$FWCTL_VAR_DIR/backups" -maxdepth 1 -name 'backup-*' -type d 2>/dev/null | wc -l
+}
+
+setup_env restore-no-leak
+build_sample
+
+before_backups=$(count_backups)
+before_state=$(sha256sum "$FWCTL_STATE_FILE" | cut -d' ' -f1)
+before_kernel=$("$FWCTL_NFT_BIN" list table ip fwctl 2>/dev/null | sha256sum | cut -d' ' -f1)
+before_sysconf=$(sha256sum "$FWCTL_SYSTEM_CONF" | cut -d' ' -f1)
+
+# 基线必须真的有内容，否则下面的「未改变」断言会退化成空串比空串。
+assert_contains "内核基线非空（断言不空转）" \
+    "$("$FWCTL_NFT_BIN" list table ip fwctl 2>/dev/null)" "elements = { 8443 }"
+
+assert_fails "恢复不存在的 id 返回校验失败" 1 fw restore backup-does-not-exist
+assert_eq "失败的 restore 不创建安全备份" "$(count_backups)" "$before_backups"
+assert_eq "失败的 restore 不改状态" \
+    "$(sha256sum "$FWCTL_STATE_FILE" | cut -d' ' -f1)" "$before_state"
+assert_eq "失败的 restore 不改内核" \
+    "$("$FWCTL_NFT_BIN" list table ip fwctl 2>/dev/null | sha256sum | cut -d' ' -f1)" "$before_kernel"
+assert_eq "失败的 restore 不改系统配置" \
+    "$(sha256sum "$FWCTL_SYSTEM_CONF" | cut -d' ' -f1)" "$before_sysconf"
+
+# 事务留下的中间产物同样不允许存在。
+assert_eq "失败的 restore 不留候选渲染" \
+    "$([[ -e "$FWCTL_BUILD_DIR/candidate.nft" ]] && echo present || echo absent)" "absent"
+assert_eq "失败的 restore 不留 journal" \
+    "$([[ -e "$FWCTL_VAR_DIR/journal.json" ]] && echo present || echo absent)" "absent"
+assert_eq "失败的 restore 不持有锁" \
+    "$(flock -n "$FWCTL_LOCKFILE" true 2>/dev/null && echo free || echo held)" "free"
+
+# 指向不存在的文件路径，与不存在的 id 表现一致。
+assert_fails "恢复不存在的文件返回校验失败" 1 fw restore --file "$ENV_DIR/no-such-file.json"
+assert_eq "文件不存在时也不创建备份" "$(count_backups)" "$before_backups"
+
+# 存在但内容非法的文件：同样必须在创建安全备份之前被拒绝。
+notjson="$ENV_DIR/not-json.json"
+printf 'this is not json at all\n' > "$notjson"
+assert_fails "恢复非 JSON 文件返回校验失败" 1 fw restore --file "$notjson"
+assert_eq "非 JSON 文件不创建备份" "$(count_backups)" "$before_backups"
+
+emptyfile="$ENV_DIR/empty.json"
+: > "$emptyfile"
+assert_fails "恢复空文件返回校验失败" 1 fw restore --file "$emptyfile"
+assert_eq "空文件不创建备份" "$(count_backups)" "$before_backups"
+
+dangling="$ENV_DIR/dangling.json"
+jq '.rules[0].service = "svc-000000000000"' "$FWCTL_STATE_FILE" > "$dangling"
+assert_fails "恢复引用悬空的状态返回校验失败" 1 fw restore --file "$dangling"
+assert_eq "引用悬空时不创建备份" "$(count_backups)" "$before_backups"
+
+# 反面用例：合法的恢复必须仍然创建安全备份并真正生效。
+good=$(fw backup create --label good-snapshot | sed -n 's/.*已创建备份 //p')
+after_create=$(count_backups)
+fw port add tcp 9998 >/dev/null
+assert_ok "合法 restore 仍然成功" fw restore "$good"
+assert_eq "合法 restore 创建了安全备份" \
+    "$(($(count_backups) - after_create))" "1"
+assert_eq "合法 restore 确实创建的是 before-restore" \
+    "$(find "$FWCTL_VAR_DIR/backups" -maxdepth 1 -name 'backup-*' \
+        -exec jq -r '.label' '{}/metadata.json' \; 2>/dev/null |
+       grep -c 'before-restore')" "1"
+assert_eq "合法 restore 回滚了状态" \
+    "$(jq -r '.ports.tcp | index("9998") == null' "$FWCTL_STATE_FILE")" "true"
+assert_eq "合法 restore 同步了内核" \
+    "$("$FWCTL_NFT_BIN" list table ip fwctl 2>/dev/null | grep -c '9998')" "0"
+assert_ok "合法 restore 后状态仍可校验" fw validate
+
 # 恢复失败时整体回滚，不做部分恢复。
 setup_env restore-invalid
 build_sample
