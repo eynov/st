@@ -103,10 +103,20 @@
 fwctl/tests/run.sh                          # 默认：无 root、无内核
 FWCTL_TEST_REAL_NFT=1 fwctl/tests/run.sh    # 追加真实 nft -c 复核
 FWCTL_TEST_NETNS=1 fwctl/tests/run.sh       # 追加真实 apply / 回滚 / 崩溃恢复
-shellcheck fwctl/fw.sh fwctl/render.sh fwctl/install.sh \
-           fwctl/core/*.sh fwctl/tests/*.sh fwctl/tests/fixtures/*.sh
+shellcheck -x --source-path=fwctl \
+           fwctl/fw.sh fwctl/render.sh fwctl/install.sh \
+           fwctl/core/*.sh fwctl/tests/*.sh \
+           fwctl/tests/fixtures/fake-nft fwctl/tests/fixtures/netns-nft
 git diff --check
 ```
+
+`-x --source-path` 让 ShellCheck 跟随 `source` 进去检查，是比忽略 SC1091 更强的
+配置，不是绕过。
+
+**`tests/fixtures/render-v3.sh` 刻意不在检查范围内。** 它是旧实现的逐字节快照，
+价值恰恰在于未被修改（见 `tests/fixtures/README.md`）。让它通过 ShellCheck 只有
+两条路——改代码或往里加抑制注释——两者都会破坏它作为「旧行为」证据的可验证性。
+它不是本项目维护的代码，是一份保存下来的历史件。
 
 ShellCheck 必须零 warning。不使用 `# shellcheck disable` 掩盖真实问题；确需
 禁用时在同一行注明原因。
