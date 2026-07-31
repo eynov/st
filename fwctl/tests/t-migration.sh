@@ -265,4 +265,91 @@ migration_v1_to_current "$FIXTURES/state-v1-production.json" >/dev/null
 after=$(sha256sum "$FIXTURES/state-v1-production.json")
 assert_eq "迁移不修改输入文件" "$before" "$after"
 
+# ── 渲染等价性 ────────────────────────────────────────────────────────
+#
+# 这是迁移正确性的真正判据（ADR 0004）：不是「字段搬完了」，而是「防火墙行为
+# 没变」。对每个固件断言
+#     归一化(旧渲染器(v1)) == 归一化(新渲染器(迁移(v1)))
+# 归一化只消除已声明的三类差异，见 tests/lib.sh 的 normalize_ruleset。
+
+source "$TEST_PROJECT_DIR/core/render.sh"
+
+# 旧实现无法渲染的输入。这些不是迁移缺陷，而是旧实现自身的缺陷；
+# 列在这里是为了让「旧渲染器失败」永远是显式声明的例外，而不是被静默跳过。
+#
+# blacklist-only：旧实现用 sed 把黑名单替换进模板，CIDR 里的 / 会破坏
+#   s/// 表达式，因此含 CIDR 的黑名单在旧版本上根本渲染不出来。
+V3_CANNOT_RENDER="blacklist-only"
+
+# 两组外部事实分别覆盖 NAT 的两条分支：公网地址不在本机（EIP，走 masquerade）
+# 与公网地址就在本机（走显式 SNAT）。两个渲染器必须在两种情形下都一致。
+equivalence_sweep() {
+    local label=$1 locals=$2
+    local fixture name v3_out v4_out migrated facts
+
+    facts=$(render_facts 37091 "$locals" "198.51.100.10" "")
+
+    for fixture in "$FIXTURES"/state-v1-*.json; do
+        name=$(basename "$fixture" .json)
+        name=${name#state-v1-}
+
+        v3_out="$WORK/eq-$label-$name-v3.nft"
+        v4_out="$WORK/eq-$label-$name-v4.nft"
+        migrated="$WORK/eq-$label-$name.json"
+
+        if ! render_with_v3 "$fixture" "$v3_out" 37091 198.51.100.10 "$locals"; then
+            # 旧渲染器拒绝时，要么是它自身的已知缺陷，要么是它正确地拒绝了
+            # 一个非法配置（例如 snat 地址不在本机）——后者新实现也必须拒绝。
+            if [[ " $V3_CANNOT_RENDER " == *" $name "* ]]; then
+                ok "[$label] $name 旧实现无法渲染（已知旧缺陷），新实现不受影响"
+                continue
+            fi
+            if ! migration_v1_to_current "$fixture" > "$migrated" 2>/dev/null; then
+                ok "[$label] $name 新旧实现都拒绝"
+                continue
+            fi
+            if render_ruleset "$migrated" "$facts" >/dev/null 2>&1; then
+                not_ok "[$label] $name 新旧实现都拒绝" \
+                    "旧实现拒绝渲染，但新实现接受了同一份配置"
+            else
+                ok "[$label] $name 新旧实现都拒绝"
+            fi
+            continue
+        fi
+
+        if ! migration_v1_to_current "$fixture" > "$migrated" 2>/dev/null; then
+            not_ok "[$label] $name 渲染等价" "迁移失败"
+            continue
+        fi
+        if ! render_ruleset "$migrated" "$facts" > "$v4_out" 2>/dev/null; then
+            not_ok "[$label] $name 渲染等价" "新渲染器失败"
+            continue
+        fi
+        assert_ruleset_equivalent "[$label] $name 渲染等价" "$v3_out" "$v4_out"
+    done
+}
+
+equivalence_sweep "eip" "10.0.0.10"
+equivalence_sweep "local" "10.0.0.10 198.51.100.10"
+
+# 声明的差异必须真实存在且被测到，而不是「恰好没出现」。
+render_with_v3 "$FIXTURES/state-v1-empty.json" "$WORK/decl-v3.nft" \
+    37091 198.51.100.10 10.0.0.10
+assert_contains "旧实现确实使用 127.0.0.2 占位" \
+    "$(cat "$WORK/decl-v3.nft")" "127.0.0.2"
+assert_contains "旧实现确实使用 65535 占位" \
+    "$(cat "$WORK/decl-v3.nft")" "65535"
+
+migration_v1_to_current "$FIXTURES/state-v1-empty.json" > "$WORK/decl.json"
+render_ruleset "$WORK/decl.json" "$(render_facts 37091 "10.0.0.10" "" "")" \
+    > "$WORK/decl-v4.nft"
+assert_not_contains "新实现不再产生 127.0.0.2 占位" \
+    "$(cat "$WORK/decl-v4.nft")" "127.0.0.2"
+assert_not_contains "新实现不再产生 65535 占位" \
+    "$(cat "$WORK/decl-v4.nft")" "65535"
+assert_not_contains "旧实现使用 flush ruleset" \
+    "$(cat "$WORK/decl-v4.nft")" "flush ruleset"
+assert_contains "旧实现确实 flush 整机规则" \
+    "$(cat "$WORK/decl-v3.nft")" "flush ruleset"
+
 finish

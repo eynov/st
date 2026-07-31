@@ -1,0 +1,15 @@
+{
+  "nat_mode": "auto",
+  "snat_address": null,
+  "forwards": [],
+  "open_ports": {
+    "tcp": [
+      "443"
+    ],
+    "udp": []
+  },
+  "blacklist": [
+    "198.51.100.7",
+    "198.51.100.9"
+  ]
+}

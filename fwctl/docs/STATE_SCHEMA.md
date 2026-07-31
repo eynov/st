@@ -276,7 +276,7 @@ fw service edit https --ports 8443 --all-refs
 | `description` | 显示元数据，不渲染 |
 | `type` | `accept` / `forward` / `block` |
 | `enabled` | 布尔；`false` 时完全不渲染，不留占位规则 |
-| `priority` | 0–65535 整数，默认 100；同 chain 内按 `(priority, id)` 升序渲染 |
+| `priority` | 0–65535 整数，默认 100；**同类型规则之间**按 `(priority, id)` 升序渲染 |
 | `service` | service 的 id；`accept`、`forward` 必填，`block` 必须为 `null` |
 | `target` | target 的 id，作为 **DNAT 目的地**；仅 `forward` 必填，其余为 `null` |
 | `source` | target 的 id，作为 **saddr 匹配源**；仅 `block` 必填，其余为 `null` |
@@ -289,6 +289,11 @@ fw service edit https --ports 8443 --all-refs
 | `accept` | `input` | `<proto> dport <ports> counter accept` |
 | `block` | `input` | `ip saddr <source> counter drop`，置于 accept 规则之前 |
 | `forward` | `prerouting` + `postrouting` | DNAT 加对应 SNAT/masquerade |
+
+规则类型决定它在 chain 中的位置段落，`priority` 只在同类型规则之间排序。
+**block 永远排在 accept 之前，无论 priority 取值如何**——先拒绝后放行是防火墙的
+安全默认，不应因为某条规则的排序数字而被绕过。想调整拦截与放行的相对关系时，
+应当修改规则本身而不是依赖排序数字。
 
 `translate.port` 为 `null` 时渲染 `dnat to <addr>`（保持原目的端口）；有值时
 渲染 `dnat to <addr>:<port>`。service 是端口范围而 `translate.port` 是单端口

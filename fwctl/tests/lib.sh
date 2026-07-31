@@ -131,6 +131,132 @@ finish() {
     exit 0
 }
 
+# ── 渲染等价性归一化 ──────────────────────────────────────────────────
+
+# 把一份 nft 配置归一化成「语义行」清单，用于比较新旧渲染器的行为。
+#
+# 只消除 ADR 0004 声明的三类差异，此外不做任何宽容：
+#   1. nftables 对象标识符——表名（sb_filter/sb_nat → fwctl）；
+#   2. counter 与 comment 的增加；
+#   3. 空 set 的占位元素 127.0.0.2 与 65535（仅当它是集合中唯一的元素时，
+#      这正是旧实现使用占位符的条件）。
+#
+# 比较的是「哪条 chain 里有哪些规则、哪个 set 里有哪些元素」，而不是文件文本，
+# 因此新实现把两张表合并成一张不会造成假阳性——表的分组方式不影响包处理。
+normalize_ruleset() {
+    local path=$1 raw
+    raw=$(_normalize_ruleset_lines "$path")
+    # set 的声明顺序在 nftables 里没有语义——它们是具名对象，声明先后不影响
+    # 匹配。因此 set 行排序后输出，chain 内的规则行严格保持原顺序（那是有语义的）。
+    local empty_sets
+    # 元素为空的 set（含仅有占位符的情形）匹配不到任何流量，引用它的规则因此
+    # 是惰性的。旧实现用占位符伪造非空集合并保留该规则，新实现两者都不生成；
+    # 这是 ADR 0004 声明的占位符差异的直接后果，比较时一并消除。
+    empty_sets=$(printf '%s\n' "$raw" | sed -n 's/^set \([A-Za-z0-9_]*\) = $/@\1/p')
+
+    printf '%s\n' "$raw" | grep '^set ' | grep -v ' = $' | sort
+    if [[ -n "$empty_sets" ]]; then
+        printf '%s\n' "$raw" | grep '^chain ' | grep -vF "$empty_sets"
+    else
+        printf '%s\n' "$raw" | grep '^chain '
+    fi
+}
+
+_normalize_ruleset_lines() {
+    local path=$1
+    awk '
+        # 去掉注释行与 flush ruleset。
+        /^[[:space:]]*#/ { next }
+        /^[[:space:]]*flush ruleset/ { next }
+        # 表的预声明与删除是新实现的原子替换惯用法，不是规则。
+        /^[[:space:]]*table ip [a-z_]+ \{ \}[[:space:]]*$/ { next }
+        /^[[:space:]]*delete table/ { next }
+
+        /^[[:space:]]*set [A-Za-z0-9_]+ \{/ {
+            match($0, /set [A-Za-z0-9_]+/)
+            set_name = substr($0, RSTART + 4, RLENGTH - 4)
+            in_set = 1
+            elements = ""
+            next
+        }
+        in_set && /elements[[:space:]]*=/ {
+            line = $0
+            sub(/^[^{]*\{/, "", line)
+            sub(/\}.*$/, "", line)
+            gsub(/[[:space:]]+/, "", line)
+            elements = line
+            next
+        }
+        in_set && /^[[:space:]]*\}/ {
+            # 唯一元素为占位符时视为空集合。
+            if (elements == "127.0.0.2" || elements == "65535") elements = ""
+            printf "set %s = %s\n", set_name, elements
+            in_set = 0
+            next
+        }
+        in_set { next }
+
+        /^[[:space:]]*chain [a-z]+ \{/ {
+            match($0, /chain [a-z]+/)
+            chain_name = substr($0, RSTART + 6, RLENGTH - 6)
+            in_chain = 1
+            next
+        }
+        in_chain && /^[[:space:]]*\}/ { in_chain = 0; next }
+        in_chain {
+            line = $0
+            sub(/[[:space:]]*comment[[:space:]]*"[^"]*"/, "", line)
+            gsub(/[[:space:]]counter[[:space:]]/, " ", line)
+            sub(/[[:space:]]counter$/, "", line)
+            gsub(/^[[:space:]]+|[[:space:]]+$/, "", line)
+            gsub(/[[:space:]]+/, " ", line)
+            if (line == "") next
+            printf "chain %s: %s\n", chain_name, line
+        }
+    ' "$path"
+}
+
+# 断言两份 nft 配置在归一化后等价。
+assert_ruleset_equivalent() {
+    local message=$1 a=$2 b=$3
+    local na nb
+    na=$(normalize_ruleset "$a")
+    nb=$(normalize_ruleset "$b")
+    if [[ "$na" == "$nb" ]]; then
+        ok "$message"
+    else
+        not_ok "$message" "归一化后仍有差异：" \
+            "$(diff <(printf '%s\n' "$na") <(printf '%s\n' "$nb") | head -24 | tr '\n' '|')"
+    fi
+}
+
+# 用冻结的旧渲染器渲染一份旧格式状态。
+# 参数：$1=旧状态文件，$2=输出路径，$3=ssh 端口，$4=公网 IPv4，$5=本机 IPv4 列表。
+render_with_v3() {
+    local state=$1 out=$2 ssh_port=$3 public=$4 locals=$5
+    local dir
+    dir=$(mktemp -d)
+    if FWCTL_ALLOW_UNPRIVILEGED=1 \
+        FWCTL_SKIP_SYSTEM_SETUP=1 \
+        FWCTL_APPLY=0 \
+        FWCTL_STATE_FILE="$state" \
+        FWCTL_BUILD_DIR="$dir/build" \
+        FWCTL_SYSTEM_CONF="$dir/nftables.conf" \
+        FWCTL_NFT_BIN=/bin/true \
+        FWCTL_LOCKFILE="$dir/lock" \
+        FWCTL_PUBLIC_IPV4="$public" \
+        FWCTL_LOCAL_IPV4S="$locals" \
+        FWCTL_SSH_PORT="$ssh_port" \
+        bash "$TEST_PROJECT_DIR/tests/fixtures/render-v3.sh" --render-only \
+        >/dev/null 2>&1; then
+        cp "$dir/build/nft.conf" "$out"
+        rm -rf "$dir"
+        return 0
+    fi
+    rm -rf "$dir"
+    return 1
+}
+
 # ── 固件构造 ──────────────────────────────────────────────────────────
 
 # 构造一份包含 Target / Service / Rule 的样例状态，写入指定路径。

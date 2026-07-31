@@ -445,6 +445,26 @@ def address_errors:
           | "\($what) 含非法地址 \(. | tostring)" ]
     ] | flatten;
 
+# DNAT 的目的地必须是单个地址。
+# nftables 的 `dnat to` 不接受 set（`dnat to @set` 会报 unknown raw payload base），
+# 而且「转发到一组地址中的哪一个」本身也没有定义。多地址 Target 只能用作
+# saddr 匹配（block 规则），不能用作转发目的地。
+def dnat_target_errors:
+    ([ .targets[] | {key: .id, value: .} ] | from_entries) as $targets
+    | [ .rules[]
+        | select(.type == "forward" and .target != null)
+        | . as $r
+        | $targets[$r.target] as $t
+        | select($t != null and ($t.addresses | length) > 1)
+        | "Rule \($r.name) 转发到多地址 Target \($t.name)；DNAT 目的地必须是单个地址，"
+          + "多地址 Target 只能用于 block 规则的来源匹配" ];
+
+# Target 名字会直接用作 nftables set 名，因此不能与渲染保留的 set 名冲突。
+def reserved_name_errors:
+    [ .targets[]
+      | select(.name == "allowed_ports_tcp" or .name == "allowed_ports_udp")
+      | "Target 名称 \(.name) 与渲染保留的 set 名冲突，请改用其他名称" ];
+
 # comments 键：必须是存在的对象 id，或合法的 tcp:/udp: 合成键。
 # 键必须先用 as 绑定：在 `$ids | index(.)` 里，`.` 指的是 $ids 本身而不是键，
 # 那样写会让这条检查恒为通过。
@@ -476,6 +496,7 @@ def settings_semantic_errors($facts):
        else [] end);
 
 unique_errors + ref_errors + combo_errors + address_errors
++ dnat_target_errors + reserved_name_errors
 + comment_key_errors + settings_semantic_errors($facts)
 JQ
 }
