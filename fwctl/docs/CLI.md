@@ -189,12 +189,19 @@ blacklist     block    yes       10  -            blacklist(2)    1 rule
 ## render
 
 ```bash
-fw render              # 渲染 + 校验 + apply + 持久化
-fw render --dry-run    # 渲染 + 校验 + nft -c，不 apply
-fw render --output -   # 只把渲染结果写到 stdout，不接触内核与系统文件
+fw render                  # 渲染 + 校验 + apply + 持久化
+fw render --dry-run        # 渲染 + 校验 + nft -c，不 apply
+fw render --output -       # 只把渲染结果写到 stdout，不接触内核与系统文件
+fw render --output PATH    # 同上，写到指定文件
 ```
 
 `fw render` 无参数时的行为与旧版本相同。
+
+`--output` 是唯一一条不发起事务就能查看渲染结果的路径：它在内存里完成加载与
+（必要时的）格式迁移，渲染后直接输出，全程不写 `state.json`、不写 `build/`、
+也不写系统配置文件。与 `fw diff` 一样，它仍会以只读方式探测内核（列出表以判断
+是否存在待接管的遗留表），但不执行任何写入。适合人工审阅与外部 diff。
+写入目标文件失败返回 3。
 
 渲染是确定性的：相同状态加相同外部事实产出逐字节相同的文件，输出顺序与对象的
 插入历史无关。这样 `fw diff` 的差异只反映真实变更，不含排序噪声。

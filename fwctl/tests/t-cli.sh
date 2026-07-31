@@ -513,4 +513,78 @@ assert_contains "无差异时明确说明" "$output" "无差异"
 fw port add tcp 8443 --dry-run >/dev/null 2>&1
 assert_ok "diff 是只读的，不改变状态" fw diff
 
+# ── render --output ───────────────────────────────────────────────────
+#
+# 文档承诺这条路径「只把渲染结果写出去，不接触内核与系统文件」。
+# 它是唯一不发起事务就能查看渲染结果的入口，因此既要断言输出正确，
+# 也要断言它确实什么都没改。
+
+setup_env render_output
+fw target add edge 192.0.2.30 >/dev/null
+fw port add tcp 8080 >/dev/null
+
+# 记录调用前的全部可变面，稍后逐一比对。
+before_state=$(sha256sum "$FWCTL_STATE_FILE" | cut -d' ' -f1)
+before_kernel=$("$FWCTL_NFT_BIN" list table ip fwctl 2>/dev/null | sha256sum | cut -d' ' -f1)
+before_sysconf=$(sha256sum "$FWCTL_SYSTEM_CONF" 2>/dev/null | cut -d' ' -f1)
+before_build=$(sha256sum "$FWCTL_BUILD_DIR/nft.conf" 2>/dev/null | cut -d' ' -f1)
+
+# 基线必须真的有内容，否则下面的「未改变」断言会退化成空串比空串。
+assert_contains "内核基线非空（断言不空转）" \
+    "$("$FWCTL_NFT_BIN" list table ip fwctl 2>/dev/null)" "elements = { 8080 }"
+if [[ -s "$FWCTL_SYSTEM_CONF" && -s "$FWCTL_BUILD_DIR/nft.conf" ]]; then
+    ok "文件基线非空（断言不空转）"
+else
+    not_ok "文件基线非空（断言不空转）" "系统配置或 build 产物为空"
+fi
+
+stdout_out="$ENV_DIR/from-stdout.nft"
+fw render --output - > "$stdout_out"
+assert_eq "render --output - 退出码为 0" "$?" "0"
+assert_contains "stdout 渲染结果含本表" "$(cat "$stdout_out")" "table ip fwctl"
+assert_contains "stdout 渲染结果含端口" "$(cat "$stdout_out")" "8080"
+assert_not_contains "渲染结果绝不含 flush ruleset" "$(cat "$stdout_out")" "flush ruleset"
+
+file_out="$ENV_DIR/from-file.nft"
+assert_ok "render --output PATH 成功" fw render --output "$file_out"
+assert_files_eq "写文件与写 stdout 逐字节相同" "$stdout_out" "$file_out"
+
+assert_eq "render --output 不修改 state.json" \
+    "$(sha256sum "$FWCTL_STATE_FILE" | cut -d' ' -f1)" "$before_state"
+assert_eq "render --output 不修改内核" \
+    "$("$FWCTL_NFT_BIN" list table ip fwctl 2>/dev/null | sha256sum | cut -d' ' -f1)" "$before_kernel"
+assert_eq "render --output 不修改系统配置" \
+    "$(sha256sum "$FWCTL_SYSTEM_CONF" 2>/dev/null | cut -d' ' -f1)" "$before_sysconf"
+assert_eq "render --output 不修改 build/nft.conf" \
+    "$(sha256sum "$FWCTL_BUILD_DIR/nft.conf" 2>/dev/null | cut -d' ' -f1)" "$before_build"
+
+# 确定性：同一状态重复渲染逐字节一致。
+second_out="$ENV_DIR/second.nft"
+fw render --output - > "$second_out"
+assert_files_eq "重复渲染输出稳定" "$stdout_out" "$second_out"
+
+# 与真正发布的产物一致：--output 不是另一套渲染逻辑。
+assert_ok "随后真正 render 成功" fw render
+assert_files_eq "--output 与发布产物一致" "$stdout_out" "$FWCTL_BUILD_DIR/nft.conf"
+
+# 旧格式只在内存里迁移，磁盘保持原样。
+setup_env render_output_v1
+cp "$FIXTURES/state-v1-forward-tcp.json" "$FWCTL_STATE_FILE"
+v1_before=$(sha256sum "$FWCTL_STATE_FILE" | cut -d' ' -f1)
+assert_ok "对 v1 状态可直接 --output" fw render --output -
+assert_eq "--output 不把迁移结果写回磁盘" \
+    "$(sha256sum "$FWCTL_STATE_FILE" | cut -d' ' -f1)" "$v1_before"
+assert_eq "磁盘上仍是旧格式" \
+    "$(jq -r '.schema_version // "none"' "$FWCTL_STATE_FILE")" "none"
+
+# 失败与用法。
+setup_env render_output_err
+fw target add edge 192.0.2.31 >/dev/null
+assert_fails "写入不可达路径返回运行时错误" 3 fw render --output "$ENV_DIR/nope/deep/x.nft"
+assert_fails "--output 缺少参数是用法错误" 2 fw render --output
+assert_fails "--output 空参数是用法错误" 2 fw render --output ""
+assert_fails "render 多余参数是用法错误" 2 fw render --output - extra
+assert_fails "render 未知选项是用法错误" 2 fw render --bogus
+assert_fails "render 位置参数是用法错误" 2 fw render now
+
 finish

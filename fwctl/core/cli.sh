@@ -201,6 +201,49 @@ cli_render() {
     return "$rc"
 }
 
+# 只渲染并输出，不进入事务。
+# 目标为 "-" 时写 stdout，否则写指定路径。无论哪种情况都不修改内核、
+# state.json、build/ 与系统配置文件——这是唯一一条能在不发起事务的前提下
+# 查看渲染结果的路径，供人工审阅与外部 diff 使用。
+# 探测外部事实时会只读地列一次内核中的表（判断有无待接管的遗留表），
+# 与 fw diff 的行为一致。
+# 参数：$1=输出目标（"-" 或文件路径）。
+cli_render_output() {
+    local dest=$1
+    local work current facts rendered rc
+
+    work=$(mktemp -d) || return "$FWCTL_EXIT_RUNTIME"
+    current="$work/current.json"
+    rendered="$work/rendered.nft"
+
+    # 与其他只读路径一致：旧格式只在内存里迁移，不写回磁盘。
+    if ! cli_read_state "$current"; then
+        rm -rf "$work"
+        return "$FWCTL_EXIT_VALIDATION"
+    fi
+
+    facts=$(txn_probe_facts "$current") || {
+        rm -rf "$work"
+        return "$FWCTL_EXIT_RUNTIME"
+    }
+
+    if ! render_ruleset "$current" "$facts" > "$rendered"; then
+        rm -rf "$work"
+        return "$FWCTL_EXIT_RUNTIME"
+    fi
+
+    rc="$FWCTL_EXIT_OK"
+    if [[ "$dest" == "-" ]]; then
+        cat "$rendered"
+    elif ! cat "$rendered" > "$dest"; then
+        fwctl_err "无法写入渲染结果：$dest"
+        rc="$FWCTL_EXIT_RUNTIME"
+    fi
+
+    rm -rf "$work"
+    return "$rc"
+}
+
 # ── target ────────────────────────────────────────────────────────────
 
 _cli_target_add_mutator() {
@@ -637,7 +680,7 @@ cli_usage() {
   $command_name port add tcp|udp|both PORT|START-END
   $command_name port remove tcp|udp|both PORT|START-END
   $command_name port list
-  $command_name render
+  $command_name render [--output PATH|-]
 
   $command_name target add|edit|delete|list|show|enable|disable ...
   $command_name service add|edit|delete|list|show ...
@@ -713,8 +756,19 @@ cli_main() {
             cli_object_dispatch "$noun" "$@"
             ;;
         render)
-            [[ $# -eq 0 ]] || { cli_usage >&2; return "$FWCTL_EXIT_USAGE"; }
-            cli_render
+            case "${1:-}" in
+                "")
+                    cli_render
+                    ;;
+                --output)
+                    [[ $# -eq 2 && -n "$2" ]] || { cli_usage >&2; return "$FWCTL_EXIT_USAGE"; }
+                    cli_render_output "$2"
+                    ;;
+                *)
+                    cli_usage >&2
+                    return "$FWCTL_EXIT_USAGE"
+                    ;;
+            esac
             ;;
         validate)
             local offline=0
