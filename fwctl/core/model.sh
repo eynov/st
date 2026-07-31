@@ -467,8 +467,8 @@ model_rule_add() {
         translate=$canonical
     fi
 
-    if [[ ! "$priority" =~ ^[0-9]+$ ]] || ((priority > 1000)); then
-        fwctl_err "priority 必须是 0-1000 的整数"
+    if [[ ! "$priority" =~ ^[0-9]+$ ]] || ((priority > 65535)); then
+        fwctl_err "priority 必须是 0-65535 的整数"
         return 1
     fi
 
@@ -522,8 +522,8 @@ model_rule_edit() {
                 filter="$filter | .description = \$v_description"
                 ;;
             priority)
-                if [[ ! "$value" =~ ^[0-9]+$ ]] || ((value > 1000)); then
-                    fwctl_err "priority 必须是 0-1000 的整数"
+                if [[ ! "$value" =~ ^[0-9]+$ ]] || ((value > 65535)); then
+                    fwctl_err "priority 必须是 0-65535 的整数"
                     return 1
                 fi
                 jq_args+=(--argjson "v_priority" "$value")

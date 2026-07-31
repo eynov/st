@@ -258,11 +258,14 @@ reject "accept 携带 target 被拒绝" \
 reject "translate 为范围被拒绝" \
     '.rules[0].translate.port = "100-200"' '单端口'
 accept "translate 为单端口合法" '.rules[0].translate.port = "8443"'
-reject "priority 超出上限被拒绝" '.rules[0].priority = 2000' 'priority'
+reject "priority 超出上限被拒绝" '.rules[0].priority = 65536' 'priority'
 reject "priority 为负被拒绝" '.rules[0].priority = -1' 'priority'
 reject "priority 为小数被拒绝" '.rules[0].priority = 1.5' 'priority'
 accept "priority 边界 0 合法" '.rules[0].priority = 0'
-accept "priority 边界 1000 合法" '.rules[0].priority = 1000'
+accept "priority 边界 65535 合法" '.rules[0].priority = 65535'
+# 上限放宽到 65535 是为了让迁移能保留任意规模 v1 状态的原始顺序，
+# 而不必截断——截断会让重叠规则的 DNAT 优先级在升级时静默改变。
+accept "priority 2000 合法（迁移大状态所需）" '.rules[0].priority = 2000'
 
 # ── 注释 ──────────────────────────────────────────────────────────────
 

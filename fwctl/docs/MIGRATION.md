@@ -97,6 +97,8 @@ service   = 上一步的 service id
 target    = 第一步的 target id
 translate = { "port": dest_port }，若 dest_port 等于 sport 且 sport==dport 则为 null
 priority  = 100 + 该 forward 在 v1 数组中的下标，保留原有顺序
+            （priority 的上限是 65535，足以容纳任意规模的 v1 状态而无需截断；
+             截断会让重叠规则的 DNAT 优先级在升级时静默改变）
 ```
 
 `translate.port` 在「目的端口与源端口相同的单端口映射」这一最常见情况下可以置为
@@ -111,10 +113,18 @@ target: name="blacklist", kind="ipv4", addresses=<去重排序后的 v1 blacklis
 rule:   name="blacklist", type="block", source=<该 target>, priority=10
 ```
 
-v1 的空 blacklist 会被 v3 渲染成占位地址 `127.0.0.2`（因为空 set 曾经无法表达）。
-新实现支持合法空 set，因此迁移时空 blacklist 生成一个空 target 与一条被**禁用**的
-规则，渲染结果中不再出现 `127.0.0.2`。同理，v3 对空 `open_ports` 使用的 `65535`
-占位也随之消失。
+**v1 的 blacklist 为空时，不生成任何 Target 和 Rule。**
+
+Target 的 `addresses` 必须非空（见 [STATE_SCHEMA.md](STATE_SCHEMA.md) 的 target
+约束），因此「空 Target」在当前 schema 里根本无法表达。更重要的是，即使放宽这条
+约束，一个引用空地址集合的规则也只会静默匹配不到任何流量——对防火墙来说，「看起来
+启用、实际不生效」的规则是应当在设计上排除掉的形态。
+
+不生成对象与「生成一个禁用规则」的渲染结果完全相同（都不产生任何规则），因此这个
+选择不改变任何行为。用户后续执行 `fw target add blacklist <ip>` 时按需创建。
+
+v1 的空 blacklist 曾被 v3 渲染成占位地址 `127.0.0.2`（因为空 set 当时无法表达）。
+新实现不再需要这个占位；同理，v3 对空 `open_ports` 使用的 `65535` 占位也随之消失。
 
 这是本次唯一刻意的渲染差异。它去掉的是从未生效的伪规则，不改变任何放行或拦截
 语义。等价性测试**直接忽略这两个占位元素**（见下节归一化规则），并对「它们确实

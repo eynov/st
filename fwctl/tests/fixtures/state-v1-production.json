@@ -1,0 +1,46 @@
+{
+  "nat_mode": "auto",
+  "snat_address": null,
+  "forwards": [
+    {
+      "sport": "29312",
+      "dport": "29312",
+      "dip": "192.0.2.20",
+      "proto": "tcp",
+      "dest_port": "29312"
+    },
+    {
+      "sport": "29312",
+      "dport": "29312",
+      "dip": "192.0.2.20",
+      "proto": "udp",
+      "dest_port": "29312"
+    },
+    {
+      "sport": "8443",
+      "dport": "8443",
+      "dip": "10.0.0.5",
+      "proto": "tcp",
+      "dest_port": "443"
+    },
+    {
+      "sport": "50000",
+      "dport": "50100",
+      "dip": "10.0.0.6",
+      "proto": "udp",
+      "dest_port": "50000"
+    }
+  ],
+  "open_ports": {
+    "tcp": [
+      "443",
+      "80"
+    ],
+    "udp": [
+      "60000-61000"
+    ]
+  },
+  "blacklist": [
+    "198.51.100.7"
+  ]
+}

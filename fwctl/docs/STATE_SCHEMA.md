@@ -276,7 +276,7 @@ fw service edit https --ports 8443 --all-refs
 | `description` | 显示元数据，不渲染 |
 | `type` | `accept` / `forward` / `block` |
 | `enabled` | 布尔；`false` 时完全不渲染，不留占位规则 |
-| `priority` | 0–1000 整数，默认 100；同 chain 内按 `(priority, id)` 升序渲染 |
+| `priority` | 0–65535 整数，默认 100；同 chain 内按 `(priority, id)` 升序渲染 |
 | `service` | service 的 id；`accept`、`forward` 必填，`block` 必须为 `null` |
 | `target` | target 的 id，作为 **DNAT 目的地**；仅 `forward` 必填，其余为 `null` |
 | `source` | target 的 id，作为 **saddr 匹配源**；仅 `block` 必填，其余为 `null` |

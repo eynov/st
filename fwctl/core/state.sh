@@ -283,9 +283,9 @@ def rule_errors:
         + (if ($r.enabled | is_bool) | not
            then ["\($what) 的 enabled 必须是布尔值"] else [] end)
         + (if ($r.priority | type) != "number"
-              or ($r.priority < 0) or ($r.priority > 1000)
+              or ($r.priority < 0) or ($r.priority > 65535)
               or (($r.priority | floor) != $r.priority)
-           then ["\($what) 的 priority 必须是 0-1000 的整数"] else [] end)
+           then ["\($what) 的 priority 必须是 0-65535 的整数"] else [] end)
         + (if ($r.translate | type) != "object" or ($r.translate | has("port") | not)
            then ["\($what) 的 translate 必须是含 port 字段的对象"] else [] end)
         + (if ($r.translate.port != null) and (($r.translate.port | is_port_spec) | not)

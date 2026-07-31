@@ -1,0 +1,25 @@
+{
+  "nat_mode": "auto",
+  "snat_address": null,
+  "forwards": [
+    {
+      "sport": "443",
+      "dport": "443",
+      "dip": "192.0.2.20",
+      "proto": "tcp",
+      "dest_port": "443"
+    },
+    {
+      "sport": "443",
+      "dport": "443",
+      "dip": "198.51.100.30",
+      "proto": "tcp",
+      "dest_port": "443"
+    }
+  ],
+  "open_ports": {
+    "tcp": [],
+    "udp": []
+  },
+  "blacklist": []
+}
