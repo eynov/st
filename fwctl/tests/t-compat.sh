@@ -10,6 +10,9 @@ set -u
 
 # shellcheck source=tests/lib.sh
 source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+source "$TEST_PROJECT_DIR/core/common.sh"
+source "$TEST_PROJECT_DIR/core/state.sh"
+source "$TEST_PROJECT_DIR/core/migration.sh"
 
 suite "t-compat"
 
@@ -285,6 +288,86 @@ assert_contains "菜单 11 未变" "$menu_source" "11. DDOS防护"
 assert_contains "菜单 12 未变" "$menu_source" "12. 重载配置"
 assert_contains "菜单 0 退出未变" "$menu_source" "0. 退出"
 assert_contains "新增项追加在 13 之后" "$menu_source" "13. 对象管理"
+
+# ── 全新安装直接从 schema 4 起步 ──────────────────────────────────────
+#
+# 仓库里随包发布的 state.json 是模板。它曾经是旧格式，导致每次全新安装都要跑一次
+# 空转迁移、写一份毫无内容的 pre-migration 备份，并打印一行"已升级状态格式"——
+# 对第一次装 fwctl 的人来说，这条提示只会让人以为自己升级了什么。
+
+SHIPPED="$TEST_PROJECT_DIR/state.json"
+
+assert_eq "随包模板已是 schema 4" "$(jq -r '.schema_version' "$SHIPPED")" "4"
+assert_ok "随包模板通过完整校验" state_validate "$SHIPPED"
+assert_fails "随包模板不被识别为旧格式" 0 migration_is_legacy "$SHIPPED"
+
+# 模板必须是规范化形态，否则第一次写入就会把文件重排，产生无谓的 diff。
+assert_eq "随包模板已是规范化形态" \
+    "$(state_normalize "$SHIPPED" | diff -q - "$SHIPPED" >/dev/null && echo yes)" "yes"
+
+# 空状态语义必须与旧模板逐项等价。
+assert_eq "端口为空" "$(jq -c '.ports' "$SHIPPED")" '{"tcp":[],"udp":[]}'
+assert_eq "无任何对象" \
+    "$(jq -r '[(.targets|length),(.services|length),(.rules|length)]|join(",")' "$SHIPPED")" "0,0,0"
+assert_eq "NAT 模式仍为 auto" "$(jq -r '.settings.nat.mode' "$SHIPPED")" "auto"
+assert_eq "snat_address 仍为 null" "$(jq -r '.settings.nat.snat_address' "$SHIPPED")" "null"
+assert_eq "策略默认值与旧版本一致" \
+    "$(jq -r '[.settings.policy.input,.settings.policy.ct_invalid,.settings.policy.icmp_echo]|join(",")' "$SHIPPED")" \
+    "drop,ignore,drop"
+assert_eq "全新状态没有迁移痕迹" \
+    "$(jq -r '[.metadata.migrated_from,.metadata.legacy_adopted_at,.metadata.ip_forward]
+              | map(tostring) | join(",")' "$SHIPPED")" \
+    "null,null,null"
+assert_eq "generation 从 0 起" "$(jq -r '.metadata.generation' "$SHIPPED")" "0"
+
+# ── 端到端：用随包模板做一次全新安装 ──────────────────────────────────
+
+setup_env fresh-install
+cp "$SHIPPED" "$FWCTL_STATE_FILE"     # 全新安装的起点就是随包模板
+
+output=$(fw port add tcp 8443 2>&1)
+assert_eq "全新安装的首次写入成功" "$?" "0"
+assert_not_contains "不打印迁移提示" "$output" "已升级状态格式"
+assert_eq "首次写入后仍是 schema 4" \
+    "$(jq -r '.schema_version' "$FWCTL_STATE_FILE")" "4"
+assert_eq "首次写入不产生 pre-migration 备份" \
+    "$(find "$FWCTL_VAR_DIR/backups" -maxdepth 1 -name 'pre-migration-*' 2>/dev/null | wc -l)" "0"
+assert_eq "首次写入不产生 .v1.bak" \
+    "$([[ -f "$FWCTL_STATE_FILE.v1.bak" ]] && echo yes || echo no)" "no"
+assert_eq "migrated_from 保持 null" \
+    "$(jq -r '.metadata.migrated_from' "$FWCTL_STATE_FILE")" "null"
+assert_ok "全新安装可以渲染并应用" fw render
+assert_ok "全新安装的状态通过校验" fw validate
+assert_eq "全新安装添加的端口出现在渲染结果里" \
+    "$(grep -c '8443' "$FWCTL_BUILD_DIR/nft.conf")" "1"
+
+# 只读命令同样不应触发迁移路径。
+setup_env fresh-readonly
+cp "$SHIPPED" "$FWCTL_STATE_FILE"
+before=$(sha256sum "$FWCTL_STATE_FILE")
+out=$(fw port list 2>&1)
+assert_not_contains "只读命令不打印迁移提示" "$out" "已升级状态格式"
+assert_eq "只读命令不改动状态" "$(sha256sum "$FWCTL_STATE_FILE")" "$before"
+
+# ── 对照：真实旧格式状态仍然正常迁移 ──────────────────────────────────
+# 模板换成 v4 不能削弱既有主机的升级路径。
+
+setup_env real-legacy-still-migrates
+cp "$FIXTURES/state-v1-production.json" "$FWCTL_STATE_FILE"
+assert_ok "真实旧状态仍被识别为旧格式" migration_is_legacy "$FWCTL_STATE_FILE"
+output=$(fw port add tcp 8443 2>&1)
+assert_contains "真实旧状态仍打印迁移提示" "$output" "已升级状态格式"
+assert_eq "真实旧状态被迁移到 schema 4" \
+    "$(jq -r '.schema_version' "$FWCTL_STATE_FILE")" "4"
+assert_eq "真实旧状态记录迁移来源" \
+    "$(jq -r '.metadata.migrated_from' "$FWCTL_STATE_FILE")" "1"
+assert_eq "真实旧状态仍生成 pre-migration 备份" \
+    "$(find "$FWCTL_VAR_DIR/backups" -maxdepth 1 -name 'pre-migration-*' | wc -l)" "1"
+# production 固件：3 个落地 IP + blacklist = 4 个 Target，3 个 Service，
+# 3 条 forward + 1 条 block = 4 条 Rule。
+assert_eq "真实旧状态的转发被完整分解" \
+    "$(jq -r '[(.targets|length),(.services|length),(.rules|length)]|join(",")' "$FWCTL_STATE_FILE")" \
+    "4,3,4"
 
 # ── install.sh 仍能选中 fw.sh 作为主脚本 ──────────────────────────────
 

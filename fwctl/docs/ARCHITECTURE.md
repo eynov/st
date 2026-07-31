@@ -69,7 +69,7 @@ fwctl/
 ├── fw.sh                  # 唯一 CLI 入口，安装后命令名为 fw
 ├── render.sh              # 兼容入口，转发到 core/render 的事务封装
 ├── install.sh
-├── state.json             # 事实来源（生产环境位于部署目录）
+├── state.json             # 事实来源；仓库中的这份是当前 schema 的空状态模板
 ├── core/
 │   ├── common.sh
 │   ├── state.sh

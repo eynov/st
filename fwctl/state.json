@@ -1,10 +1,46 @@
 {
-  "nat_mode": "auto",
-  "snat_address": null,
-  "forwards": [],
-  "open_ports": {
+  "comments": {},
+  "metadata": {
+    "created_at": "2026-07-31T00:00:00Z",
+    "fwctl_version": "4.0.0",
+    "generation": 0,
+    "ip_forward": null,
+    "last_applied_at": null,
+    "legacy_adopted_at": null,
+    "migrated_from": null,
+    "updated_at": "2026-07-31T00:00:00Z"
+  },
+  "ports": {
     "tcp": [],
     "udp": []
   },
-  "blacklist": []
+  "rules": [],
+  "schema_version": 4,
+  "services": [],
+  "settings": {
+    "nat": {
+      "mode": "auto",
+      "snat_address": null
+    },
+    "policy": {
+      "ct_invalid": "ignore",
+      "forward": "accept",
+      "icmp_echo": "drop",
+      "input": "drop",
+      "syn_limit": {
+        "burst": 5,
+        "enabled": true,
+        "rate": "50/second"
+      }
+    },
+    "render": {
+      "comments": true,
+      "counters": true
+    },
+    "ssh": {
+      "mode": "auto",
+      "port": null
+    }
+  },
+  "targets": []
 }
