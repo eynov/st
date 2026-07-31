@@ -1,8 +1,14 @@
 # 安装、升级、迁移、备份与恢复
 
-> 本文描述预期运维契约。app/current 链接切换的失败传播与回滚阻断已经修复，但整个
-> 变更集尚未通过独立只读复审，也尚未做过真实 systemd 验收，因此仍不允许用于生产安装
-> 或升级；以 [`AI_HANDOFF.md`](internal/AI_HANDOFF.md) 的当前状态为准。
+> 本文描述本项目的运维契约，且描述的是**已实现并通过隔离测试的行为**：app/current
+> 链接切换的失败传播、manager 安装与回滚、rc=70 不可自动恢复的传播，均已实现并有
+> 覆盖测试；三轮独立只读复审提出的全部阻断项已修复。
+>
+> 但**真实 systemd 验收尚未完成**。当前项目状态是 **Repository Production Candidate**，
+> 不是 Production Ready：隔离环境 PID 1 为 `bwrap`，无法连接 systemd system bus，因此
+> 真实 unit/MainPID/cgroup、重启策略与主机 reboot 行为只能在单台非关键 VPS 灰度中确认。
+> 在该灰度完成之前，不要把本文的契约当作已在真实主机上验证过。
+> 当前状态以 [`AI_HANDOFF.md`](internal/AI_HANDOFF.md) 为准。
 
 ## 安装分层
 
@@ -24,11 +30,22 @@
 sb upgrade --source /path/to/reviewed/sb --yes
 ```
 
-升级前备份 app、state、cert、output、unit 与核心。设计要求新源码先执行 Bash
-语法、版本元数据和 self-check，随后写入新 release 并原子切换 app；新版本应再次
-执行完整 install 验收，失败时恢复 app 链接和 unit，并删除失败 release。当前
-manager 链接失败传播与首次 CLI link 失败恢复尚未满足此契约，详见
-[`AI_HANDOFF.md`](internal/AI_HANDOFF.md)。升级流程不会整体删除 `/opt/sb`。
+升级前备份 app、state、cert、output、unit 与核心。新源码先执行 Bash 语法、版本
+元数据与来源校验，复制进 staging 目录后**再校验一次**，才原子发布为新 release；
+随后原子切换 app 链接，由新版本执行 self-check 与完整 install 验收。
+
+该契约现已实现，具体行为如下：
+
+- app 链接存在但不是受管符号链接时**拒绝替换**，不静默覆盖；
+- 命令路径冲突在 app 链接移动**之前**判定并拒绝，不会留下半安装的 manager；
+- app 链接与 CLI 链接都经 `symlink_switch()` 三步切换（先在目标旁建临时链接再
+  rename），因此不会留下悬空的 `/usr/local/bin/sb`；
+- 链接切换失败时上一个 release 保持生效，失败的 release 被删除；
+- self-check、命令目录创建或 CLI 链接失败都会调用 `manager_rollback_app()` 回滚，
+  **并原样传播其返回码**——包括表示不可自动恢复的 `70`，该值不会被压平成 1。
+
+升级流程不会整体删除 `/opt/sb`。真实 systemd 层面的验收（unit 重载、MainPID/cgroup
+归属）仍待单台非关键 VPS 灰度确认。
 
 ## sing-box 核心
 

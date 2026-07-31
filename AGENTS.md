@@ -1,7 +1,7 @@
 # AI 工作规范
 
 本文件是本仓库供 Codex、Claude Code 及其他 AI Coding Agent 使用的唯一长期工作
-规范。项目当前状态只记录在 `sb/docs/AI_HANDOFF.md`，不要写入本文件。
+规范。项目当前状态只记录在 `sb/docs/internal/AI_HANDOFF.md`，不要写入本文件。
 
 ## 项目范围
 
@@ -21,8 +21,8 @@ git diff -- file.sh sb/
 
 随后完整阅读：
 
-1. `sb/docs/AI_HANDOFF.md`
-2. `sb/docs/FINAL_REVIEW_PACK.md`
+1. `sb/docs/internal/AI_HANDOFF.md`
+2. `sb/docs/internal/FINAL_REVIEW_PACK.md`
 3. `sb/README.md`
 4. 与任务直接相关的代码、测试和专题文档
 
@@ -70,8 +70,8 @@ Shell 语法检查必须覆盖 `file.sh`、`sb/sb`、`sb/install.sh`、`sb/core/
 重要代码或结论变化时同步更新：
 
 - `sb/README.md`：稳定的用户使用方式和项目状态标签；
-- `sb/docs/AI_HANDOFF.md`：当前 Git 状态、已完成内容、阻断和下一步；
-- `sb/docs/FINAL_REVIEW_PACK.md`：该轮完整实现与验证证据。
+- `sb/docs/internal/AI_HANDOFF.md`：当前 Git 状态、已完成内容、阻断和下一步；
+- `sb/docs/internal/FINAL_REVIEW_PACK.md`：该轮完整实现与验证证据。
 
 长期架构决策新增或改变时同步更新 `sb/docs/ARCHITECTURE.md` 和对应 ADR。测试入口、
 依赖或 mock 边界变化时更新 `sb/docs/TESTING.md`。不要在多个文档复制当前问题清单。
