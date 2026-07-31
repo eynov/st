@@ -219,12 +219,18 @@ state_export_file() {
     if [[ "$include_secrets" == "true" ]]; then
         jq . "$file"
     else
+        # The parentheses are load-bearing. `|` binds looser than `|=`, so
+        # without them only the first condition runs against the instance
+        # value; the rest are evaluated against the {key,value} entry, whose
+        # has("uuid")/has("private_key") are false, and both secrets survive
+        # verbatim. public_key and short_id are not secrets and stay visible.
         jq '
           .instances |= with_entries(
-            .value |=
+            .value |= (
               if has("password") then .password = "[REDACTED]" else . end
               | if has("uuid") then .uuid = "[REDACTED]" else . end
               | if has("private_key") then .private_key = "[REDACTED]" else . end
+            )
           )' "$file"
     fi
 }

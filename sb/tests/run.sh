@@ -1433,6 +1433,88 @@ test_sensitive_logging_and_permissions() {
       "! find '$root/data/current' -type f ! -perm 600 | grep -q ."
 }
 
+# Redaction must cover every secret field, not just `password`.
+#
+# `|` binds looser than `|=`, so an unparenthesised update body silently drops
+# out of `.value` after the first condition: `password` was redacted while
+# `uuid` and `private_key` were emitted verbatim. Passwords were the only field
+# any assertion checked, so the gap survived a green suite. These cases pin all
+# three fields, on a UUID/key protocol and on a password protocol, across both
+# consumers of state_export_file.
+test_secret_redaction_matrix() {
+    local root password_file marker export_file dry_file
+    local uuid private_key public_key short_id reimport
+
+    new_env
+    root="$TEST_ROOT"
+    init_env
+
+    marker='SB-SECRET-LEAK-CANARY-3d90ab14'
+    password_file="$root/password"
+    printf '%s\n' "$marker" >"$password_file"
+
+    # One VLESS Reality node (uuid + private_key) and one password protocol.
+    sb add vless --port 27101 --server-name www.microsoft.com --yes >/dev/null
+    sb add SS --port 27102 --password-file "$password_file" --yes >/dev/null
+
+    # Real generated values, read straight from live state.
+    uuid=$(jq -r '.instances.is01.uuid' "$root/data/current/instances.json")
+    private_key=$(jq -r '.instances.is01.private_key' "$root/data/current/instances.json")
+    public_key=$(jq -r '.instances.is01.public_key' "$root/data/current/instances.json")
+    short_id=$(jq -r '.instances.is01.short_id' "$root/data/current/instances.json")
+    assert "fixture produced a real uuid" sh -c "[ -n '$uuid' ] && [ '$uuid' != null ]"
+    assert "fixture produced a real private_key" \
+      sh -c "[ -n '$private_key' ] && [ '$private_key' != null ]"
+
+    # ── consumer 1: sb state export without --show-secrets ────────────────
+    export_file="$root/export-redacted.json"
+    sb state export >"$export_file" 2>&1
+
+    assert "export redacts password" jq -e \
+      '.instances.is02.password == "[REDACTED]"' "$export_file"
+    assert "export redacts uuid" jq -e \
+      '.instances.is01.uuid == "[REDACTED]"' "$export_file"
+    assert "export redacts private_key" jq -e \
+      '.instances.is01.private_key == "[REDACTED]"' "$export_file"
+    assert "export keeps public_key visible" jq -e \
+      --arg v "$public_key" '.instances.is01.public_key == $v' "$export_file"
+    assert "export keeps short_id visible" jq -e \
+      --arg v "$short_id" '.instances.is01.short_id == $v' "$export_file"
+    assert "no cleartext uuid anywhere in export" \
+      sh -c "! grep -Fq '$uuid' '$export_file'"
+    assert "no cleartext private_key anywhere in export" \
+      sh -c "! grep -Fq '$private_key' '$export_file'"
+    assert "no cleartext password anywhere in export" \
+      sh -c "! grep -Fq '$marker' '$export_file'"
+
+    # ── consumer 2: dry-run state diff ────────────────────────────────────
+    dry_file="$root/dryrun.log"
+    sb edit is01 --port 27103 --dry-run --yes >"$dry_file" 2>&1
+
+    assert "dry-run diff leaks no uuid" sh -c "! grep -Fq '$uuid' '$dry_file'"
+    assert "dry-run diff leaks no private_key" \
+      sh -c "! grep -Fq '$private_key' '$dry_file'"
+    assert "dry-run diff leaks no password" sh -c "! grep -Fq '$marker' '$dry_file'"
+    assert "dry-run diff shows the redaction marker" \
+      sh -c "grep -q '\\[REDACTED\\]' '$dry_file'"
+    # Read-only: the dry-run must not have moved the port it proposed.
+    assert "dry-run left state untouched" jq -e \
+      '.instances.is01.port == 27101' "$root/data/current/instances.json"
+
+    # ── explicit secret export stays complete and importable ──────────────
+    reimport="$root/export-secrets.json"
+    sb state export --show-secrets >"$reimport" 2>&1
+    assert "--show-secrets emits the real uuid" jq -e \
+      --arg v "$uuid" '.instances.is01.uuid == $v' "$reimport"
+    assert "--show-secrets emits the real private_key" jq -e \
+      --arg v "$private_key" '.instances.is01.private_key == $v' "$reimport"
+    assert "--show-secrets emits the real password" jq -e \
+      --arg v "$marker" '.instances.is02.password == $v' "$reimport"
+    assert "--show-secrets export is still importable" sb state import "$reimport" --yes
+    assert "import preserved the uuid" jq -e \
+      --arg v "$uuid" '.instances.is01.uuid == $v' "$root/data/current/instances.json"
+}
+
 test_real_uri_parsers_and_hysteria_tls() {
     local hysteria="${SB_TEST_HYSTERIA_BIN:-/tmp/hysteria-v2.10.0-linux-amd64}"
     local ssurl="${SB_TEST_SSURL_BIN:-/tmp/shadowsocks-rust-v1.24.0/ssurl}"
@@ -2240,6 +2322,7 @@ TESTS=(
     test_existing_data_validation
     test_zero_node_reboot_policy
     test_sensitive_logging_and_permissions
+    test_secret_redaction_matrix
     test_transaction_publish_fault_injection
     test_transaction_rollback_fault_injection
     test_transaction_fault_across_operations
