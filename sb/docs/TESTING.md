@@ -30,7 +30,7 @@ SB_TEST_SSURL_BIN=/path/to/shadowsocks-rust-v1.24.0/ssurl \
 兼容、backup/restore、state export/import、manager upgrade、URI、Mihomo，以及固定核心对
 服务端和客户端配置的真实 check。
 
-本轮实现后的实际执行结果为：
+当前套件的执行结果为：
 
 ```text
 RESULT: pass=595 fail=0
@@ -39,7 +39,8 @@ xfail=0
 ```
 
 这个 pass 数说明现有断言通过，不等于所有真实 systemd、cgroup、reboot 或 VPS 网络行为
-已经验收。当前准入状态见 [`AI_HANDOFF.md`](internal/AI_HANDOFF.md)。
+已经验收；真实主机验证的范围见
+[`KNOWN_LIMITATIONS.md`](internal/KNOWN_LIMITATIONS.md)。
 
 ## 静态检查
 
@@ -137,7 +138,8 @@ inbound type 映射传输层（shadowsocks→tcp+udp、hysteria2→udp、vless�
 - VPS reboot 后有节点恢复（已在 `de` 实测通过）和零节点保持 stopped（仍未验证）
 - 核心升级及事务 rollback 后的真实 service 恢复
 
-这些项目必须在第二轮独立只读复审通过并获批后，于单台测试 VPS 做低流量灰度。
+这些项目只能在真实主机上做低流量验证；已验证与未验证的划分见
+[`KNOWN_LIMITATIONS.md`](internal/KNOWN_LIMITATIONS.md)。
 mock 结果不得写成上述项目已通过。
 
 ## 临时文件

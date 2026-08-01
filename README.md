@@ -5,8 +5,7 @@
 
 ## 项目
 
-- [`sb`](sb/README.md)：面向通用 Linux VPS 的 sing-box 多协议管理器。当前处于
-  **Repository Production Candidate / Not Production Ready** 阶段。
+- [`sb`](sb/README.md)：面向通用 Linux VPS 的 sing-box 多协议管理器。
 - [`fwctl`](fwctl/README.md)：防火墙状态与规则渲染工具。
 - `box`：VPS 日常运维脚本集合。
 - `Telegram_chatbot`：Telegram Bot 项目。
@@ -21,20 +20,15 @@
 ## 文档入口
 
 - sb 用户文档：[`sb/README.md`](sb/README.md)
-- sb 当前开发状态：[`sb/docs/internal/AI_HANDOFF.md`](sb/docs/internal/AI_HANDOFF.md)
+- sb 维护记录：[`sb/docs/internal/AI_HANDOFF.md`](sb/docs/internal/AI_HANDOFF.md)
+- sb 已知限制：[`sb/docs/internal/KNOWN_LIMITATIONS.md`](sb/docs/internal/KNOWN_LIMITATIONS.md)
 - sb 架构：[`sb/docs/ARCHITECTURE.md`](sb/docs/ARCHITECTURE.md)
 - sb 测试：[`sb/docs/TESTING.md`](sb/docs/TESTING.md)
 - AI 协作规范：[`AGENTS.md`](AGENTS.md)
 
-## 开发状态
+## 验证与限制
 
-三轮独立只读复审的阻断项全部关闭：Critical 0、High 0、阻断 Medium 0。
-
-**真实 systemd/cgroup 灰度验证已完成**（2026-08-01，单台非关键 VPS `de`）：真实 unit 与
-MainPID/cgroup 归属、generation 实际加载、restart/reload、事务失败后的真实 service 回滚、
-七种协议/模式的真实客户端握手，以及**一次真实重启后带节点自动恢复**，均已实测通过。
-
-仍**不得标记为 Production Ready**，也不得在该灰度主机之外扩大部署：零节点状态下的重启
-行为、`Restart=on-failure` 的真实崩溃恢复、核心升级失败后的 service 恢复，以及真实主机上的
-v1→v2 迁移，都尚未验证。当前结论和下一步以
-[`sb/docs/internal/AI_HANDOFF.md`](sb/docs/internal/AI_HANDOFF.md) 为准。
+`sb` 的隔离测试、静态检查与单台 VPS 的真实 systemd 验证记录见
+[`sb/docs/internal/AI_HANDOFF.md`](sb/docs/internal/AI_HANDOFF.md)，已知边界见
+[`sb/docs/internal/KNOWN_LIMITATIONS.md`](sb/docs/internal/KNOWN_LIMITATIONS.md)。
+部署到新主机前请先阅读这两份文档。

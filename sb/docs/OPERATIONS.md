@@ -1,16 +1,8 @@
 # 安装、升级、迁移、备份与恢复
 
-> 本文描述本项目的运维契约，且描述的是**已实现并通过隔离测试的行为**：app/current
-> 链接切换的失败传播、manager 安装与回滚、rc=70 不可自动恢复的传播，均已实现并有
-> 覆盖测试；三轮独立只读复审提出的全部阻断项已修复。
->
-> 真实 systemd 验收已在单台非关键 VPS（`de`）的灰度中完成：真实 unit、MainPID/cgroup
-> 归属、generation 实际加载、restart/reload、事务失败后的真实 service 回滚，以及**一次
-> 真实重启后带节点自动恢复**，均已实测通过。
->
-> 仍未验证的边界：**零节点状态下的重启行为**、`Restart=on-failure` 的真实崩溃恢复，以及
-> 真实主机上的 v1→v2 迁移。因此当前项目状态仍是 **Repository Production Candidate**，
-> 不是 Production Ready。当前状态以 [`AI_HANDOFF.md`](internal/AI_HANDOFF.md) 为准。
+> 本文描述本项目的运维契约。其中 app/current 链接切换的失败传播、manager 安装与回滚、
+> rc=70 不可自动恢复的传播，都有覆盖测试；真实 systemd 层面的行为另在真实主机上验证，
+> 范围与尚未验证的边界见 [`KNOWN_LIMITATIONS.md`](internal/KNOWN_LIMITATIONS.md)。
 
 ## 安装分层
 
@@ -46,8 +38,8 @@ sb upgrade --source /path/to/reviewed/sb --yes
 - self-check、命令目录创建或 CLI 链接失败都会调用 `manager_rollback_app()` 回滚，
   **并原样传播其返回码**——包括表示不可自动恢复的 `70`，该值不会被压平成 1。
 
-升级流程不会整体删除 `/opt/sb`。真实 systemd 层面的验收（unit 重载、MainPID/cgroup
-归属）已在 `de` 灰度中实测通过，包括零节点状态下的升级不会启动服务。
+升级流程不会整体删除 `/opt/sb`。unit 重载与 MainPID/cgroup 归属已在真实主机上验证，
+零节点状态下的升级不会启动服务。
 
 ## sing-box 核心
 

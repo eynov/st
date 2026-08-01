@@ -1,9 +1,7 @@
 # 架构与目录
 
-本文档描述已接受的目标架构。当前实现与目标之间的已知阻断只维护在
-[`AI_HANDOFF.md`](internal/AI_HANDOFF.md)。自测阻断现已清零，且事务模型已在单台非关键 VPS
-灰度中实测（含真实 service 回滚与一次真实重启）；但仍有未验证边界，因此不得据此把项目
-标记为 Production Ready——准入状态一律以 [`AI_HANDOFF.md`](internal/AI_HANDOFF.md) 为准。
+本文档描述本项目的架构。事务模型已在真实主机上实测，包含真实 service 回滚与一次真实
+重启；已知边界见 [`KNOWN_LIMITATIONS.md`](internal/KNOWN_LIMITATIONS.md)。
 
 ## 事实来源
 

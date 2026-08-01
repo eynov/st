@@ -1,132 +1,12 @@
-# sb 开发交接
+# sb 维护记录
 
-本文档是 sb 当前开发阶段、阻断项和下一步工作的唯一事实来源。稳定的用户说明见
-[`../../README.md`](../../README.md)，完整修复证据见
+本文件记录 sb 的验证入口、真实主机验证结果和仍然开放的复审发现。稳定的用户说明见
+[`../../README.md`](../../README.md)，产品边界见
+[`KNOWN_LIMITATIONS.md`](KNOWN_LIMITATIONS.md)，历次复审的完整证据快照见
 [`FINAL_REVIEW_PACK.md`](FINAL_REVIEW_PACK.md)。
 
-## Git 状态沿革
-
-本节记录的是**历史事件**，不是对当前工作树的断言。当前状态必须每次用
-`AGENTS.md` 指定的 Git 检查重新确认。
-
-### 收尾提交 `51c7b341b9cef8551019e57b10106834bab980a2`
-
-第二轮修复、第二次与第三次独立复审整改，均完成于 2026-07-25/26，并在用户明确授权后
-提交、推送到 Gitea `origin/main`。**在该提交完成时**：
-
-- 分支：`main`
-- 本地 `HEAD` 与 `origin/main` 一致
-- 工作树 clean
-- 上一基线提交：`aaa7de7`（`docs: record development snapshot status`）
-- 改动范围：24 个文件，+2669 / −468，其中新增 `sb/tests/errexit-audit.sh`
-- 未执行任何 VPS、部署或防火墙操作
-
-### 后续维护变更
-
-收尾提交之后另有一次**纯文档整理**：把 `AI_HANDOFF.md`、`FINAL_REVIEW_PACK.md`、
-`KNOWN_LIMITATIONS.md`、`PRODUCTION_CHECKLIST.md` 移入 `sb/docs/internal/`，并更新受影响
-的相对链接与仓库根 `README.md` 的状态描述。该变更不涉及任何代码、脚本、测试或同仓库
-其他项目；其提交 SHA 见 `git log`（本文件写作时该提交尚未产生）。
-
-## 当前开发阶段
-
-**Repository Production Candidate — Not Production Ready**
-
-### VLESS 三模式升级（2026-07-31）
-
-VLESS 插件现只允许三个 mode：
-
-- `vision-reality`（新建默认）：TCP + REALITY，服务端 user 与客户端 outbound 同时写
-  `flow=xtls-rprx-vision`；
-- `reality`：TCP + REALITY，两端均不写 flow；
-- `ws`：WebSocket + TLS，两端均不写 REALITY/flow。
-
-旧 state 中没有 mode 的 VLESS 节点继续按 `reality` 解释，manager upgrade 不会改变既有节点
-语义。新增事务式 `sb state import FILE`；WS 证书纳入 backup/restore 与 doctor。发布、
-`validate`、`render` 和 doctor 现在都用固定 sing-box 同时检查服务端 `config.json` 与客户端
-`sing-box.json`。
-
-完整隔离套件实测 `595 pass / 0 fail`，其中 VLESS 专项 `28 pass / 0 fail`；固定核心仍为
-sing-box `1.13.14`。本轮没有修改 HY2、SS、SS2022、AnyTLS 协议插件。
-
-- 第一次独立复审的 2 个 High + 4 个 Medium：已修复（第二轮）。
-- 第二次独立复审的 4 个阻断 High（HIGH-A..D）与 2 个阻断 Medium（M1、M2），外加被点名的
-  M3（IPv4 前导零）与 M4（非 root `generation_drift` 误报）：已修复。四个 High 在整改前
-  全部实际复现，整改后在同一注入点复测通过。
-- 第三次独立复审（Critical 0 / High 0 / Medium 5，全部非阻断）指出的 M-3.1（`cmd_install`
-  仍压平 rc=70）与 M-3.2（salvage 确认可从环境继承）：已修复，两项均在整改前实际复现。
-
-第三次复审的结论是「commit/push 允许，但需用户明确授权」。用户已明确授权，变更集已提交
-并推送到 Gitea `origin/main`。真实 systemd/cgroup 门槛此后已在 `de` 灰度中验证通过；
-Production Ready 仍为否，原因见下方「尚未验证边界」。
-
-## 已完成内容
-
-在上一轮基础上，本轮新增：
-
-- `symlink_switch()`：统一的三步显式检查符号链接原子切换原语
-- `transaction_run` 发布阶段机与两级回滚严重度（普通失败 vs `SB_EX_UNRECOVERABLE`=70）
-- `manager_install_source` 全路径显式检查、`manager_rollback_app()`、命令路径冲突前置判定
-- `cmd_upgrade` 阶段化 + `upgrade_rollback()` 完整数据恢复（app/unit 恢复先于数据恢复）
-- `backup_create` salvage 模式，使 live 数据已损坏时 `sb restore` 仍可执行
-- IANA Special-Purpose 表驱动的 IPv4/IPv6 endpoint 判定（位精确前缀匹配）
-- listener mock 的 observed 侧改由 `config.json` 推导，消除循环证明
-- `doctor` 新增 `generation_drift`、`last_publish`、`app_release` 检查
-- 仓库级 errexit 条件上下文审计与常驻检查 `tests/errexit-audit.sh`
-
-第二次复审整改新增：
-
-- 全部 mutator 以显式 `return 0` 结尾，state 写入逐项检查；新增 `state-set-write` 注入点
-- salvage 判定改为检查 **live 源**（`backup_live_source_valid`），不再检查半成品候选
-- salvage 快照默认拒绝恢复，需 `--restore-unvalidated-salvage` 显式确认并留下状态证据
-- `SB_TXN_SALVAGE_BACKUP` 改为进程内 `SB_INTERNAL_MARKER`，环境不可达
-- rc=70 在 `cmd_restore`、`core_upgrade` 及其余调用点原样传播；current 链接恢复失败后
-  不再继续做证书目录回退
-- CRITICAL 中指名的恢复物（旧核心二进制、暂存副本、被拒 generation 的证书）不再被
-  EXIT trap 删除
-- IPv4 前导零与全数字末标签一律拒绝；`generation_drift` 在 `/proc` 不可读时记为 info
-
-第三次复审整改新增：
-
-- `cmd_install` 的 `core_install || return $?`：`sb install` 经 `core_switch` 的 rc=70 不再被
-  压平；`FINAL_REVIEW_PACK.md` 中「已全部排查压平点」的表述已更正
-- `SB_ALLOW_SALVAGE_RESTORE` 不再从环境读取、不再被导出：salvage 恢复授权只能来自本次调用
-  键入的 `--restore-unvalidated-salvage`，不会经会话或子进程继承
-
-上一轮已完成的内容（协议矩阵、TLS 模式、固定核心校验、事务框架、零节点策略等）保持不变。
-
-## 当前阻断
-
-```text
-自测 Critical: 0
-自测 High:     0
-自测 Medium:   0 blocking
-```
-
-第二次复审的 M5、M6、LOW-1..9，以及第三次复审的 M-3.3（非 root `sb doctor` 的 `listeners`
-检查仍失败）、M-3.4、M-3.5 及其 Low 列表，均仍然开放。按指示本轮只处理 M-3.1 与 M-3.2。
-
-下轮优先项仍是 **M-3.5 / M6**：`errexit-audit.sh` 只匹配字面命令，不覆盖 `safe_mkdir`、
-`atomic_write`、`state_set_file` 等包装函数，正是这个盲区放过了 HIGH-A。第三次复审复扫后
-确认剩余 13 处包装调用点当前都不会掩盖失败。
-
-**当前阻断项：无自测阻断项。** 本轮 VLESS 任务已获用户明确 commit/push 授权；真实
-systemd 验收已于 2026-08-01 在 `de` 灰度中完成。
-
-## 当前禁止事项
-
-- 不得在已授权的灰度主机（`de`）之外扩大部署；每台新主机都需要用户单独授权。
-- 不得宣布 Repository Production Ready。
-- 三轮独立只读复审已通过，单台非关键 VPS 灰度已完成；再次灰度或扩大范围仍需用户明确授权。
-- 未经用户明确授权，不得 commit 或 push。
-- 不得用修改 Review Pack、降低严重度或增加宽松测试代替代码修复。
-- 不得把 mock systemd 结果表述为真实 systemd 验收。
-
-## 下一步工作
-
-1. 下一轮代码工作：M-3.5 的包装函数审计覆盖，然后 M-3.4，再处理 Low 列表。
-2. 单台测试 VPS 的真实 systemd 灰度，并把真实 systemd 验收作为强制门槛；同时在真实主机上
-   验证非 root `sb doctor` 的可用性（M-3.3）。
+修改代码前请按 [`AGENTS.md`](../../../AGENTS.md) 指定的方式确认工作树状态；本文件不记录
+工作树快照，Git 才是事实来源。
 
 ## 复现与验证入口
 
@@ -134,27 +14,45 @@ systemd 验收已于 2026-08-01 在 `de` 灰度中完成。
 SB_TEST_REAL_CORE=/path/to/sing-box-1.13.14 \
 SB_TEST_HYSTERIA_BIN=/path/to/hysteria-v2.10.0-linux-amd64 \
 SB_TEST_SSURL_BIN=/path/to/shadowsocks-rust-v1.24.0/ssurl \
-  sb/tests/run.sh                    # 期望 595 pass / 0 fail
+  sb/tests/run.sh
 
 sb/tests/errexit-audit.sh            # 期望 0 blocking
-shellcheck --severity=warning --external-sources \
-  file.sh sb/sb sb/install.sh sb/core/*.sh sb/protocols/*.sh sb/tests/*.sh
+
+mapfile -d '' -t shell_files < <(
+  find sb -type f \( -name '*.sh' -o -name sb -o -path '*/fixtures/mock-*' \) -print0
+)
+bash -n file.sh "${shell_files[@]}"
+shellcheck --severity=warning --external-sources file.sh "${shell_files[@]}"
 git diff --check
 ```
 
 故障注入通过 `SB_TEST_FAULTS`（冒号分隔）配合 `SB_TEST_MODE=true` 启用；注入点清单见
-[`TESTING.md`](../TESTING.md)。
+[`TESTING.md`](../TESTING.md)。测试所需的固定二进制、真实组件与 mock 边界同样以
+`TESTING.md` 为准。
 
-## 尚未验证边界
+## 真实主机验证
 
-当前隔离环境 PID 1 为 `bwrap`，无法连接 systemd system bus，因此以下只能在真实主机验证。
+隔离环境的 PID 1 是 `bwrap`，无法连接 systemd system bus，因此涉及真实 systemd、内核
+cgroup、reboot 与 VPS 网络的行为必须在真实主机上单独验证。
 
-**已在 `de` 灰度中实测通过（2026-08-01）**：真实 MainPID/cgroup 归属、enable/start/
-restart/stop、generation 实际加载（`/proc/<pid>/cwd` 指向当前 generation 的 output）、
-删除节点后旧 socket 消失、事务失败后的真实 service rollback，以及**一次真实重启**——
-主机重启后 `sb-core` 自动启动、节点仍已发布、state 与 generation 与重启前逐字节相同、
-真实 REALITY 握手成功。同一次重启也验证了 fwctl 的开机恢复。
+已在一台 Debian 12 VPS 上实测通过：真实 systemd unit 与 MainPID/cgroup 归属、generation
+实际加载、restart/reload、删除节点后旧 socket 消失、事务失败后的真实 service 回滚、七种
+协议与模式的真实客户端握手，以及一次真实重启后带节点自动恢复。
 
-**仍未验证**：零节点状态下的重启行为（重启时主机上有节点，未测过零节点保持 stopped）、
-`Restart=on-failure` 的真实崩溃恢复、核心升级失败后的真实 service 恢复，以及真实主机上的
-v1→v2 迁移。
+尚未验证的边界统一记录在 [`KNOWN_LIMITATIONS.md`](KNOWN_LIMITATIONS.md)，不在本文件重复。
+
+新主机的部署与验收步骤见 [`PRODUCTION_CHECKLIST.md`](PRODUCTION_CHECKLIST.md)。
+
+## 开放的复审发现
+
+三轮独立只读复审的阻断项（Critical、High、阻断 Medium）均已修复，并在同一注入点复测通过。
+以下非阻断项仍然开放：
+
+- **M-3.5 / M6**：`errexit-audit.sh` 只匹配字面命令，不覆盖 `safe_mkdir`、`atomic_write`、
+  `state_set_file` 等包装函数。正是这个盲区放过了 HIGH-A。复扫确认剩余 13 处包装调用点
+  当前都不会掩盖失败，但审计覆盖本身仍需补齐——这是优先级最高的一项。
+- **M-3.3**：非 root 运行 `sb doctor` 时 `listeners` 检查仍失败。
+- **M-3.4**、第二次复审的 M5，以及两轮复审的 Low 列表。
+
+修复这些项时仍适用两条要求：不得用修改 Review Pack、降低严重度或增加宽松测试代替代码
+修复；不得把 mock systemd 结果表述为真实 systemd 验收。

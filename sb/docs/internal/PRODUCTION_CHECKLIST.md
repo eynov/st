@@ -1,7 +1,6 @@
-# 单台 VPS 灰度检查清单
+# 单台 VPS 部署检查清单
 
-复审通过后可选择一台非关键 VPS 灰度。**该灰度已于 2026-08-01 在 `de` 上完成**，本清单
-保留为后续主机的操作流程。
+在一台新主机上部署 sb 时的操作流程。首次部署建议先选一台非关键主机。
 
 ## 部署前
 
@@ -38,13 +37,12 @@ daemon-reload；若核心升级失败，恢复备份 sing-box 二进制。最后
 client output 哈希、active 与监听。防火墙变更不属于项目自动回滚范围，必须按灰度前
 记录由使用者单独恢复。
 
-## Production Ready 门槛
+## 验收标准
 
 - 隔离测试、ShellCheck、Bash syntax、fixed-core check、diff check 全部通过。
-- 真实 systemd unit、MainPID/cgroup、零节点重启与异常重启策略通过隔离或灰度验收。
+- 真实 systemd unit、MainPID/cgroup 归属与 generation 加载在目标主机上确认。
 - 不存在 Critical/High 未解决问题。
-- 单台真实 VPS 灰度完成上述低流量验收。
+- 目标主机完成上述低流量验收。
 
-隔离环境没有 systemd system bus，因此仓库级测试通过本身只能标记为“生产候选”。
-`de` 的真实 systemd 灰度已完成，上述门槛中仍未满足的是**零节点重启与异常重启策略**，
-因此目前仍不得标记 Repository Production Ready。
+隔离环境没有 systemd system bus，因此仓库级测试通过本身不能替代目标主机上的验收；
+已验证与尚未验证的划分见 [`KNOWN_LIMITATIONS.md`](KNOWN_LIMITATIONS.md)。

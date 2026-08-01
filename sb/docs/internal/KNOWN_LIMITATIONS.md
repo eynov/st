@@ -1,6 +1,6 @@
-# 当前已知限制
+# 已知限制
 
-本文件只记录稳定的产品边界；当前开发阻断及严重度统一见
+本文件记录产品边界与尚未验证的范围。测试入口与真实主机验证记录见
 [`AI_HANDOFF.md`](AI_HANDOFF.md)。
 
 - 项目无法从本机证明云安全组、上游 NAT、DDoS 清洗或外部防火墙允许 UDP。
@@ -15,7 +15,20 @@
 - 已具备依赖的 systemd Linux 可直接使用；缺少依赖时自动包安装仅支持 apt，其他
   发行版会列出缺失命令并要求使用主机包管理器安装。
 - dual 监听依赖 Linux IPv6 与 `bindv6only=0`；不满足时必须选择 ipv4 或 ipv6。
-- 本轮已完成真实 sing-box、官方 Hysteria parser/client 本地回环握手和官方
-  shadowsocks-rust `ssurl` 解析；PID 1 是 `bwrap`，无法连接 system scope bus，
-  因而真实 systemd unit/内核 cgroup 集成仍未验证。云网络与真实 systemd 必须在
-  单台 VPS 灰度确认，不得把 mock 结果描述为真实 systemd 通过。
+- 隔离测试环境的 PID 1 是 `bwrap`，无法连接 system scope bus，因此隔离测试中的
+  systemd 行为来自 mock，不得被描述为真实 systemd 通过。真实 systemd 行为已在单台
+  VPS 上单独验证，范围见下。
+
+## 真实主机已验证的范围
+
+在一台 Debian 12 VPS（`de`）上实测通过：真实 systemd unit 与 MainPID/cgroup 归属、
+generation 实际加载、restart/reload、删除节点后旧 socket 消失、事务失败后的真实
+service 回滚、七种协议与模式的真实客户端握手，以及一次真实重启后带节点自动恢复。
+
+## 尚未验证的边界
+
+- 零节点状态下的重启行为（重启时主机上有节点，未测过零节点保持 stopped）；
+- `Restart=on-failure` 在真实崩溃后的恢复；
+- 核心升级失败后的真实 service 恢复；
+- 真实主机上的 v1→v2 迁移（验证主机没有旧 `/opt/sb` 数据）；
+- 客户端握手验证走的是本机回环，未覆盖公网路径、云安全组与上游 NAT。
