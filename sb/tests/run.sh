@@ -120,7 +120,7 @@ test_all_protocols() {
     sb add SS --port 10001 --yes >/dev/null
     sb add SS2022 --port 10002 --method 2022-blake3-aes-256-gcm --yes >/dev/null
     sb add ANYTLS --port 10003 --sni any.example.com --tls-mode self-signed --yes >/dev/null
-    sb add VLESS --port 10004 --server-name www.microsoft.com --yes >/dev/null
+    sb add VLESS --port 10004 --server-name www.icloud.com --yes >/dev/null
     sb add HY2 --port 10005 --sni hy.example.com --tls-mode self-signed \
       --masquerade https://hy.example.com --no-hop --yes >/dev/null
     assert "all protocols added" test "$(jq '.instances|length' "$root/data/current/instances.json")" -eq 5
@@ -163,7 +163,7 @@ test_conflicts_and_check_failure() {
     init_env
     sb add ANYTLS --port 17001 --sni any.example.com --tls-mode self-signed --yes >/dev/null
     before=$(sha256sum "$root/data/current/instances.json" | awk '{print $1}')
-    if sb add VLESS --port 17001 --server-name www.microsoft.com --yes >/dev/null 2>&1; then
+    if sb add VLESS --port 17001 --server-name www.icloud.com --yes >/dev/null 2>&1; then
         fail "TCP port conflict rejected"
     else
         pass "TCP port conflict rejected"
@@ -280,7 +280,7 @@ test_manager_upgrade_preserves_data() {
     root="$TEST_ROOT"
     init_env
     sb add ANYTLS --port 19001 --sni any.example.com --tls-mode self-signed --yes >/dev/null
-    sb add VLESS --port 19002 --server-name www.microsoft.com --yes >/dev/null
+    sb add VLESS --port 19002 --server-name www.icloud.com --yes >/dev/null
     before=$(sha256sum "$root/data/current/instances.json" | awk '{print $1}')
     password=$(jq -r '.instances[]|select(.protocol=="ANYTLS")|.password' \
       "$root/data/current/instances.json")
@@ -563,7 +563,7 @@ test_protocol_parameter_matrix() {
     sb add SS --port 21001 --method chacha20-ietf-poly1305 --yes >/dev/null
     sb add SS2022 --port 21002 --method 2022-blake3-aes-128-gcm --yes >/dev/null
     sb add ANYTLS --port 21003 --sni any.example.com --tls-mode self-signed --yes >/dev/null
-    sb add VLESS --port 21004 --server-name www.microsoft.com --yes >/dev/null
+    sb add VLESS --port 21004 --server-name www.icloud.com --yes >/dev/null
     sb add HY2 --port 21005 --sni hy.example.com --tls-mode insecure \
       --masquerade https://hy.example.com --no-hop --yes >/dev/null
     state="$root/data/current/instances.json"
@@ -637,7 +637,7 @@ test_vless_three_mode_contract() {
     root="$TEST_ROOT"
     init_env
 
-    sb add VLESS --port 21101 --server-name www.microsoft.com --yes >/dev/null
+    sb add VLESS --port 21101 --server-name www.icloud.com --yes >/dev/null
     sb add VLESS --port 21102 --mode reality \
       --server-name www.apple.com --yes >/dev/null
     sb add VLESS --port 21103 --mode ws --path /vless \
@@ -1545,7 +1545,7 @@ test_secret_redaction_matrix() {
     printf '%s\n' "$marker" >"$password_file"
 
     # One VLESS Reality node (uuid + private_key) and one password protocol.
-    sb add vless --port 27101 --server-name www.microsoft.com --yes >/dev/null
+    sb add vless --port 27101 --server-name www.icloud.com --yes >/dev/null
     sb add SS --port 27102 --password-file "$password_file" --yes >/dev/null
 
     # Real generated values, read straight from live state.
