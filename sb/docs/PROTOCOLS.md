@@ -45,6 +45,11 @@ UDP，AnyTLS/VLESS 只占用 TCP，因此相同数字的 TCP 与 UDP 端口可�
 
 VLESS 明确不支持 XHTTP、gRPC、HTTPUpgrade、H2、QUIC、Vision + 普通 TLS、
 `packet_encoding` 自定义、`spiderX` 或 uTLS 自定义。
+
+两个 Reality mode 的 `--server-name` 借用站点必须支持 TLS 1.3 且证书链足够小；
+证书链过大的站点（例如 `www.microsoft.com`）能通过 `sing-box check` 和
+`sb doctor`，但真实客户端握手一定失败。要求、实测数据与推荐取值见
+[README 的 Reality 借用站点小节](../README.md#reality-借用站点--server-name-的硬性要求)。
 - HY2：基础监听与跳跃范围分离；无跳跃时不输出任何 hopping 残留；URI
   `pinSHA256` 使用完整叶证书指纹，sing-box SPKI pin 保持为独立字段。
 

@@ -86,15 +86,41 @@ VLESS 只实现三个经过固定 sing-box `1.13.14` 检查的模式，不提供
 
 ```bash
 # 默认：TCP + REALITY + flow=xtls-rprx-vision
-sb add vless --port 443 --server-name www.microsoft.com
+sb add vless --port 443 --server-name www.icloud.com
 
 # 兼容模式：TCP + REALITY，无 flow
-sb add vless --port 8443 --mode reality --server-name www.microsoft.com
+sb add vless --port 8443 --mode reality --server-name www.icloud.com
 
 # WebSocket + TLS；TLS 默认 self-signed，也可使用通用 TLS 参数
 sb add vless --port 9443 --mode ws --path /vless \
   --sni ws.example.com --tls-mode self-signed
 ```
+
+### Reality 借用站点（`--server-name`）的硬性要求
+
+Reality 会把目标站点的真实 TLS 握手转发给客户端，因此**目标站点必须选对**，否则
+节点能发布、能通过 `sing-box check`、`sb doctor` 全绿，但**每一次客户端握手都会
+失败**。目标站点必须同时满足：
+
+- 支持 TLS 1.3；
+- 证书链**足够小**。证书链过大时转发的握手无法在缓冲区内完成，服务端日志出现
+  `REALITY: processed invalid connection`，客户端只看到 `EOF`；
+- 从服务器本机可直接建立 TLS 1.3 连接（注意 IPv4-only 主机需要目标有 A 记录）。
+
+在 sing-box `1.13.14` 上实测（同一份配置只改目标）：
+
+| 目标 | 证书链 | 握手 |
+|---|---|---|
+| `www.icloud.com` | ~4.7 KB | 成功 |
+| `www.apple.com` | ~4.7 KB | 成功 |
+| `addons.mozilla.org` | ~4.1 KB | 成功 |
+| `www.microsoft.com` | ~8.3 KB | **失败** |
+
+`www.microsoft.com` 经 Akamai 分发，证书链约 8.3 KB，实测无法完成 Reality 握手，
+**不要用作借用站点**。本文档的示例一律使用 `www.icloud.com`。
+
+注意 `sing-box check` 只做结构校验，不会发起真实握手，因此这个问题不会在配置检查
+或 `sb doctor` 中暴露，只能通过真实客户端连接发现。
 
 模式名分别是 `vision-reality`（默认）、`reality` 和 `ws`。WS 不支持 REALITY 或
 Vision；Reality 模式不支持 WS、gRPC、XHTTP、HTTPUpgrade、H2、QUIC。项目也不提供
