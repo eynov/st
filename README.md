@@ -28,8 +28,13 @@
 
 ## 开发状态
 
-sb 生产化升级已提交（`51c7b341b9cef8551019e57b10106834bab980a2`），三轮独立只读
-复审的阻断项全部关闭：Critical 0、High 0、阻断 Medium 0，仓库收尾完成。仍不得标记
-为 Production Ready，也不得直接部署到生产 VPS——真实 systemd/cgroup 灰度验证尚未
-完成。当前结论和下一步以
+三轮独立只读复审的阻断项全部关闭：Critical 0、High 0、阻断 Medium 0。
+
+**真实 systemd/cgroup 灰度验证已完成**（2026-08-01，单台非关键 VPS `de`）：真实 unit 与
+MainPID/cgroup 归属、generation 实际加载、restart/reload、事务失败后的真实 service 回滚、
+七种协议/模式的真实客户端握手，以及**一次真实重启后带节点自动恢复**，均已实测通过。
+
+仍**不得标记为 Production Ready**，也不得在该灰度主机之外扩大部署：零节点状态下的重启
+行为、`Restart=on-failure` 的真实崩溃恢复、核心升级失败后的 service 恢复，以及真实主机上的
+v1→v2 迁移，都尚未验证。当前结论和下一步以
 [`sb/docs/internal/AI_HANDOFF.md`](sb/docs/internal/AI_HANDOFF.md) 为准。

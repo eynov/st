@@ -1,6 +1,7 @@
 # 单台 VPS 灰度检查清单
 
-本轮仓库验收不执行以下步骤。复审通过后才可选择一台非关键 VPS 灰度。
+复审通过后可选择一台非关键 VPS 灰度。**该灰度已于 2026-08-01 在 `de` 上完成**，本清单
+保留为后续主机的操作流程。
 
 ## 部署前
 
@@ -44,5 +45,6 @@ client output 哈希、active 与监听。防火墙变更不属于项目自动�
 - 不存在 Critical/High 未解决问题。
 - 单台真实 VPS 灰度完成上述低流量验收。
 
-当前环境没有 systemd system bus，因此仓库级测试通过只能标记为“生产候选”；
-在真实 systemd 灰度完成前不得标记 Repository Production Ready 或声称已生产部署。
+隔离环境没有 systemd system bus，因此仓库级测试通过本身只能标记为“生产候选”。
+`de` 的真实 systemd 灰度已完成，上述门槛中仍未满足的是**零节点重启与异常重启策略**，
+因此目前仍不得标记 Repository Production Ready。

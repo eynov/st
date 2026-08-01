@@ -8,9 +8,12 @@
 nftables/iptables 示例，绝不默认执行防火墙命令。
 
 > 当前状态：**Repository Production Candidate — Not Production Ready**。三轮独立只读复审
-> 提出的全部阻断项均已修复（当前 Critical 0 / High 0 / Medium 0 阻断），但真实 systemd
-> 验收尚未完成，仍有非阻断项开放。请先阅读
-> [AI 交接状态](docs/internal/AI_HANDOFF.md)，不要直接用于生产环境。
+> 提出的全部阻断项均已修复（当前 Critical 0 / High 0 / Medium 0 阻断），真实 systemd 验收
+> 已在单台非关键 VPS 灰度中完成，包括一次真实重启后带节点自动恢复。
+>
+> 仍未标记 Production Ready：零节点重启行为、`Restart=on-failure` 的真实崩溃恢复、核心升级
+> 失败后的 service 恢复，以及真实主机上的 v1→v2 迁移尚未验证，另有非阻断项开放。请先阅读
+> [AI 交接状态](docs/internal/AI_HANDOFF.md)，不要在未经评估的情况下用于生产环境。
 
 ## 支持范围
 

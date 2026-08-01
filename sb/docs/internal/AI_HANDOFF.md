@@ -57,7 +57,8 @@ sing-box `1.13.14`。本轮没有修改 HY2、SS、SS2022、AnyTLS 协议插件�
   仍压平 rc=70）与 M-3.2（salvage 确认可从环境继承）：已修复，两项均在整改前实际复现。
 
 第三次复审的结论是「commit/push 允许，但需用户明确授权」。用户已明确授权，变更集已提交
-并推送到 Gitea `origin/main`。Production Ready 仍为否——真实 systemd/cgroup 门槛未验证。
+并推送到 Gitea `origin/main`。真实 systemd/cgroup 门槛此后已在 `de` 灰度中验证通过；
+Production Ready 仍为否，原因见下方「尚未验证边界」。
 
 ## 已完成内容
 
@@ -110,13 +111,13 @@ sing-box `1.13.14`。本轮没有修改 HY2、SS、SS2022、AnyTLS 协议插件�
 确认剩余 13 处包装调用点当前都不会掩盖失败。
 
 **当前阻断项：无自测阻断项。** 本轮 VLESS 任务已获用户明确 commit/push 授权；真实
-systemd 验收仍未完成。
+systemd 验收已于 2026-08-01 在 `de` 灰度中完成。
 
 ## 当前禁止事项
 
-- 不得部署到生产 VPS。
+- 不得在已授权的灰度主机（`de`）之外扩大部署；每台新主机都需要用户单独授权。
 - 不得宣布 Repository Production Ready。
-- 未通过第三次独立只读复审前，不得进入测试 VPS 灰度。
+- 三轮独立只读复审已通过，单台非关键 VPS 灰度已完成；再次灰度或扩大范围仍需用户明确授权。
 - 未经用户明确授权，不得 commit 或 push。
 - 不得用修改 Review Pack、降低严重度或增加宽松测试代替代码修复。
 - 不得把 mock systemd 结果表述为真实 systemd 验收。

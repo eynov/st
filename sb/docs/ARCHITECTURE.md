@@ -1,8 +1,9 @@
 # 架构与目录
 
 本文档描述已接受的目标架构。当前实现与目标之间的已知阻断只维护在
-[`AI_HANDOFF.md`](internal/AI_HANDOFF.md)；在阻断清零前，不得把下述事务模型视为已经达到
-Production Ready。
+[`AI_HANDOFF.md`](internal/AI_HANDOFF.md)。自测阻断现已清零，且事务模型已在单台非关键 VPS
+灰度中实测（含真实 service 回滚与一次真实重启）；但仍有未验证边界，因此不得据此把项目
+标记为 Production Ready——准入状态一律以 [`AI_HANDOFF.md`](internal/AI_HANDOFF.md) 为准。
 
 ## 事实来源
 
