@@ -5,7 +5,7 @@
 [`KNOWN_LIMITATIONS.md`](KNOWN_LIMITATIONS.md)，历次复审的完整证据快照见
 [`FINAL_REVIEW_PACK.md`](FINAL_REVIEW_PACK.md)。
 
-修改代码前请按 [`AGENTS.md`](../../../AGENTS.md) 指定的方式确认工作树状态；本文件不记录
+修改代码前请按 [`AGENTS.md`](../../AGENTS.md) 指定的方式确认工作树状态；本文件不记录
 工作树快照，Git 才是事实来源。
 
 ## 复现与验证入口

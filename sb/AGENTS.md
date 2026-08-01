@@ -1,17 +1,19 @@
-# AI 工作规范
+# sb AI 工作规范
 
-本文件是本仓库供 Codex、Claude Code 及其他 AI Coding Agent 使用的唯一长期工作
-规范。项目的验证记录与开放发现记录在 `sb/docs/internal/AI_HANDOFF.md`，不要写入本文件。
+本文件是 `sb` 项目供 Codex、Claude Code 及其他 AI Coding Agent 使用的唯一长期工作
+规范。项目的验证记录与开放发现记录在 [`docs/internal/AI_HANDOFF.md`](docs/internal/AI_HANDOFF.md)，
+不要写入本文件。
 
 ## 项目范围
 
-当前生产化维护对象是 `sb/` 及其仓库级路由 `file.sh`。`fwctl/`、`box/`、
-`Telegram_chatbot/` 和 `Treehole/` 是同仓库的独立项目；除非任务明确要求，不得
-修改。调整 `file.sh` 时必须保留其他项目的通用安装路由。
+生产化维护对象是本目录 `sb/` 及其仓库级安装路由 `../file.sh`。同一仓库中的
+`fwctl/`、`box/`、`Telegram_chatbot/` 和 `Treehole/` 是独立项目；除非任务明确要求，
+不得修改。调整 `../file.sh` 时必须保留其他项目的通用 `--source-dir` 安装路由。
 
 ## 开始工作前
 
-先在仓库根目录执行：
+本文件的所有命令都在仓库根目录（`sb/` 的上级目录）执行，路径写法与
+[`docs/TESTING.md`](docs/TESTING.md)、`AI_HANDOFF.md` 一致。先执行：
 
 ```bash
 git status --short --branch
@@ -21,9 +23,9 @@ git diff -- file.sh sb/
 
 随后完整阅读：
 
-1. `sb/docs/internal/AI_HANDOFF.md`
-2. `sb/docs/internal/FINAL_REVIEW_PACK.md`
-3. `sb/README.md`
+1. [`docs/internal/AI_HANDOFF.md`](docs/internal/AI_HANDOFF.md)
+2. [`docs/internal/FINAL_REVIEW_PACK.md`](docs/internal/FINAL_REVIEW_PACK.md)
+3. [`README.md`](README.md)
 4. 与任务直接相关的代码、测试和专题文档
 
 `AI_HANDOFF.md` 记录验证入口、真实主机验证结果和仍然开放的复审发现。
@@ -48,8 +50,8 @@ git diff -- file.sh sb/
 
 ## 测试规范
 
-测试命令、真实组件前置条件和 mock 边界以 `sb/docs/TESTING.md` 为准。当前已有的
-主要验证入口是：
+测试命令、真实组件前置条件和 mock 边界以 [`docs/TESTING.md`](docs/TESTING.md) 为准。
+当前已有的主要验证入口是：
 
 ```bash
 SB_TEST_REAL_CORE=/path/to/sing-box-1.13.14 \
@@ -69,9 +71,10 @@ Shell 语法检查必须覆盖 `file.sh`、`sb/sb`、`sb/install.sh`、`sb/core/
 
 重要代码或结论变化时同步更新：
 
-- `sb/README.md`：稳定的用户使用方式和项目状态标签；
-- `sb/docs/internal/AI_HANDOFF.md`：验证入口、真实主机验证结果和开放的复审发现；
-- `sb/docs/internal/FINAL_REVIEW_PACK.md`：该轮完整实现与验证证据。
+- [`README.md`](README.md)：稳定的用户使用方式和项目状态标签；
+- [`docs/internal/AI_HANDOFF.md`](docs/internal/AI_HANDOFF.md)：验证入口、真实主机验证结果和开放的复审发现；
+- [`docs/internal/FINAL_REVIEW_PACK.md`](docs/internal/FINAL_REVIEW_PACK.md)：该轮完整实现与验证证据。
 
-长期架构决策新增或改变时同步更新 `sb/docs/ARCHITECTURE.md` 和对应 ADR。测试入口、
-依赖或 mock 边界变化时更新 `sb/docs/TESTING.md`。不要在多个文档复制当前问题清单。
+长期架构决策新增或改变时同步更新 [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) 和对应
+ADR。测试入口、依赖或 mock 边界变化时更新 [`docs/TESTING.md`](docs/TESTING.md)。不要在
+多个文档复制当前问题清单。
