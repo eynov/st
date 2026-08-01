@@ -134,7 +134,7 @@ inbound type 映射传输层（shadowsocks→tcp+udp、hysteria2→udp、vless�
 - reload/restart 后 generation 是否真正加载
 - 删除节点后旧 socket 是否真实消失
 - `Restart=on-failure`
-- VPS reboot 后有节点恢复和零节点保持 stopped
+- VPS reboot 后有节点恢复（已在 `de` 实测通过）和零节点保持 stopped（仍未验证）
 - 核心升级及事务 rollback 后的真实 service 恢复
 
 这些项目必须在第二轮独立只读复审通过并获批后，于单台测试 VPS 做低流量灰度。

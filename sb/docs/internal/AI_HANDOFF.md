@@ -146,7 +146,14 @@ git diff --check
 
 ## 尚未验证边界
 
-当前隔离环境 PID 1 为 `bwrap`，无法连接 systemd system bus。以下只能在获批的单台测试 VPS
-验证：真实 MainPID/cgroup/socket 归属，enable/start/restart/stop，generation 实际加载，
-旧 socket 消失，异常退出 Restart，主机 reboot 后有节点和零节点行为，以及事务失败后的真实
-service rollback。
+当前隔离环境 PID 1 为 `bwrap`，无法连接 systemd system bus，因此以下只能在真实主机验证。
+
+**已在 `de` 灰度中实测通过（2026-08-01）**：真实 MainPID/cgroup 归属、enable/start/
+restart/stop、generation 实际加载（`/proc/<pid>/cwd` 指向当前 generation 的 output）、
+删除节点后旧 socket 消失、事务失败后的真实 service rollback，以及**一次真实重启**——
+主机重启后 `sb-core` 自动启动、节点仍已发布、state 与 generation 与重启前逐字节相同、
+真实 REALITY 握手成功。同一次重启也验证了 fwctl 的开机恢复。
+
+**仍未验证**：零节点状态下的重启行为（重启时主机上有节点，未测过零节点保持 stopped）、
+`Restart=on-failure` 的真实崩溃恢复、核心升级失败后的真实 service 恢复，以及真实主机上的
+v1→v2 迁移。
