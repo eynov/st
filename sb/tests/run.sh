@@ -1515,6 +1515,109 @@ test_secret_redaction_matrix() {
       --arg v "$uuid" '.instances.is01.uuid == $v' "$root/data/current/instances.json"
 }
 
+# MainPID ownership must survive systemd's fork-before-exec window.
+#
+# Reproduced on a real Debian 12 host: for ~30-50ms after `systemctl restart`
+# the unit reports a valid MainPID, already in the sb-core cgroup, whose
+# /proc/<pid>/exe still resolves to /usr/lib/systemd/systemd. The old
+# single-shot check rejected that healthy service. These cases pin the settle
+# loop without letting either predicate weaken.
+sb_ownership_probe() {
+    # Drive service_wait_ownership directly with scripted transients.
+    local runtime="$1" timeout="${2:-0.4}"
+    env SB_TEST_MODE=true SB_TEST_RUNTIME_DIR="$runtime" \
+        SB_OWNERSHIP_SETTLE_TIMEOUT="$timeout" SB_OWNERSHIP_SETTLE_INTERVAL=0.02 \
+        SB_SERVICE=sb-core \
+        bash -c '
+          source "$0/core/common.sh" 2>/dev/null
+          source "$0/core/service.sh"
+          service_wait_ownership
+        ' "$APP_DIR"
+}
+
+test_mainpid_ownership_settle() {
+    local root runtime out rc
+
+    new_env
+    root="$TEST_ROOT"
+    runtime="$root/ownership"
+    mkdir -p "$runtime"
+
+    # 1. MainPID initially zero, then valid.
+    printf '0\n0\n4242\n4242\n' >"$runtime/pid.sequence"
+    printf 'pass\n' >"$runtime/belongs.sequence"
+    out=$(sb_ownership_probe "$runtime"); rc=$?
+    assert "MainPID 0 then valid settles" test "$rc" -eq 0
+    assert "settled PID is the valid one" test "$out" = "4242"
+
+    # 2. Executable initially wrong (the real fork-before-exec window).
+    printf '4242\n' >"$runtime/pid.sequence"
+    printf 'fail-exe\nfail-exe\npass\n' >"$runtime/belongs.sequence"
+    out=$(sb_ownership_probe "$runtime"); rc=$?
+    assert "transient wrong executable settles" test "$rc" -eq 0
+    assert "settles on the same PID" test "$out" = "4242"
+
+    # 3. Cgroup initially wrong, then correct.
+    printf '4242\n' >"$runtime/pid.sequence"
+    printf 'fail-cgroup\npass\n' >"$runtime/belongs.sequence"
+    out=$(sb_ownership_probe "$runtime"); rc=$?
+    assert "transient wrong cgroup settles" test "$rc" -eq 0
+
+    # 4. PID changes during startup: must settle on the final PID, not the first.
+    printf '1111\n2222\n3333\n3333\n' >"$runtime/pid.sequence"
+    printf 'pass\n' >"$runtime/belongs.sequence"
+    out=$(sb_ownership_probe "$runtime"); rc=$?
+    assert "PID change during startup still settles" test "$rc" -eq 0
+    assert "settles on the final PID, not a moving one" test "$out" = "3333"
+
+    # 5. Timeout when the executable never matches, naming that predicate.
+    printf '4242\n' >"$runtime/pid.sequence"
+    printf 'fail-exe\n' >"$runtime/belongs.sequence"
+    out=$(sb_ownership_probe "$runtime" 0.2 2>&1) && rc=0 || rc=$?
+    assert "executable never matching times out" test "$rc" -ne 0
+    assert "timeout names the executable predicate" sh -c \
+      "printf '%s' \"$out\" | grep -q executable"
+
+    # 6. Timeout when the cgroup never matches, naming that predicate.
+    printf '4242\n' >"$runtime/pid.sequence"
+    printf 'fail-cgroup\n' >"$runtime/belongs.sequence"
+    out=$(sb_ownership_probe "$runtime" 0.2 2>&1) && rc=0 || rc=$?
+    assert "cgroup never matching times out" test "$rc" -ne 0
+    assert "timeout names the cgroup predicate" sh -c \
+      "printf '%s' \"$out\" | grep -q cgroup"
+
+    # 7. A MainPID that never appears is still a failure, not a pass.
+    printf '0\n' >"$runtime/pid.sequence"
+    printf 'pass\n' >"$runtime/belongs.sequence"
+    out=$(sb_ownership_probe "$runtime" 0.2 2>&1) && rc=0 || rc=$?
+    assert "MainPID never published times out" test "$rc" -ne 0
+    assert "timeout explains no valid MainPID" sh -c \
+      "printf '%s' \"$out\" | grep -q 'valid MainPID'"
+
+    # 8. Strictness: ownership is never assumed. A PID that is stable but never
+    #    owned must fail, however long we wait.
+    printf '4242\n' >"$runtime/pid.sequence"
+    printf 'fail-exe\nfail-cgroup\nfail-exe\nfail-cgroup\n' >"$runtime/belongs.sequence"
+    out=$(sb_ownership_probe "$runtime" 0.2 2>&1) && rc=0 || rc=$?
+    assert "stable but unowned PID is rejected" test "$rc" -ne 0
+
+    # 9. Rollback still happens when verification times out: a real publish with
+    #    a permanently unowned PID must leave no node behind.
+    new_env
+    root="$TEST_ROOT"
+    init_env
+    # The mock rewrites service.pid when it starts the unit, so drive the
+    # ownership verdict directly: this PID is stable but never owned.
+    mkdir -p "$SB_TEST_RUNTIME_DIR"
+    printf 'fail-exe\n' >"$SB_TEST_RUNTIME_DIR/belongs.sequence"
+    SB_OWNERSHIP_SETTLE_TIMEOUT=0.2 SB_OWNERSHIP_SETTLE_INTERVAL=0.02 \
+      sb add SS --port 26801 --yes >/dev/null 2>&1 && rc=0 || rc=$?
+    rm -f "$SB_TEST_RUNTIME_DIR/belongs.sequence"
+    assert "publish fails when ownership never settles" test "$rc" -ne 0
+    assert "failed publish left no instance behind" sh -c \
+      "! jq -e '.instances | length > 0' '$root/data/current/instances.json' >/dev/null 2>&1"
+}
+
 test_real_uri_parsers_and_hysteria_tls() {
     local hysteria="${SB_TEST_HYSTERIA_BIN:-/tmp/hysteria-v2.10.0-linux-amd64}"
     local ssurl="${SB_TEST_SSURL_BIN:-/tmp/shadowsocks-rust-v1.24.0/ssurl}"
@@ -2323,6 +2426,7 @@ TESTS=(
     test_zero_node_reboot_policy
     test_sensitive_logging_and_permissions
     test_secret_redaction_matrix
+    test_mainpid_ownership_settle
     test_transaction_publish_fault_injection
     test_transaction_rollback_fault_injection
     test_transaction_fault_across_operations

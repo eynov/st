@@ -2,6 +2,20 @@
 
 SB_SS="${SB_SS:-ss}"
 
+# systemd publishes MainPID at fork and moves the child into the service cgroup
+# *before* the child execs the target binary. For roughly 30-50ms after
+# `systemctl restart` the unit therefore reports a valid, correctly-cgrouped
+# MainPID whose /proc/<pid>/exe still resolves to systemd itself. A single-shot
+# ownership check rejects a perfectly healthy service in that window, which is
+# what "MainPID N does not belong to sb-core" meant on real systemd. Isolated
+# runs never saw it because the mock reports a settled PID immediately.
+#
+# The answer is to wait for the unit to settle, never to relax the predicates:
+# both the executable and the cgroup check still have to pass, on a PID that has
+# stopped moving, before a publish is accepted.
+SB_OWNERSHIP_SETTLE_TIMEOUT="${SB_OWNERSHIP_SETTLE_TIMEOUT:-5}"
+SB_OWNERSHIP_SETTLE_INTERVAL="${SB_OWNERSHIP_SETTLE_INTERVAL:-0.05}"
+
 service_generate_unit() (
     local tmp=""
     trap '[[ -z "$tmp" ]] || rm -f -- "$tmp"' EXIT
@@ -101,15 +115,9 @@ service_verify_listeners() {
     local manifest="${1:-${SB_CURRENT_OUTPUT}/manifest.json}" network port address pid line
     [[ -f "$manifest" ]] || return 1
     service_is_active || return 1
-    pid=$(service_pid)
-    [[ "$pid" =~ ^[0-9]+$ && "$pid" -gt 1 ]] || {
-        err "sb-core MainPID is invalid: $pid"
-        return 1
-    }
-    service_pid_belongs "$pid" || {
-        err "MainPID $pid does not belong to $SB_SERVICE"
-        return 1
-    }
+    # Ownership is checked against a settled PID; see the note on
+    # SB_OWNERSHIP_SETTLE_TIMEOUT for why a single sample is not enough.
+    pid=$(service_wait_ownership) || return 1
     service_generation_loaded "$pid" || return 1
     address=$(jq -er '.listen.address' "$manifest") || return 1
     while IFS=$'\t' read -r network port; do
@@ -124,16 +132,87 @@ service_verify_listeners() {
     done < <(jq -r '.expected_listeners[] | [.network,.port] | @tsv' "$manifest")
 }
 
+# Records which predicate rejected the PID, so a settle timeout can say which
+# one never became true instead of just "does not belong".
+SB_OWNERSHIP_LAST_FAIL=""
+
 service_pid_belongs() {
     local pid="$1"
+    SB_OWNERSHIP_LAST_FAIL=""
     if [[ "${SB_TEST_MODE:-false}" == "true" ]]; then
+        # Tests drive the transient startup states through a scripted sequence:
+        # one verdict per call, the last entry repeating once exhausted.
+        local seq="${SB_TEST_RUNTIME_DIR}/belongs.sequence"
+        if [[ -f "$seq" ]]; then
+            local verdict
+            verdict=$(head -n1 "$seq")
+            if (( $(wc -l <"$seq") > 1 )); then
+                tail -n +2 "$seq" >"${seq}.next" && mv -f "${seq}.next" "$seq"
+            fi
+            case "$verdict" in
+                pass) return 0 ;;
+                fail-exe) SB_OWNERSHIP_LAST_FAIL="executable"; return 1 ;;
+                fail-cgroup) SB_OWNERSHIP_LAST_FAIL="cgroup"; return 1 ;;
+            esac
+        fi
         [[ -f "${SB_TEST_RUNTIME_DIR}/service.pid" &&
-           "$(cat "${SB_TEST_RUNTIME_DIR}/service.pid")" == "$pid" ]]
-        return
+           "$(cat "${SB_TEST_RUNTIME_DIR}/service.pid")" == "$pid" ]] ||
+            { SB_OWNERSHIP_LAST_FAIL="executable"; return 1; }
+        return 0
     fi
-    [[ "$(readlink -f "/proc/${pid}/exe" 2>/dev/null)" == "$(readlink -f "$SB_BIN")" ]] ||
+    [[ "$(readlink -f "/proc/${pid}/exe" 2>/dev/null)" == "$(readlink -f "$SB_BIN")" ]] || {
+        SB_OWNERSHIP_LAST_FAIL="executable"
         return 1
-    grep -Eq "(^|/)${SB_SERVICE}\\.service($|/)" "/proc/${pid}/cgroup"
+    }
+    grep -Eq "(^|/)${SB_SERVICE}\\.service($|/)" "/proc/${pid}/cgroup" || {
+        SB_OWNERSHIP_LAST_FAIL="cgroup"
+        return 1
+    }
+    return 0
+}
+
+# Wait for the unit to present a stable, owned MainPID.
+#
+# Succeeds only when a nonzero MainPID is unchanged between two consecutive
+# samples and both ownership predicates pass on it. Returns as soon as that
+# holds, so the healthy path costs one extra sample at most. On timeout it
+# names the predicate that never became true and fails, leaving the caller's
+# rollback path and exit code untouched.
+# Output: the settled PID on stdout.
+service_wait_ownership() {
+    local pid last_pid="" waited=0 deadline_reached=0
+    local interval="$SB_OWNERSHIP_SETTLE_INTERVAL"
+    local timeout="$SB_OWNERSHIP_SETTLE_TIMEOUT"
+    local last_fail="" last_seen_pid=""
+
+    while :; do
+        pid=$(service_pid)
+        if [[ "$pid" =~ ^[0-9]+$ && "$pid" -gt 1 ]]; then
+            last_seen_pid="$pid"
+            # Require the PID to hold still: a restart mid-check must not be
+            # mistaken for a settled service.
+            if [[ "$pid" == "$last_pid" ]] && service_pid_belongs "$pid"; then
+                printf '%s\n' "$pid"
+                return 0
+            fi
+            [[ -n "$SB_OWNERSHIP_LAST_FAIL" ]] && last_fail="$SB_OWNERSHIP_LAST_FAIL"
+            last_pid="$pid"
+        else
+            last_pid=""
+        fi
+
+        (( deadline_reached )) && break
+        sleep "$interval"
+        waited=$(awk -v w="$waited" -v i="$interval" 'BEGIN{printf "%.3f", w+i}')
+        awk -v w="$waited" -v t="$timeout" 'BEGIN{exit !(w >= t)}' && deadline_reached=1
+    done
+
+    if [[ -z "$last_seen_pid" ]]; then
+        err "sb-core did not publish a valid MainPID within ${timeout}s"
+    else
+        err "sb-core MainPID ${last_seen_pid} never satisfied the ${last_fail:-ownership} check within ${timeout}s"
+    fi
+    return 1
 }
 
 service_generation_loaded() {
@@ -213,6 +292,17 @@ service_actual_listeners_json() {
 }
 
 service_pid() {
+    # Tests script the MainPID progression (0 → valid, or a PID change during
+    # startup) through a sequence file: one value per call, last entry repeats.
+    if [[ "${SB_TEST_MODE:-false}" == "true" && -f "${SB_TEST_RUNTIME_DIR}/pid.sequence" ]]; then
+        local seq="${SB_TEST_RUNTIME_DIR}/pid.sequence" value
+        value=$(head -n1 "$seq")
+        if (( $(wc -l <"$seq") > 1 )); then
+            tail -n +2 "$seq" >"${seq}.next" && mv -f "${seq}.next" "$seq"
+        fi
+        printf '%s\n' "$value"
+        return 0
+    fi
     "$SB_SYSTEMCTL" show "$SB_SERVICE" --property MainPID --value 2>/dev/null || printf '0\n'
 }
 
