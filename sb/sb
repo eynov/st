@@ -75,7 +75,17 @@ reject_dry_run() {
 
 prompt_value() {
     local prompt="$1" default="${2:-}" result
-    [[ -t 0 ]] || return 1
+    if [[ ! -t 0 ]]; then
+        # Non-interactive. A documented default is still a valid answer, so
+        # honour it instead of failing: discarding it made `sb add hy2 --yes`
+        # and `sb add anytls --yes` exit 1 with no output at all, because that
+        # call site has no default of its own to fall back on.
+        # With no default the value is genuinely required, so keep failing and
+        # let the caller print its own "--x is required" message.
+        [[ -n "$default" ]] || return 1
+        printf '%s\n' "$default"
+        return 0
+    fi
     read -r -p "${prompt}${default:+ [${default}]}: " result
     printf '%s\n' "${result:-$default}"
 }

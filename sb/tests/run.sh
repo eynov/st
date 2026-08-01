@@ -880,6 +880,97 @@ test_certificate_rotation_transaction() {
       -noout -checkhost hy.example.com
 }
 
+# A documented default must survive a non-interactive run.
+#
+# prompt_value() used to return failure whenever stdin was not a TTY, throwing
+# away the default it had been handed. The TLS-mode call site is the only one
+# that supplies a default and the only one with no error message of its own, so
+# `sb add hy2 --yes` and `sb add anytls --yes` without --tls-mode exited 1 with
+# no output at all. Required arguments must keep failing loudly.
+test_noninteractive_tls_mode_default() {
+    local root out rc G
+
+    new_env
+    root="$TEST_ROOT"
+    init_env
+
+    # 1. HY2 without --tls-mode falls back to the documented default.
+    assert "HY2 adds non-interactively without --tls-mode" \
+      sb add HY2 --port 24501 --sni hy2.example.com --yes
+    assert "HY2 defaulted to self-signed" jq -e \
+      '[.instances[]|select(.protocol=="HY2")][0].tls.mode == "self-signed"' \
+      "$root/data/current/instances.json"
+
+    # 2. AnyTLS likewise.
+    assert "AnyTLS adds non-interactively without --tls-mode" \
+      sb add ANYTLS --port 24502 --sni anytls.example.com --yes
+    assert "AnyTLS defaulted to self-signed" jq -e \
+      '[.instances[]|select(.protocol=="ANYTLS")][0].tls.mode == "self-signed"' \
+      "$root/data/current/instances.json"
+
+    # 3. Generated state and configuration remain valid.
+    assert "state is valid with defaulted TLS mode" sb validate
+    G="$root/data/current"
+    assert "server config passes the pinned core" \
+      "$REAL_CORE" check -c "$G/output/config.json"
+    assert "client config passes the pinned core" \
+      "$REAL_CORE" check -c "$G/output/clients/sing-box.json"
+
+    # 4. An explicit value still overrides the default.
+    assert "explicit --tls-mode is honoured" \
+      sb add ANYTLS --port 24503 --sni explicit.example.com --tls-mode insecure --yes
+    assert "explicit insecure recorded, not the default" jq -e \
+      '[.instances[]|select(.port==24503)][0].tls.mode == "insecure"' \
+      "$root/data/current/instances.json"
+
+    # 5. Arguments with no default stay required, with their existing messages.
+    out=$(sb add HY2 --port 24504 --yes 2>&1) && rc=0 || rc=$?
+    assert "missing --sni still fails" test "$rc" -ne 0
+    assert "missing --sni keeps its message" sh -c \
+      "printf '%s' \"$out\" | grep -q -- '--sni is required'"
+
+    out=$(sb add SS --yes 2>&1) && rc=0 || rc=$?
+    assert "missing --port still fails" test "$rc" -ne 0
+    assert "missing --port keeps its message" sh -c \
+      "printf '%s' \"$out\" | grep -q -- '--port is required'"
+
+    out=$(sb add vless --port 24505 --yes 2>&1) && rc=0 || rc=$?
+    assert "missing --server-name still fails" test "$rc" -ne 0
+    assert "missing --server-name keeps its message" sh -c \
+      "printf '%s' \"$out\" | grep -q -- '--server-name is required'"
+
+    # 6. No failure may be silent: every rejection above printed something.
+    out=$(sb add ANYTLS --port 24506 --yes 2>&1) && rc=0 || rc=$?
+    assert "a rejected add is never silent" sh -c \
+      "test -n \"\$(printf '%s' \"$out\" | tr -d '[:space:]')\""
+
+    # 7. The prompt/default contract itself, lifted straight out of the
+    #    shipping script so the test cannot drift from the implementation.
+    local probe="$root/prompt-probe.sh"
+    { sed -n '/^prompt_value()/,/^}/p' "$APP_DIR/sb"
+      printf '%s\n' 'prompt_value "$@"'; } >"$probe"
+
+    out=$(bash "$probe" "TLS mode" "self-signed" </dev/null) && rc=0 || rc=$?
+    assert "non-TTY with a default succeeds" test "$rc" -eq 0
+    assert "non-TTY returns that default" test "$out" = "self-signed"
+    out=$(bash "$probe" "Listen port" </dev/null) && rc=0 || rc=$?
+    assert "non-TTY without a default still fails" test "$rc" -ne 0
+
+    # 8. Interactive behaviour is unchanged. `script` supplies a real PTY so
+    #    the TTY branch is genuinely exercised, not simulated.
+    if command -v script >/dev/null 2>&1; then
+        out=$(printf 'insecure\n' | script -qec "bash $probe 'TLS mode' self-signed" /dev/null 2>/dev/null | tr -d '\r')
+        assert "interactive answer overrides the default" sh -c \
+          "printf '%s' \"$out\" | grep -q insecure"
+        out=$(printf '\n' | script -qec "bash $probe 'TLS mode' self-signed" /dev/null 2>/dev/null | tr -d '\r')
+        assert "empty interactive answer falls back to the default" sh -c \
+          "printf '%s' \"$out\" | grep -q self-signed"
+    else
+        pass "interactive answer overrides the default (skipped: no script(1))"
+        pass "empty interactive answer falls back to the default (skipped: no script(1))"
+    fi
+}
+
 test_tls_mode_contracts() {
     local root cert key
     new_env
@@ -2416,6 +2507,7 @@ TESTS=(
     test_backup_restore_schema_json_doctor
     test_certificate_rotation_transaction
     test_tls_mode_contracts
+    test_noninteractive_tls_mode_default
     test_root_installer_and_core_archive
     test_core_upgrade_flow
     test_backup_failure_atomicity
