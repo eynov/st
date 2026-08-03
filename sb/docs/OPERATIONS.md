@@ -111,6 +111,10 @@ sb core upgrade
 5. 旧 TLS 节点迁为显式 `insecure` 兼容模式，避免无提示改变客户端行为。
 6. 校验证书 SNI、state、全部输出和固定核心。
 7. 成功后原子创建 current；旧目录不删除。
+8. 迁移刚创建 layout 时，即使 `sb-core` 已经 active，也一定**重启**服务：同名 unit 下
+   跑着的是 sb v2 进程，它的 config、工作目录都属于旧世界，固定核心替换二进制后它的
+   `/proc/<pid>/exe` 还会指向已删除的 inode。只有重启得到的新 PID 才能证明新 generation
+   被真正加载；直接验收旧 PID 的归属必然失败。
 
 重复执行发现 current 后验证其完整 generation，不重新生成任何凭据或证书。新旧
 路径同时存在时以已验证的 current 为准，旧目录保留；current 损坏时拒绝继续，不会
@@ -137,7 +141,12 @@ generation，旧 `/opt/sb` 与正在运行的服务原样保留。此时安装�
 sb install --endpoint <domain-or-public-ip> --yes
 ```
 
-除此之外的任何 install 失败仍然按原有语义整体回滚并删除新 release。
+除此之外的任何 install 失败仍然按原有语义整体回滚并删除新 release，并且**同时恢复
+systemd unit**：install 会在服务验收之前重写 unit，而新 unit 的 `ExecCondition` 指向
+`${SB_APP_LINK}/sb`。只回滚应用链接、删除 release 而不恢复 unit，会留下一个引用已删除
+路径的 unit——正在运行的进程还在内存里活着，但下一次 restart 或重启就再也起不来。安装器
+因此在调用 `sb install` 之前保存原 unit，回滚时按字节恢复（原本没有 unit 就删除刚生成的
+那个）并 `daemon-reload`；恢复失败返回 `70` 并指名备份目录。
 
 ## 备份与恢复
 

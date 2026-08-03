@@ -23,6 +23,12 @@
 > 对该码保留新 release 与应用链接，其他失败仍整体回滚并删除 release。专项测试为
 > `61 pass / 0 fail`；完整 52 函数隔离套件为 `750 pass / 0 fail`。本补充未连接或部署生产
 > VPS，真实 aws-sg 迁移仍待按生产 checklist 单独验收。
+>
+> 2026-08-03 生产验证补充：首次真实 v2→v3 迁移在 aws-sg 上执行。endpoint 恢复按设计工作
+> （Path A），但暴露两个新缺陷——刚建 layout 时不重启已 active 的 sb v2 进程导致归属验收
+> 必然失败；install.sh 回滚不恢复 systemd unit，留下引用已删除 release 的 unit，下次重启
+> 会起不来。两者均已在项目侧修复并补回归测试，生产未做任何手工配置修改，只用迁移自身
+> 备份中的 unit 恢复了该主机。
 
 日期：2026-07-25
 范围：Gitea `S/st` 仓库的 `sb` 项目

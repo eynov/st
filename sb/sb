@@ -481,7 +481,16 @@ cmd_install() {
     runtime_validate_generation "$(readlink -f "$SB_CURRENT_LINK")" true || return 1
     service_is_enabled || return 1
     if (( $(state_enabled_count_file "$SB_CURRENT_STATE") > 0 )); then
-        if service_is_active; then
+        if [[ "$had_layout" == "false" ]] && service_is_active; then
+            # The layout was created or migrated during this invocation, so an
+            # already-active sb-core cannot be serving the generation that was
+            # just published. On a legacy host it is the sb v2 process under the
+            # same unit name: old config, old working directory, and - once the
+            # pinned core replaced the binary on disk - a deleted executable
+            # inode. Verifying its ownership can only fail. Restart so a new PID
+            # demonstrably owns the new generation.
+            service_restart || return 1
+        elif service_is_active; then
             runtime_check_config "$SB_CURRENT_CONFIG"
         else
             service_start

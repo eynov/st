@@ -36,8 +36,46 @@ source "$SOURCE_DIR/core/manager.sh"
 PREVIOUS_APP_LINK=""
 PREVIOUS_COMMAND_LINK=""
 PREVIOUS_COMMAND_EXISTS=false
+PREVIOUS_UNIT=""
+PREVIOUS_UNIT_EXISTS=false
+
+# Put the systemd unit back the way this run found it.
+#
+# sb install regenerates the unit before the service is verified, and the unit
+# it writes points ExecCondition at ${SB_APP_LINK}/sb. Rolling the application
+# link back and deleting the release without restoring the unit leaves a unit
+# referencing a path that no longer exists: the service keeps running from
+# memory, and then fails to start on the next restart or reboot. The rollback is
+# only complete once the unit matches the manager it points at again.
+restore_previous_unit() {
+    if [[ "$PREVIOUS_UNIT_EXISTS" == "true" ]]; then
+        cp -- "$PREVIOUS_UNIT" "$SB_SERVICE_FILE" || return 1
+        chmod 644 "$SB_SERVICE_FILE" || return 1
+    elif [[ -e "$SB_SERVICE_FILE" ]]; then
+        rm -f -- "$SB_SERVICE_FILE" || return 1
+    else
+        return 0
+    fi
+    # The dangerous state - a unit referencing the release that is about to be
+    # deleted - is gone as soon as the file itself is right. A daemon-reload
+    # that cannot run (systemd unavailable) must not abort the rest of the
+    # rollback: systemd re-reads the unit on its next reload or boot anyway.
+    "${SB_SYSTEMCTL:-systemctl}" daemon-reload ||
+        printf 'WARNING: daemon-reload failed after restoring %s\n' \
+          "$SB_SERVICE_FILE" >&2
+    return 0
+}
+
 install_all() {
     [[ -L "$SB_APP_LINK" ]] && PREVIOUS_APP_LINK=$(readlink "$SB_APP_LINK")
+    if [[ -f "$SB_SERVICE_FILE" ]]; then
+        PREVIOUS_UNIT=$(mktemp) || return 1
+        # install_all runs inside the with_exclusive_lock subshell, so this trap
+        # fires on every exit path of this run and leaves no stray copy behind.
+        trap 'rm -f -- "${PREVIOUS_UNIT:-}"' EXIT
+        cp -- "$SB_SERVICE_FILE" "$PREVIOUS_UNIT" || return 1
+        PREVIOUS_UNIT_EXISTS=true
+    fi
     if [[ -L "$SB_COMMAND_LINK" ]]; then
         PREVIOUS_COMMAND_LINK=$(readlink "$SB_COMMAND_LINK")
         PREVIOUS_COMMAND_EXISTS=true
@@ -87,6 +125,13 @@ install_all() {
                 "$(readlink "$SB_COMMAND_LINK")" == "$SB_APP_LINK/sb" ]]; then
             rm -f -- "$SB_COMMAND_LINK"
         fi
+        restore_previous_unit || {
+            printf 'CRITICAL: the systemd unit could not be restored: %s\n' \
+              "$SB_SERVICE_FILE" >&2
+            printf 'manual recovery: restore it from the pre-migration backup under %s\n' \
+              "$SB_BACKUP_DIR" >&2
+            return 70
+        }
         [[ -z "${SB_MANAGER_INSTALLED_RELEASE:-}" ]] ||
             rm -rf -- "$SB_MANAGER_INSTALLED_RELEASE"
         printf 'ERROR: sb initialization failed; application link rolled back\n' >&2

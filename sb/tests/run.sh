@@ -438,6 +438,94 @@ test_legacy_bootstrap_no_deadlock() {
       "legacy-v2-password"
 }
 
+# Put an sb v2 service in front of the migration: same unit name, already
+# active, but a process whose working directory is the legacy output and which
+# therefore cannot own the generation the migration is about to publish. This is
+# the aws-sg production state.
+start_legacy_service_process() {
+    local root="$1" pid
+    mkdir -p "$root/runtime" "$root/legacy/output" || return 1
+    ( cd "$root/legacy/output" && exec sleep 3600 ) </dev/null >/dev/null 2>&1 &
+    pid=$!
+    printf '%s\n' "$pid" >"$root/runtime/service.pid"
+    touch "$root/runtime/active" "$root/runtime/enabled"
+    TEST_LEGACY_SERVICE_PID="$pid"
+}
+
+test_legacy_migration_restarts_stale_service() {
+    local root rc out endpoint="203.0.114.20" unit_before
+    # 1. Migration with a live sb v2 process under the same unit name.
+    new_env
+    root="$TEST_ROOT"
+    make_legacy_v2_install "$root"
+    write_legacy_v2_sub "$root" "$endpoint"
+    start_legacy_service_process "$root"
+    sb install --yes >/dev/null
+    assert "migration over a live legacy service publishes a generation" \
+      test -L "$root/data/current"
+    assert "migration restarted the service instead of trusting the old PID" \
+      rg -q '^restart ' "$root/runtime/systemctl.log"
+    assert "the restarted PID replaced the legacy one" test \
+      "$(cat "$root/runtime/service.pid")" != "$TEST_LEGACY_SERVICE_PID"
+    assert "the restarted process owns the published generation" test \
+      "$(readlink -f "/proc/$(cat "$root/runtime/service.pid")/cwd")" = \
+      "$(readlink -f "$root/data/current/output")"
+    assert "migration over a live legacy service preserves secrets" test \
+      "$(jq -r '.instances.is01.password' "$root/data/current/instances.json")" = \
+      "legacy-v2-password"
+
+    # 2. A repeat install takes the existing-layout path (its controlled restart
+    #    comes from the transaction, not from this branch) and must still end
+    #    with the service owning the current generation.
+    sb install --yes >/dev/null
+    assert "repeat install keeps the service on the current generation" test \
+      "$(readlink -f "/proc/$(cat "$root/runtime/service.pid")/cwd")" = \
+      "$(readlink -f "$root/data/current/output")"
+    assert "repeat install preserves secrets" test \
+      "$(jq -r '.instances.is01.password' "$root/data/current/instances.json")" = \
+      "legacy-v2-password"
+
+    # 3. When the restart itself fails, the install must fail and the installer
+    #    must leave the unit pointing at a manager that still exists.
+    new_env
+    root="$TEST_ROOT"
+    make_legacy_v2_install "$root"
+    write_legacy_v2_sub "$root" "$endpoint"
+    start_legacy_service_process "$root"
+    mkdir -p "$(dirname "$SB_SERVICE_FILE")"
+    printf '[Unit]\nDescription=legacy v2 unit\n[Service]\nExecStart=/usr/local/bin/sing-box run -c /opt/sb/output/config.json\n' \
+      >"$SB_SERVICE_FILE"
+    unit_before=$(sha256sum "$SB_SERVICE_FILE" | awk '{print $1}')
+    touch "$root/runtime/fail-restart"
+    # Give mktemp a private directory so the unit backup's cleanup is observable.
+    mkdir -p "$root/tmp"
+    rc=0
+    out=$(TMPDIR="$root/tmp" "$APP_DIR/../file.sh" sb --source-dir "$APP_DIR" --yes 2>&1) || rc=$?
+    assert "failed restart fails the install" test "$rc" -ne 0
+    assert "failed restart is not reported as a missing endpoint" test "$rc" -ne 78
+    assert "installer restores the previous unit byte for byte" test \
+      "$(sha256sum "$SB_SERVICE_FILE" | awk '{print $1}')" = "$unit_before"
+    assert "restored unit does not reference the deleted release" sh -c \
+      "! rg -q 'ExecCondition' '$SB_SERVICE_FILE'"
+    assert "failed restart discards the release" test "$(manager_release_count)" -eq 0
+    assert "failed restart rolls the application link back" test ! -e "$SB_APP_LINK"
+    assert "failed restart leaves no unit backup residue" sh -c \
+      "! find '$root/tmp' -mindepth 1 | grep -q ."
+
+    # 4. A host with no unit at all before the install must not keep the one a
+    #    failed install generated.
+    new_env
+    root="$TEST_ROOT"
+    make_legacy_v2_install "$root"
+    write_legacy_v2_sub "$root" "$endpoint"
+    start_legacy_service_process "$root"
+    touch "$root/runtime/fail-restart"
+    rc=0
+    "$APP_DIR/../file.sh" sb --source-dir "$APP_DIR" --yes >/dev/null 2>&1 || rc=$?
+    assert "install without a previous unit still fails" test "$rc" -ne 0
+    assert "no orphan unit survives the rollback" test ! -e "$SB_SERVICE_FILE"
+}
+
 test_migration_failure_cleanup_and_retry() {
     local root password cert_hash rc
     for point in legacy-backup after-cert-swap after-render; do
@@ -2891,6 +2979,7 @@ TESTS=(
     test_legacy_migration
     test_legacy_endpoint_recovery
     test_legacy_bootstrap_no_deadlock
+    test_legacy_migration_restarts_stale_service
     test_migration_failure_cleanup_and_retry
     test_cross_pin_upgrade_bootstrap
     test_manager_upgrade_preserves_data

@@ -61,6 +61,17 @@ bootstrap settings 的 endpoint 仍是 `unset`，渲染阶段 `endpoint_get` 失
 `sb install --endpoint <host> --yes`，其他失败仍按原语义整体回滚。加入两组回归后
 完整 52 函数隔离套件为 `750 pass / 0 fail`；该修复尚未在任何真实主机上验证。
 
+2026-08-03 首次真实 v2→v3 生产迁移（aws-sg）暴露第三个问题，endpoint 恢复本身工作正常
+（Path A，从旧 `sub.yaml` 恢复出的地址与该主机 A 记录和当前公网 IPv4 一致）。两个缺陷：
+其一，`cmd_install` 在刚创建 layout 时若发现 `sb-core` 已 active 就只做 config 检查，不
+重启——同名 unit 下跑的是 sb v2 进程，cwd 仍是 `/opt/sb/output`，且此前失败尝试的
+`core_switch` 已替换二进制，使它的 `/proc/<pid>/exe` 变成 `(deleted)`，归属验收必然失败；
+其二，`install.sh` 回滚时不恢复 systemd unit，于是 `ExecCondition=/opt/sb/app/sb` 的新 unit
+留在盘上而 release 已删除——服务靠内存中的旧进程继续服务，但**下次重启必然起不来**。真实
+主机上确实进入了这个状态，已用迁移自己生成的 legacy backup 中的 `sb-core.service` 恢复。
+修复：layout 为本次新建时强制 `service_restart`；install.sh 保存并按字节恢复原 unit（原本
+没有则删除），恢复失败返回 `70`。加入回归后完整 53 函数隔离套件为 `766 pass / 0 fail`。
+
 bootstrap 的首个调用必须来自 reviewed checkout：
 `env -u SB_APP_DIR /root/st/sb/sb upgrade --source /root/st/sb --upgrade-core --yes`。
 原因是此前已安装的 manager 不可能认识后来新增的 flag。新源码入口比较 source pin 与
