@@ -38,6 +38,9 @@ TCP/UDP 监听、最近发布和最近回滚。`doctor` 检查：
 ## 常见失败
 
 - `endpoint is not configured`：执行 `sb endpoint set <domain-or-public-ip>`。
+- 旧 `/opt/sb` 迁移返回退出码 `78`：旧输出里没有可确认的 endpoint。此时未修改任何
+  数据，新 manager 仍然可用，执行 `sb install --endpoint <domain-or-public-ip> --yes`
+  完成迁移；不要手工编辑 `/var/lib/sb`。
 - dual 模式失败：确认 IPv6 可用且 `net.ipv6.bindv6only=0`，否则选 `ipv4`。
 - `sing-box version mismatch`：只能显式执行 `sb core install|upgrade`。
 - `another sb operation holds...` / 退出码 75：全局锁竞争，live 数据未修改，稍后重试。

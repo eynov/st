@@ -50,6 +50,17 @@ MainPID 的 fork-before-exec 窗口已由 `service_wait_ownership()` 的有界�
 部署仍未在仓库隔离测试中验证。加入这些回归后，完整 50 函数隔离套件为
 `689 pass / 0 fail`。
 
+同日在生产 aws-sg（sb v2 + sing-box 1.13.15，HY2 + VLESS 在跑）上发现第二个 bootstrap
+deadlock，与跨 pin 那个无关：v2 从不保存 endpoint，`sb install` 迁移旧 `/opt/sb` 时
+bootstrap settings 的 endpoint 仍是 `unset`，渲染阶段 `endpoint_get` 失败，`install.sh`
+把应用切换整体回滚并删除新 release，于是能配置 endpoint 的新 manager 不复存在，重试
+无限循环。修复分两层：迁移在**改动任何数据之前**从旧 `/opt/sb/output/sub.yaml` 的 clash
+`server` 字段恢复 endpoint（要求全部条目一致，并通过与手工输入完全相同的校验），显式
+`--endpoint` 优先；无法确认时返回新的 `SB_EX_MIGRATION_INPUT=78`，`install.sh` 与
+`cmd_upgrade` 对这个码**保留**新 release 和应用链接，只提示
+`sb install --endpoint <host> --yes`，其他失败仍按原语义整体回滚。加入两组回归后
+完整 52 函数隔离套件为 `750 pass / 0 fail`；该修复尚未在任何真实主机上验证。
+
 bootstrap 的首个调用必须来自 reviewed checkout：
 `env -u SB_APP_DIR /root/st/sb/sb upgrade --source /root/st/sb --upgrade-core --yes`。
 原因是此前已安装的 manager 不可能认识后来新增的 flag。新源码入口比较 source pin 与

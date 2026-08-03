@@ -15,6 +15,14 @@
 > `env -u SB_APP_DIR /root/st/sb/sb upgrade --source /root/st/sb --upgrade-core --yes`：旧 manager
 > 本身不认识新增 flag，因此由 reviewed source 加载新事务逻辑，再读取 installed pin 并调用旧
 > manager 创建升级前备份。后续已安装版本才可直接使用 `/usr/local/bin/sb`。
+>
+> 2026-08-03 legacy 迁移补充：修复 v2 → v3 首次迁移的第二个 bootstrap deadlock。sb v2
+> 不保存 endpoint，迁移因此在改动任何数据之前从旧 `/opt/sb/output/sub.yaml` 的 clash
+> `server` 字段恢复它，要求全部条目一致并通过与手工输入相同的校验；显式 `--endpoint`
+> 优先。无法确认时返回新的 `78`（`SB_EX_MIGRATION_INPUT`），`install.sh` 与 `cmd_upgrade`
+> 对该码保留新 release 与应用链接，其他失败仍整体回滚并删除 release。专项测试为
+> `61 pass / 0 fail`；完整 52 函数隔离套件为 `750 pass / 0 fail`。本补充未连接或部署生产
+> VPS，真实 aws-sg 迁移仍待按生产 checklist 单独验收。
 
 日期：2026-07-25
 范围：Gitea `S/st` 仓库的 `sb` 项目

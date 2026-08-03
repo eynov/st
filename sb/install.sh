@@ -51,7 +51,20 @@ install_all() {
     [[ -n "$ENDPOINT" ]] && args+=(--endpoint "$ENDPOINT")
     [[ -n "$LISTEN_MODE" ]] && args+=(--listen-mode "$LISTEN_MODE")
     [[ "$ALLOW_PRIVATE" == "true" ]] && args+=(--allow-private-endpoint)
-    if ! env -u SB_APP_DIR "$SB_APP_LINK/sb" "${args[@]}"; then
+    local install_rc=0
+    env -u SB_APP_DIR "$SB_APP_LINK/sb" "${args[@]}" || install_rc=$?
+    # A legacy migration that stopped for a missing endpoint is the one failure
+    # that must not roll the application switch back. Nothing was migrated, and
+    # only the manager installed just now understands the option that supplies
+    # the endpoint - discarding it here is what traps the host in a retry loop.
+    if ((install_rc == SB_EX_MIGRATION_INPUT)); then
+        printf 'ERROR: legacy migration needs an endpoint; nothing was migrated\n' >&2
+        printf 'the new manager is installed and the legacy install is unchanged\n' >&2
+        printf 'complete it with: %s install --endpoint <domain-or-public-ip> --yes\n' \
+          "$SB_COMMAND_LINK" >&2
+        return "$SB_EX_MIGRATION_INPUT"
+    fi
+    if ((install_rc != 0)); then
         if [[ -n "$PREVIOUS_APP_LINK" ]]; then
             symlink_switch "$PREVIOUS_APP_LINK" "$SB_APP_LINK" \
               "${SB_INSTALL_ROOT}/.app.install-rollback.$$" || {

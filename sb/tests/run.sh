@@ -229,6 +229,215 @@ test_legacy_migration() {
     assert "migration is idempotent" test "$(jq -r '.instances.is01.password' "$root/data/current/instances.json")" = "$password"
 }
 
+# Build a legacy sb v2 installation. sb v2 kept no endpoint setting: it detected
+# the address whenever it compiled client output and rendered it into sub.yaml,
+# so that file is where the endpoint of a real v2 host actually lives.
+make_legacy_v2_install() {
+    local root="$1" password="${2:-legacy-v2-password}"
+    mkdir -p "$root/legacy/certs" "$root/legacy/output" || return 1
+    openssl req -x509 -nodes -days 365 -newkey rsa:2048 \
+      -keyout "$root/legacy/certs/hy2_18001.key" \
+      -out "$root/legacy/certs/hy2_18001.crt" \
+      -subj '/CN=legacy.example.com' \
+      -addext 'subjectAltName=DNS:legacy.example.com' >/dev/null 2>&1 || return 1
+    jq -n --arg password "$password" \
+      --arg cert "$root/legacy/certs/hy2_18001.crt" \
+      --arg key "$root/legacy/certs/hy2_18001.key" '{instances:{
+        is01:{id:"is01",protocol:"HY2",port:18001,password:$password,
+          sni:"legacy.example.com",masq:"https://legacy.example.com",
+          cert:$cert,key:$key,hop_ports:null,hop_interval:null,
+          enabled:true,created_at:"2026-01-01 00:00:00",
+          updated_at:"2026-01-01 00:00:00"},
+        is02:{id:"is02",protocol:"SS",port:18002,password:"legacy-ss-password",
+          method:"chacha20-ietf-poly1305",enabled:true,
+          created_at:"2026-01-01 00:00:00",updated_at:"2026-01-01 00:00:00"}
+      }}' >"$root/legacy/instances.json" || return 1
+}
+
+# Reproduce sb v2's sub.yaml exactly: one compact clash proxy JSON per line under
+# `proxies:`, plus the commented Surge block it appended.
+write_legacy_v2_sub() {
+    local root="$1"
+    shift
+    local servers=("$@") index=0 server
+    {
+        printf '# 自动生成 - 2026-01-01 00:00:00\n\n'
+        printf 'proxies:\n'
+        for server in "${servers[@]}"; do
+            index=$((index + 1))
+            jq -cn --arg name "HY2-is0${index}" --arg server "$server" \
+              --argjson port $((18000 + index)) '{
+                name:$name,type:"hysteria2",server:$server,port:$port,
+                password:"legacy-v2-password",sni:"legacy.example.com",
+                "skip-cert-verify":true
+              }' | sed 's/^/  - /'
+        done
+        printf '\n# [Proxy]\n'
+        printf '# HY2-is01 = hysteria2, %s, 18001, password=legacy-v2-password\n' \
+          "${servers[0]}"
+    } >"$root/legacy/output/sub.yaml"
+}
+
+test_legacy_endpoint_recovery() {
+    local root rc out endpoint="203.0.114.20"
+    # 1. The production path: a legacy install upgraded with no --endpoint at all.
+    new_env
+    root="$TEST_ROOT"
+    make_legacy_v2_install "$root"
+    write_legacy_v2_sub "$root" "$endpoint" "$endpoint"
+    sb install --yes >/dev/null
+    assert "legacy migration without --endpoint publishes a generation" \
+      test -L "$root/data/current"
+    assert "recovered endpoint is the value sb v2 published" test \
+      "$(jq -r '.endpoint.value' "$root/data/current/settings.json")" = "$endpoint"
+    assert "recovered endpoint records its provenance" test \
+      "$(jq -r '.endpoint.source' "$root/data/current/settings.json")" = "sb-v2-migration"
+    assert "recovered endpoint is not marked private" jq -e \
+      '.endpoint.allow_private == false' "$root/data/current/settings.json"
+    assert "recovered endpoint reaches the client output" \
+      rg -q "$endpoint" "$root/data/current/output/clients/uris.txt"
+    assert "recovery preserves the legacy password" test \
+      "$(jq -r '.instances.is01.password' "$root/data/current/instances.json")" = \
+      "legacy-v2-password"
+    assert "recovery keeps the legacy source" test -f "$root/legacy/instances.json"
+    sb install --yes >/dev/null
+    assert "repeated upgrade after recovery is idempotent" test \
+      "$(jq -r '.endpoint.value' "$root/data/current/settings.json")" = "$endpoint"
+
+    # 2. An endpoint given on the invocation always wins over a recovered one.
+    new_env
+    root="$TEST_ROOT"
+    make_legacy_v2_install "$root"
+    write_legacy_v2_sub "$root" "$endpoint"
+    sb install --endpoint node.example.com --yes >/dev/null
+    assert "explicit endpoint overrides recovery" test \
+      "$(jq -r '.endpoint.value' "$root/data/current/settings.json")" = "node.example.com"
+    assert "explicit endpoint keeps its own provenance" test \
+      "$(jq -r '.endpoint.source' "$root/data/current/settings.json")" = "explicit"
+
+    # 3. Refusals. Each must stop before touching the legacy install.
+    local case_name
+    for case_name in absent ambiguous nonpublic; do
+        new_env
+        root="$TEST_ROOT"
+        make_legacy_v2_install "$root"
+        case "$case_name" in
+            absent) : ;;
+            ambiguous) write_legacy_v2_sub "$root" "$endpoint" "203.0.114.21" ;;
+            nonpublic) write_legacy_v2_sub "$root" "172.31.5.10" ;;
+        esac
+        rc=0
+        out=$(sb install --yes 2>&1) || rc=$?
+        assert "recovery ${case_name}: returns EX_CONFIG" test "$rc" -eq 78
+        assert "recovery ${case_name}: names the completing command" sh -c \
+          "printf '%s' \"\$1\" | rg -q -- 'sb install --endpoint'" _ "$out"
+        assert "recovery ${case_name}: publishes no generation" \
+          test ! -L "$root/data/current"
+        assert "recovery ${case_name}: leaves the legacy state untouched" \
+          test -f "$root/legacy/instances.json"
+        assert "recovery ${case_name}: leaves the legacy certificates untouched" \
+          test -f "$root/legacy/certs/hy2_18001.crt"
+        assert "recovery ${case_name}: creates no legacy backup" sh -c \
+          "! find '$root/backups' -maxdepth 1 -name '*-legacy-*' 2>/dev/null | grep -q ."
+        assert "recovery ${case_name}: leaves no candidate residue" sh -c \
+          "! find '$root/data' -mindepth 1 -maxdepth 2 \\( -name '.migrate-*' -o -name '.cert-migrate-*' -o -name '.cert-previous-*' \\) | grep -q ."
+        # The refusal is recoverable: one supported command finishes the job.
+        sb install --endpoint "$endpoint" --yes >/dev/null
+        assert "recovery ${case_name}: retry with an endpoint completes" test \
+          "$(jq -r '.instances.is01.password' "$root/data/current/instances.json")" = \
+          "legacy-v2-password"
+        assert "recovery ${case_name}: retry records the supplied endpoint" test \
+          "$(jq -r '.endpoint.value' "$root/data/current/settings.json")" = "$endpoint"
+    done
+
+    # 4. A legacy install whose only node migrates disabled needs no endpoint,
+    #    so requiring one would be a regression of its own.
+    new_env
+    root="$TEST_ROOT"
+    mkdir -p "$root/legacy/certs" "$root/legacy/output"
+    openssl req -x509 -nodes -days 365 -newkey rsa:2048 \
+      -keyout "$root/legacy/certs/hy2.key" -out "$root/legacy/certs/hy2.crt" \
+      -subj '/CN=hop.example.com' -addext 'subjectAltName=DNS:hop.example.com' \
+      >/dev/null 2>&1
+    jq -n --arg cert "$root/legacy/certs/hy2.crt" --arg key "$root/legacy/certs/hy2.key" '{
+      instances:{is01:{id:"is01",protocol:"HY2",port:18001,password:"legacy-hop-password",
+        sni:"hop.example.com",masq:"https://hop.example.com",cert:$cert,key:$key,
+        hop_ports:"20000-20100",hop_interval:30,enabled:true,
+        created_at:"2026-01-01 00:00:00",updated_at:"2026-01-01 00:00:00"}}}' \
+      >"$root/legacy/instances.json"
+    sb install --yes >/dev/null
+    assert "unacknowledged hopping node migrates without an endpoint" \
+      jq -e '.instances.is01.enabled == false' "$root/data/current/instances.json"
+    assert "endpoint stays unset when no node needs one" test \
+      "$(jq -r '.endpoint.mode' "$root/data/current/settings.json")" = "unset"
+}
+
+test_legacy_bootstrap_no_deadlock() {
+    local root rc out releases_after endpoint="203.0.114.20"
+    # 1. The reported deadlock: the root installer on a legacy host with no
+    #    recoverable endpoint must keep the manager it just installed.
+    new_env
+    root="$TEST_ROOT"
+    make_legacy_v2_install "$root"
+    rc=0
+    out=$("$APP_DIR/../file.sh" sb --source-dir "$APP_DIR" --yes 2>&1) || rc=$?
+    assert "installer surfaces EX_CONFIG for a missing legacy endpoint" test "$rc" -eq 78
+    assert "installer keeps the new application link" test -L "$SB_APP_LINK"
+    assert "installer keeps the new manager runnable" \
+      env -u SB_APP_DIR "$SB_APP_LINK/sb" self-check
+    assert "installer keeps the management command" test -x "$root/bin/sb"
+    assert "installer retains the new release" test "$(manager_release_count)" -ge 1
+    assert "installer names the completing command" sh -c \
+      "printf '%s' \"\$1\" | rg -q -- 'install --endpoint'" _ "$out"
+    assert "installer migrated no data" test ! -L "$root/data/current"
+    assert "installer left the legacy install intact" test -f "$root/legacy/instances.json"
+
+    # 2. The recovery command is runnable because the manager survived.
+    env -u SB_APP_DIR "$SB_APP_LINK/sb" install --endpoint "$endpoint" --yes >/dev/null
+    assert "recovery command completes the migration" test -L "$root/data/current"
+    assert "recovery command preserves legacy secrets" test \
+      "$(jq -r '.instances.is01.password' "$root/data/current/instances.json")" = \
+      "legacy-v2-password"
+    assert "recovery command creates the systemd unit" test -f "$root/systemd/sb-core.service"
+    "$APP_DIR/../file.sh" sb --source-dir "$APP_DIR" --yes >/dev/null
+    assert "repeated installer run after recovery stays idempotent" test \
+      "$(jq -r '.endpoint.value' "$root/data/current/settings.json")" = "$endpoint"
+
+    # 3. The whole production flow with nothing supplied by hand.
+    new_env
+    root="$TEST_ROOT"
+    make_legacy_v2_install "$root"
+    write_legacy_v2_sub "$root" "$endpoint" "$endpoint"
+    "$APP_DIR/../file.sh" sb --source-dir "$APP_DIR" --yes >/dev/null
+    assert "legacy install upgrades end to end with no manual input" \
+      test -L "$root/data/current"
+    assert "end-to-end upgrade recovers the published endpoint" test \
+      "$(jq -r '.endpoint.value' "$root/data/current/settings.json")" = "$endpoint"
+    assert "end-to-end upgrade keeps the manager installed" \
+      env -u SB_APP_DIR "$SB_APP_LINK/sb" validate
+
+    # 4. Every other install failure must still roll the switch back and drop
+    #    the release, including one interrupted after the endpoint was recovered.
+    new_env
+    root="$TEST_ROOT"
+    make_legacy_v2_install "$root"
+    write_legacy_v2_sub "$root" "$endpoint"
+    rc=0
+    out=$(SB_TEST_MIGRATION_FAIL_AT=after-render \
+      "$APP_DIR/../file.sh" sb --source-dir "$APP_DIR" --yes 2>&1) || rc=$?
+    releases_after=$(manager_release_count)
+    assert "interrupted migration does not return EX_CONFIG" test "$rc" -ne 78
+    assert "interrupted migration returns nonzero" test "$rc" -ne 0
+    assert "interrupted migration rolls the application link back" test ! -e "$SB_APP_LINK"
+    assert "interrupted migration discards the release" test "$releases_after" -eq 0
+    assert "interrupted migration publishes no generation" test ! -L "$root/data/current"
+    assert "interrupted migration keeps the legacy install" test -f "$root/legacy/instances.json"
+    "$APP_DIR/../file.sh" sb --source-dir "$APP_DIR" --yes >/dev/null
+    assert "retry after an interrupted migration succeeds" test \
+      "$(jq -r '.instances.is01.password' "$root/data/current/instances.json")" = \
+      "legacy-v2-password"
+}
+
 test_migration_failure_cleanup_and_retry() {
     local root password cert_hash rc
     for point in legacy-backup after-cert-swap after-render; do
@@ -2680,6 +2889,8 @@ TESTS=(
     test_all_protocols
     test_conflicts_and_check_failure
     test_legacy_migration
+    test_legacy_endpoint_recovery
+    test_legacy_bootstrap_no_deadlock
     test_migration_failure_cleanup_and_retry
     test_cross_pin_upgrade_bootstrap
     test_manager_upgrade_preserves_data

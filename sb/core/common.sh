@@ -67,6 +67,13 @@ SB_ALLOW_SALVAGE_RESTORE=false
 SB_EX_UNRECOVERABLE=70
 # Exit code reserved for global lock contention (EX_TEMPFAIL).
 SB_EX_TEMPFAIL=75
+# Exit code reserved for a legacy migration that stopped before changing
+# anything because a required input could not be derived from the old install
+# (EX_CONFIG). It is the one install failure the installer must NOT roll the
+# application switch back for: the new manager is the only program that can
+# accept the missing input, so discarding it would strand the host in a
+# bootstrap loop. Nothing has been migrated when this code is returned.
+SB_EX_MIGRATION_INPUT=78
 
 ok() {
     if [[ "$SB_JSON" == "true" ]]; then printf 'OK: %s\n' "$*" >&2

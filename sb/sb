@@ -455,7 +455,10 @@ cmd_install() {
         [[ -z "$listen_mode" ]] ||
             listen_set_file "$SB_SETTINGS_BOOTSTRAP" "$listen_mode" || return 1
     fi
-    migrate_legacy || return 1
+    # Propagate the code: a legacy migration that stopped for a missing endpoint
+    # must stay distinguishable from a generic failure all the way to the
+    # installer, which decides whether to keep the new manager.
+    migrate_legacy || return $?
     settings_link_publish || return 1
     runtime_validate_generation "$(readlink -f "$SB_CURRENT_LINK")" true || return 1
     service_generate_unit || return 1
@@ -927,9 +930,22 @@ cmd_upgrade() {
     # Stage 4 - the new manager runs install, which may migrate schemas, rebuild
     # generations and migrate certificates. Every failure from this point on has
     # to assume live data and, for a combined upgrade, the core were modified.
-    if env -u SB_APP_DIR "$SB_APP_LINK/sb" install --yes; then
+    local install_rc=0
+    env -u SB_APP_DIR "$SB_APP_LINK/sb" install --yes || install_rc=$?
+    if ((install_rc == 0)); then
         ok "sb manager upgraded: $new_release"
         return 0
+    fi
+    # A legacy migration that stopped for a missing endpoint changed nothing, and
+    # the new manager is the only program that can take the endpoint. Rolling the
+    # application switch back here is what turns a recoverable stop into a
+    # bootstrap loop, so keep the release and name the command that finishes it.
+    if ((install_rc == SB_EX_MIGRATION_INPUT)); then
+        err "manager upgrade stopped before migrating legacy data: endpoint required"
+        err "the new manager is installed and the legacy install is unchanged"
+        err "complete it with: sb install --endpoint <domain-or-public-ip> --yes"
+        err "pre-upgrade backup retained at: ${upgrade_backup}"
+        return "$SB_EX_MIGRATION_INPUT"
     fi
     upgrade_rollback "$upgrade_backup" "$previous_app_link" "$new_release" \
       "manager upgrade verification failed after the application switch" "$upgrade_core"

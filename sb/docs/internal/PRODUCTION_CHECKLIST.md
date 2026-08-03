@@ -30,6 +30,13 @@ sb doctor
 manager upgrade 必须在任何修改前以 `64` 拒绝；组合升级失败必须自动恢复旧 manager、旧
 核心/receipt、unit 与数据。
 
+旧 `/opt/sb`（sb v2）首次迁移到 v3 时不需要预先补录 endpoint：迁移会在改动任何数据之前
+从旧 `sub.yaml` 恢复它。若命令返回 `78`，说明旧输出里没有可确认的 endpoint——此时未修改
+任何数据、新 manager 已保留，按提示执行一次
+`sb install --endpoint <domain-or-public-ip> --yes` 继续，不要手工编辑 `/var/lib/sb`，
+也不要重复运行安装器期待不同结果。恢复值来自旧客户端输出，仍需与灰度前记录的公网地址
+核对一致。
+
 1. 先执行 `file.sh sb ...`，不添加新节点。
 2. 确认 `sb-core` enabled；无节点时必须 stopped。
 3. 执行 `sb validate`、`sb doctor --json`。

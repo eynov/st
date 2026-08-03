@@ -103,18 +103,41 @@ sb core upgrade
 
 首次安装检测 `/opt/sb/instances.json`：
 
-1. 在 `/var/backups/sb` 候选目录保存完整旧 `/opt/sb`（含 output）、settings、
+1. 先确定 endpoint，此时尚未修改任何数据（见下节）。
+2. 在 `/var/backups/sb` 候选目录保存完整旧 `/opt/sb`（含 output）、settings、
    unit 和核心（存在时），验证后原子发布备份。
-2. 复制证书到 `/var/lib/sb/certs`，保持内容和哈希，不轮换。
-3. state schema v1→v2，保留 ID、密码、UUID、密钥、端口和时间。
-4. 旧 TLS 节点迁为显式 `insecure` 兼容模式，避免无提示改变客户端行为。
-5. 校验证书 SNI、state、全部输出和固定核心。
-6. 成功后原子创建 current；旧目录不删除。
+3. 复制证书到 `/var/lib/sb/certs`，保持内容和哈希，不轮换。
+4. state schema v1→v2，保留 ID、密码、UUID、密钥、端口和时间。
+5. 旧 TLS 节点迁为显式 `insecure` 兼容模式，避免无提示改变客户端行为。
+6. 校验证书 SNI、state、全部输出和固定核心。
+7. 成功后原子创建 current；旧目录不删除。
 
 重复执行发现 current 后验证其完整 generation，不重新生成任何凭据或证书。新旧
 路径同时存在时以已验证的 current 为准，旧目录保留；current 损坏时拒绝继续，不会
 退回旧目录覆盖新 schema。迁移中途失败会清理 `.migrate-*`/候选证书并保留旧数据，
 重试幂等。
+
+### 迁移的 endpoint 恢复
+
+sb v2 不保存 endpoint：它在每次编译客户端输出时重新探测地址，并把结果直接渲染进
+`/opt/sb/output/sub.yaml`。因此迁移**从旧客户端输出里恢复** endpoint，而不是要求
+管理员补录一个旧安装已经知道的值：读取 `proxies:` 下每条 clash 节点的 `server`
+字段，只有在全部条目一致、且该值仍然通过与手工输入完全相同的 endpoint 校验
+（全局地址策略、域名解析策略）时才接受，写入 settings 时记为
+`source="sb-v2-migration"`。只读取结构化字段，不扫描自由文本——SNI 与伪装域名不是
+endpoint。本次调用显式给出的 `--endpoint` 始终优先于恢复值。
+
+恢复不成功时（旧输出缺失、多个不一致的地址、或该地址是私网/CGNAT 等非全局地址），
+迁移在**修改任何数据之前**停止并返回退出码 `78`：不写备份、不换证书、不发布
+generation，旧 `/opt/sb` 与正在运行的服务原样保留。此时安装器**不会**回滚应用切换、
+也不会删除新 release——新 manager 是唯一能接受该输入的程序，删掉它才会造成
+无法自举的升级循环。补齐方式是一条受支持的命令，不需要手工编辑 `/var/lib/sb`：
+
+```bash
+sb install --endpoint <domain-or-public-ip> --yes
+```
+
+除此之外的任何 install 失败仍然按原有语义整体回滚并删除新 release。
 
 ## 备份与恢复
 

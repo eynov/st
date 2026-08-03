@@ -63,6 +63,99 @@ layout_upgrade_generation_settings() (
     settings_link_publish
 )
 
+# sb v2 never stored an endpoint. It re-detected the public address every time
+# it compiled client output and rendered the result straight into the artifacts
+# under ${SB_LEGACY_DIR}/output, so those artifacts are the only place the old
+# install recorded which address its clients actually dial.
+#
+# Emit one candidate per line. sb v2 wrote its clash proxies as one compact JSON
+# object per line under `proxies:`, each carrying the endpoint as "server". Only
+# that structured field is read: scanning free text would also pick up SNI and
+# masquerade hosts, which are not endpoints and would make an otherwise
+# unambiguous recovery look ambiguous.
+migration_legacy_endpoint_candidates() {
+    local output_dir="${SB_LEGACY_DIR}/output" file
+    [[ -d "$output_dir" ]] || return 0
+    while IFS= read -r file; do
+        sed -n 's/^[[:space:]]*-[[:space:]]*\({.*}\)[[:space:]]*$/\1/p' "$file" |
+          jq -r 'fromjson? | select(type == "object") | .server // empty' -R
+    done < <(find "$output_dir" -maxdepth 2 -type f)
+}
+
+# Recover the sb v2 endpoint into $1 (a settings file) and print it.
+#
+# Deliberately fail-closed: the value is accepted only when every legacy client
+# artifact agrees on it and it still passes the unchanged v3 endpoint policy.
+# sb v2's detection could fall back to a route-local address, so a recovered
+# value is not trusted for being present - it is validated exactly like one an
+# operator types.
+migration_recover_endpoint() {
+    local file="$1" candidates count value
+    candidates=$(migration_legacy_endpoint_candidates | sed '/^$/d' | sort -u) || return 1
+    [[ -n "$candidates" ]] || {
+        err "no sb v2 client output under ${SB_LEGACY_DIR}/output records an endpoint"
+        return 1
+    }
+    count=$(printf '%s\n' "$candidates" | wc -l) || return 1
+    ((count == 1)) || {
+        err "sb v2 client output records ${count} different endpoints; refusing to guess"
+        return 1
+    }
+    value="$candidates"
+    endpoint_valid "$value" false || {
+        err "the endpoint recorded by sb v2 is not a usable public endpoint: ${value}"
+        return 1
+    }
+    endpoint_set_file "$file" "$value" false || return 1
+    local tmp
+    tmp=$(mktemp "${file}.tmp.XXXXXX") || return 1
+    if ! jq --arg updated_at "$(now_iso)" '
+      .endpoint.source="sb-v2-migration" | .endpoint.updated_at=$updated_at
+    ' "$file" >"$tmp"; then
+        rm -f -- "$tmp"
+        return 1
+    fi
+    chmod 600 "$tmp" || { rm -f -- "$tmp"; return 1; }
+    mv -fT -- "$tmp" "$file" || { rm -f -- "$tmp"; return 1; }
+    settings_validate_file "$file" || return 1
+    printf '%s\n' "$value"
+}
+
+# Whether the migrated generation will contain at least one enabled instance and
+# therefore need an endpoint to render. This mirrors the hopping rule applied in
+# migrate_legacy below: a legacy HY2 node with an unacknowledged hopping range is
+# migrated disabled, so on its own it does not require an endpoint. The guard in
+# migrate_legacy re-checks the real candidate state, so a drift between the two
+# costs a later stop, never a wrong migration.
+migration_legacy_requires_endpoint() {
+    local legacy_state="$1" enabled
+    enabled=$(jq '[.instances[]? |
+      select((.enabled != false) and
+        ((.protocol != "HY2") or ((.hop_ports // null) == null)))] | length' \
+      "$legacy_state") || return 1
+    ((enabled > 0))
+}
+
+# Bring the endpoint into the bootstrap settings before anything is modified.
+# Returns SB_EX_MIGRATION_INPUT when the upgrade cannot proceed without an
+# operator-supplied endpoint; the caller must keep the new manager installed so
+# that command is actually runnable.
+migration_endpoint_prepare() {
+    local legacy_state="$1" mode recovered
+    migration_legacy_requires_endpoint "$legacy_state" || return 0
+    mode=$(jq -r '.endpoint.mode' "$SB_SETTINGS_BOOTSTRAP") || return 1
+    # An endpoint supplied on this invocation always wins over a recovered one.
+    [[ "$mode" == "unset" ]] || return 0
+    if recovered=$(migration_recover_endpoint "$SB_SETTINGS_BOOTSTRAP"); then
+        info "endpoint recovered from sb v2 client output: ${recovered}"
+        return 0
+    fi
+    err "the sb v2 endpoint could not be recovered automatically"
+    err "no legacy data was changed; supply it once to complete the migration:"
+    err "  sb install --endpoint <domain-or-public-ip> --yes"
+    return "$SB_EX_MIGRATION_INPUT"
+}
+
 migration_normalize_tls() {
     local file="$1" tmp id protocol cert key sni pin cert_fingerprint
     tmp=$(mktemp "${file}.tmp.XXXXXX") || return 1
@@ -153,6 +246,9 @@ migrate_legacy() (
         layout_create_empty
         return
     }
+    # Before the backup, before the certificate swap, before anything: settle
+    # the endpoint. Failing here leaves the legacy install byte-for-byte intact.
+    migration_endpoint_prepare "$legacy_state" || return $?
 
     local legacy_backup id generation state cert_candidate cert_previous="" published=false
     legacy_backup=$(legacy_backup_create) || {
@@ -205,6 +301,17 @@ migrate_legacy() (
     cp -- "$SB_SETTINGS_BOOTSTRAP" "$generation/settings.json" || return 1
     chmod 600 "$generation/settings.json" || return 1
     state_validate_file "$state" || return 1
+    # The candidate state is the real input to the render, so re-check it rather
+    # than trusting the pre-flight prediction. The EXIT trap restores the
+    # certificate directory and drops every candidate, so stopping here is still
+    # a no-change stop and the operator still gets a runnable command.
+    if (( $(state_enabled_count_file "$state") > 0 )) &&
+      [[ "$(jq -r '.endpoint.mode' "$generation/settings.json")" == "unset" ]]; then
+        err "the migrated nodes need an endpoint and none could be recovered"
+        err "no legacy data was changed; supply it once to complete the migration:"
+        err "  sb install --endpoint <domain-or-public-ip> --yes"
+        return "$SB_EX_MIGRATION_INPUT"
+    fi
     runtime_render "$state" "$generation/output" "$generation/settings.json" "$id" ||
         return 1
     runtime_check_config "$generation/output/config.json" || return 1
