@@ -3,7 +3,7 @@ set -Eeuo pipefail
 umask 077
 
 APP_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-REAL_CORE="${SB_TEST_REAL_CORE:-/tmp/sb-core-1.13.14/sing-box}"
+REAL_CORE="${SB_TEST_REAL_CORE:-/tmp/sb-core-1.13.15/sing-box}"
 [[ -x "$REAL_CORE" ]] || {
     printf 'ERROR: required real sing-box test binary not found: %s\n' "$REAL_CORE" >&2
     exit 1
@@ -78,7 +78,7 @@ new_env() {
     export SB_SKIP_PACKAGES=true
     export SB_SKIP_LISTENER_CHECK=false
     export SB_VALIDATE_FILES=true
-    export SB_CORE_ARCHIVE="/tmp/sb-core-1.13.14/sing-box.tar.gz"
+    export SB_CORE_ARCHIVE="/tmp/sb-core-1.13.15/sing-box.tar.gz"
     export SB_GETENT="$APP_DIR/tests/fixtures/mock-getent"
     unset SB_CA_BUNDLE
     SB_TEST_OUTPUT_FILE=$(mktemp)
@@ -1001,7 +1001,7 @@ test_root_installer_and_core_archive() {
     local root state_hash archive
     new_env
     root="$TEST_ROOT"
-    archive="/tmp/sb-core-1.13.14/sing-box.tar.gz"
+    archive="/tmp/sb-core-1.13.15/sing-box.tar.gz"
     "$APP_DIR/../file.sh" sb --source-dir "$APP_DIR" --endpoint node.example.com --yes >/dev/null
     assert "root installer creates manager command" test -L "$root/bin/sb"
     assert "root installer creates systemd unit" test -f "$root/systemd/sb-core.service"
@@ -1014,7 +1014,7 @@ test_root_installer_and_core_archive() {
     export SB_CORE_ARCHIVE="$archive"
     sb core install >/dev/null
     assert "pinned archive installs expected core" test \
-      "$("$SB_BIN" version | awk 'NR==1{print $3}')" = "1.13.14"
+      "$("$SB_BIN" version | awk 'NR==1{print $3}')" = "1.13.15"
     rm -f "$SB_BIN"
     if SB_CORE_SHA256_OVERRIDE="$(printf '0%.0s' {1..64})" sb core install >/dev/null 2>&1; then
         fail "core checksum mismatch rejected"
@@ -1032,7 +1032,7 @@ test_core_upgrade_flow() {
     cp "$REAL_CORE" "$root/bin/sing-box"
     chmod 755 "$root/bin/sing-box"
     export SB_BIN="$root/bin/sing-box"
-    export SB_CORE_ARCHIVE="/tmp/sb-core-1.13.14/sing-box.tar.gz"
+    export SB_CORE_ARCHIVE="/tmp/sb-core-1.13.15/sing-box.tar.gz"
     init_env
     sb add SS --port 25001 --yes >/dev/null
     before=$(sha256sum "$SB_BIN" | awk '{print $1}')
@@ -1386,7 +1386,7 @@ test_core_digest_adversarial() {
     root="$TEST_ROOT"
     init_env
     printf '%s\n' '#!/usr/bin/env bash' \
-      'if [[ "${1:-}" == version ]]; then echo "sing-box version 1.13.14"; else exit 0; fi' \
+      'if [[ "${1:-}" == version ]]; then echo "sing-box version 1.13.15"; else exit 0; fi' \
       >"$root/bin/sing-box"
     chmod 755 "$root/bin/sing-box"
     if sb doctor --json >/dev/null 2>&1; then
@@ -1398,11 +1398,11 @@ test_core_digest_adversarial() {
     sb add SS --port 26701 --yes >/dev/null 2>&1 || rc=$?
     assert "ordinary node operation rejects an untrusted core" test "$rc" -ne 0
     assert "ordinary node operation never replaces the core" rg -q \
-      'sing-box version 1.13.14' "$root/bin/sing-box"
+      'sing-box version 1.13.15' "$root/bin/sing-box"
     sb core install >/dev/null
     assert "same-version forged core is repaired" test \
       "$(sha256sum "$root/bin/sing-box" | awk '{print $1}')" = \
-      "$(jq -r '.versions["1.13.14"]["linux-amd64"].binary_sha256' "$APP_DIR/checksums.json")"
+      "$(jq -r '.versions["1.13.15"]["linux-amd64"].binary_sha256' "$APP_DIR/checksums.json")"
 
     chmod 600 "$root/bin/sing-box"
     if sb doctor --json >/dev/null 2>&1; then
@@ -1415,7 +1415,7 @@ test_core_digest_adversarial() {
     bad_app=$(mktemp -d)
     TEST_ROOTS+=("$bad_app")
     cp -a "$APP_DIR/." "$bad_app/"
-    jq '.versions["1.13.14"]["linux-amd64"].sha256="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"' \
+    jq '.versions["1.13.15"]["linux-amd64"].sha256="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"' \
       "$bad_app/checksums.json" >"$bad_app/checksums.new"
     mv "$bad_app/checksums.new" "$bad_app/checksums.json"
     rc=0

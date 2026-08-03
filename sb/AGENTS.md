@@ -54,7 +54,7 @@ git diff -- file.sh sb/
 当前已有的主要验证入口是：
 
 ```bash
-SB_TEST_REAL_CORE=/path/to/sing-box-1.13.14 \
+SB_TEST_REAL_CORE=/path/to/sing-box-1.13.15 \
 SB_TEST_HYSTERIA_BIN=/path/to/hysteria-v2.10.0-linux-amd64 \
 SB_TEST_SSURL_BIN=/path/to/shadowsocks-rust-v1.24.0/ssurl \
   sb/tests/run.sh

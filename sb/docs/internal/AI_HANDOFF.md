@@ -11,7 +11,7 @@
 ## 复现与验证入口
 
 ```bash
-SB_TEST_REAL_CORE=/path/to/sing-box-1.13.14 \
+SB_TEST_REAL_CORE=/path/to/sing-box-1.13.15 \
 SB_TEST_HYSTERIA_BIN=/path/to/hysteria-v2.10.0-linux-amd64 \
 SB_TEST_SSURL_BIN=/path/to/shadowsocks-rust-v1.24.0/ssurl \
   sb/tests/run.sh
@@ -29,6 +29,17 @@ git diff --check
 故障注入通过 `SB_TEST_FAULTS`（冒号分隔）配合 `SB_TEST_MODE=true` 启用；注入点清单见
 [`TESTING.md`](../TESTING.md)。测试所需的固定二进制、真实组件与 mock 边界同样以
 `TESTING.md` 为准。
+
+## 当前核心 pin 验证
+
+2026-08-03 将受控核心 pin 从 `1.13.14` 更新到官方 Stable `1.13.15`。官方 amd64/arm64
+归档摘要和解压后二进制摘要均已独立核对；完整隔离套件使用真实 `1.13.15` 核心、Hysteria
+v2.10.0 与 shadowsocks-rust ssurl v1.24.0，结果为 `652 pass / 0 fail`。该轮没有在生产
+VPS 上执行 manager/core upgrade；真实部署仍须按生产 checklist 单独验收。
+
+MainPID 的 fork-before-exec 窗口已由 `service_wait_ownership()` 的有界等待覆盖；测试同时
+固定 executable 与 cgroup 两个归属谓词，永久不匹配时仍失败并回滚，不能把 mock 结果表述
+为新的真实 systemd 验收。
 
 ## 真实主机验证
 

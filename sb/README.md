@@ -31,7 +31,7 @@ nftables/iptables 示例，绝不默认执行防火墙命令。
 - 证书：`/var/lib/sb/certs`
 - 备份：`/var/backups/sb`
 - 锁：`/run/lock/sb/manager.lock`
-- 核心：固定 sing-box `1.13.14`，按架构校验 SHA256
+- 核心：固定 sing-box `1.13.15`，按架构校验 SHA256
 
 所有含凭据的文件默认 `0600`，目录默认 `0700`，进程与脚本使用 `umask 077`。
 
@@ -79,7 +79,7 @@ listen 变更支持只读 dry-run；state export 默认脱敏。
 
 ## VLESS 三模式
 
-VLESS 只实现三个经过固定 sing-box `1.13.14` 检查的模式，不提供其他 transport 或
+VLESS 只实现三个经过固定 sing-box `1.13.15` 检查的模式，不提供其他 transport 或
 参数组合：
 
 ```bash
