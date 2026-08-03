@@ -7,7 +7,7 @@
 
 完整套件要求以下已经独立校验来源与摘要的可执行文件：
 
-- sing-box `1.13.15`
+- sing-box `1.13.16`
 - Hysteria `v2.10.0`
 - shadowsocks-rust `ssurl` `v1.24.0`
 - Bash、jq、OpenSSL、Python 3、ripgrep、flock、sha256sum
@@ -19,7 +19,7 @@
 ## 完整隔离测试
 
 ```bash
-SB_TEST_REAL_CORE=/path/to/sing-box-1.13.15 \
+SB_TEST_REAL_CORE=/path/to/sing-box-1.13.16 \
 SB_TEST_HYSTERIA_BIN=/path/to/hysteria-v2.10.0-linux-amd64 \
 SB_TEST_SSURL_BIN=/path/to/shadowsocks-rust-v1.24.0/ssurl \
   sb/tests/run.sh

@@ -11,7 +11,7 @@
 ## 复现与验证入口
 
 ```bash
-SB_TEST_REAL_CORE=/path/to/sing-box-1.13.15 \
+SB_TEST_REAL_CORE=/path/to/sing-box-1.13.16 \
 SB_TEST_HYSTERIA_BIN=/path/to/hysteria-v2.10.0-linux-amd64 \
 SB_TEST_SSURL_BIN=/path/to/shadowsocks-rust-v1.24.0/ssurl \
   sb/tests/run.sh
@@ -71,6 +71,19 @@ bootstrap settings 的 endpoint 仍是 `unset`，渲染阶段 `endpoint_get` 失
 主机上确实进入了这个状态，已用迁移自己生成的 legacy backup 中的 `sb-core.service` 恢复。
 修复：layout 为本次新建时强制 `service_restart`；install.sh 保存并按字节恢复原 unit（原本
 没有则删除），恢复失败返回 `70`。加入回归后完整 53 函数隔离套件为 `766 pass / 0 fail`。
+
+2026-08-04 将受控核心 pin 从 `1.13.15` 更新到官方 Stable `1.13.16`，由仓库外的 Release
+Assistant 按语义分类执行，不做全局字符串替换；`tests/run.sh` 中当前 pin 的 13 处引用移到
+`1.13.16`，previous-pin fixture 的 12 处引用整体移到 `1.13.15`，跨 pin 迁移断言因此变为
+`'1.13.15 -> 1.13.16'`。官方 release `v1.13.16` 为非 draft、非 prerelease；amd64/arm64 使用
+plain 归档（不使用 `-glibc` / `-musl`），归档摘要 `e37c3128…` / `d587fb00…` 与 release
+metadata 一致，解压后二进制摘要为 `9069f805…` / `94bfe2fc…`，其中 amd64 二进制实际执行并
+报告 `1.13.16`；arm64 只核对摘要，未在 arm64 主机上执行。完整隔离套件使用真实 `1.13.16`
+核心、Hysteria v2.10.0 与 shadowsocks-rust ssurl v1.24.0，结果为 `766 pass / 0 fail`；
+`errexit-audit.sh` 为 0 blocking、53 advisory，`bash -n`、ShellCheck `0.11.0`
+（`--severity=warning --external-sources`）与 `git diff --check` 均通过。本轮没有连接或
+部署任何生产 VPS，也没有在真实主机上执行 manager/core upgrade；真实部署仍须按生产
+checklist 单独验收。
 
 bootstrap 的首个调用必须来自 reviewed checkout：
 `env -u SB_APP_DIR /root/st/sb/sb upgrade --source /root/st/sb --upgrade-core --yes`。

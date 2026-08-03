@@ -3,7 +3,7 @@ set -Eeuo pipefail
 umask 077
 
 APP_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-REAL_CORE="${SB_TEST_REAL_CORE:-/tmp/sb-core-1.13.15/sing-box}"
+REAL_CORE="${SB_TEST_REAL_CORE:-/tmp/sb-core-1.13.16/sing-box}"
 [[ -x "$REAL_CORE" ]] || {
     printf 'ERROR: required real sing-box test binary not found: %s\n' "$REAL_CORE" >&2
     exit 1
@@ -78,7 +78,7 @@ new_env() {
     export SB_SKIP_PACKAGES=true
     export SB_SKIP_LISTENER_CHECK=false
     export SB_VALIDATE_FILES=true
-    export SB_CORE_ARCHIVE="/tmp/sb-core-1.13.15/sing-box.tar.gz"
+    export SB_CORE_ARCHIVE="/tmp/sb-core-1.13.16/sing-box.tar.gz"
     export SB_GETENT="$APP_DIR/tests/fixtures/mock-getent"
     unset SB_CA_BUNDLE
     SB_TEST_OUTPUT_FILE=$(mktemp)
@@ -571,7 +571,7 @@ test_migration_failure_cleanup_and_retry() {
     done
 }
 
-# Build a self-contained previous-pin manager/core fixture.  The fake 1.13.14
+# Build a self-contained previous-pin manager/core fixture.  The fake 1.13.15
 # binary reports the previous version while delegating all real config checks
 # to the current, independently verified test core.  Its archive and manifest
 # are still digest-pinned, so the production download/receipt path is exercised
@@ -580,31 +580,31 @@ make_previous_pin_source() {
     local destination="$1" archive="$2" payload binary archive_sha binary_sha checksums_sha
     cp -a "$APP_DIR/." "$destination/" || return 1
     payload=$(mktemp -d "$TEST_ROOT/previous-core-payload.XXXXXX") || return 1
-    binary="$payload/sing-box-1.13.14-linux-amd64/sing-box"
+    binary="$payload/sing-box-1.13.15-linux-amd64/sing-box"
     mkdir -p "$(dirname "$binary")" || return 1
     printf '%s\n' \
       '#!/usr/bin/env bash' \
       'if [[ "${1:-}" == version ]]; then' \
-      '  printf "sing-box version 1.13.14\\n"' \
+      '  printf "sing-box version 1.13.15\\n"' \
       'else' \
       "  exec \"$REAL_CORE\" \"\$@\"" \
       'fi' >"$binary" || return 1
     chmod 755 "$binary" || return 1
-    tar -czf "$archive" -C "$payload" sing-box-1.13.14-linux-amd64 || return 1
+    tar -czf "$archive" -C "$payload" sing-box-1.13.15-linux-amd64 || return 1
     archive_sha=$(sha256sum "$archive" | awk '{print $1}') || return 1
     binary_sha=$(sha256sum "$binary" | awk '{print $1}') || return 1
     jq -n --arg archive_sha "$archive_sha" --arg binary_sha "$binary_sha" '{
       schema_version:1,
-      source:"https://api.github.com/repos/SagerNet/sing-box/releases/tags/v1.13.14",
-      versions:{"1.13.14":{"linux-amd64":{
-        url:"https://github.com/SagerNet/sing-box/releases/download/v1.13.14/sing-box-1.13.14-linux-amd64.tar.gz",
+      source:"https://api.github.com/repos/SagerNet/sing-box/releases/tags/v1.13.15",
+      versions:{"1.13.15":{"linux-amd64":{
+        url:"https://github.com/SagerNet/sing-box/releases/download/v1.13.15/sing-box-1.13.15-linux-amd64.tar.gz",
         sha256:$archive_sha,binary_sha256:$binary_sha
       }}}
     }' >"$destination/checksums.json" || return 1
-    jq '.sing_box_version="1.13.14"' "$destination/version.json" \
+    jq '.sing_box_version="1.13.15"' "$destination/version.json" \
       >"$destination/version.json.new" || return 1
     mv -f "$destination/version.json.new" "$destination/version.json" || return 1
-    sed -i 's/^SB_CORE_VERSION=.*/SB_CORE_VERSION="1.13.14"/' \
+    sed -i 's/^SB_CORE_VERSION=.*/SB_CORE_VERSION="1.13.15"/' \
       "$destination/core/common.sh" || return 1
     checksums_sha=$(sha256sum "$destination/checksums.json" | awk '{print $1}') || return 1
     sed -i "s/^SB_CHECKSUMS_SHA256=.*/SB_CHECKSUMS_SHA256=\"${checksums_sha}\"/" \
@@ -615,7 +615,7 @@ setup_previous_pin_install() {
     local old_source old_archive
     new_env
     old_source="$TEST_ROOT/old-source"
-    old_archive="$TEST_ROOT/sing-box-1.13.14.tar.gz"
+    old_archive="$TEST_ROOT/sing-box-1.13.15.tar.gz"
     mkdir -p "$old_source" || return 1
     make_previous_pin_source "$old_source" "$old_archive" || return 1
     SB_APP_DIR="$old_source" SB_CORE_ARCHIVE="$old_archive" \
@@ -641,7 +641,7 @@ test_cross_pin_upgrade_bootstrap() {
       rc=0 || rc=$?
     assert "cross-pin manager upgrade without authorization returns EX_USAGE" test "$rc" -eq 64
     assert "cross-pin refusal names the old and new pins" sh -c \
-      "printf '%s' \"\$1\" | rg -q '1.13.14 -> 1.13.15'" _ "$out"
+      "printf '%s' \"\$1\" | rg -q '1.13.15 -> 1.13.16'" _ "$out"
     assert "cross-pin refusal gives the explicit bootstrap flag" sh -c \
       "printf '%s' \"\$1\" | rg -q -- '--upgrade-core'" _ "$out"
     assert "cross-pin refusal leaves the manager link unchanged" \
@@ -673,12 +673,12 @@ test_cross_pin_upgrade_bootstrap() {
     assert "authorized cross-pin upgrade switches the manager" \
       test "$(readlink "$SB_APP_LINK")" != "$PREVIOUS_PIN_APP"
     assert "authorized cross-pin upgrade installs the new core version" \
-      test "$("$SB_BIN" version | awk 'NR==1{print $3}')" = "1.13.15"
+      test "$("$SB_BIN" version | awk 'NR==1{print $3}')" = "1.13.16"
     assert "authorized cross-pin upgrade installs the pinned core digest" \
       test "$(sha256sum "$SB_BIN" | awk '{print $1}')" = \
-      "$(jq -r '.versions["1.13.15"]["linux-amd64"].binary_sha256' "$APP_DIR/checksums.json")"
+      "$(jq -r '.versions["1.13.16"]["linux-amd64"].binary_sha256' "$APP_DIR/checksums.json")"
     assert "authorized cross-pin upgrade writes the new receipt" \
-      jq -e '.version=="1.13.15"' "$root/data/core.json"
+      jq -e '.version=="1.13.16"' "$root/data/core.json"
     assert "authorized cross-pin upgrade preserves state" \
       test "$(sha256sum "$root/data/current/instances.json" | awk '{print $1}')" = "$before_state"
     assert "authorized cross-pin upgrade validates with the new manager" \
@@ -1416,7 +1416,7 @@ test_root_installer_and_core_archive() {
     local root state_hash archive
     new_env
     root="$TEST_ROOT"
-    archive="/tmp/sb-core-1.13.15/sing-box.tar.gz"
+    archive="/tmp/sb-core-1.13.16/sing-box.tar.gz"
     "$APP_DIR/../file.sh" sb --source-dir "$APP_DIR" --endpoint node.example.com --yes >/dev/null
     assert "root installer creates manager command" test -L "$root/bin/sb"
     assert "root installer creates systemd unit" test -f "$root/systemd/sb-core.service"
@@ -1429,7 +1429,7 @@ test_root_installer_and_core_archive() {
     export SB_CORE_ARCHIVE="$archive"
     sb core install >/dev/null
     assert "pinned archive installs expected core" test \
-      "$("$SB_BIN" version | awk 'NR==1{print $3}')" = "1.13.15"
+      "$("$SB_BIN" version | awk 'NR==1{print $3}')" = "1.13.16"
     rm -f "$SB_BIN"
     if SB_CORE_SHA256_OVERRIDE="$(printf '0%.0s' {1..64})" sb core install >/dev/null 2>&1; then
         fail "core checksum mismatch rejected"
@@ -1447,7 +1447,7 @@ test_core_upgrade_flow() {
     cp "$REAL_CORE" "$root/bin/sing-box"
     chmod 755 "$root/bin/sing-box"
     export SB_BIN="$root/bin/sing-box"
-    export SB_CORE_ARCHIVE="/tmp/sb-core-1.13.15/sing-box.tar.gz"
+    export SB_CORE_ARCHIVE="/tmp/sb-core-1.13.16/sing-box.tar.gz"
     init_env
     sb add SS --port 25001 --yes >/dev/null
     before=$(sha256sum "$SB_BIN" | awk '{print $1}')
@@ -1801,7 +1801,7 @@ test_core_digest_adversarial() {
     root="$TEST_ROOT"
     init_env
     printf '%s\n' '#!/usr/bin/env bash' \
-      'if [[ "${1:-}" == version ]]; then echo "sing-box version 1.13.15"; else exit 0; fi' \
+      'if [[ "${1:-}" == version ]]; then echo "sing-box version 1.13.16"; else exit 0; fi' \
       >"$root/bin/sing-box"
     chmod 755 "$root/bin/sing-box"
     if sb doctor --json >/dev/null 2>&1; then
@@ -1813,11 +1813,11 @@ test_core_digest_adversarial() {
     sb add SS --port 26701 --yes >/dev/null 2>&1 || rc=$?
     assert "ordinary node operation rejects an untrusted core" test "$rc" -ne 0
     assert "ordinary node operation never replaces the core" rg -q \
-      'sing-box version 1.13.15' "$root/bin/sing-box"
+      'sing-box version 1.13.16' "$root/bin/sing-box"
     sb core install >/dev/null
     assert "same-version forged core is repaired" test \
       "$(sha256sum "$root/bin/sing-box" | awk '{print $1}')" = \
-      "$(jq -r '.versions["1.13.15"]["linux-amd64"].binary_sha256' "$APP_DIR/checksums.json")"
+      "$(jq -r '.versions["1.13.16"]["linux-amd64"].binary_sha256' "$APP_DIR/checksums.json")"
 
     chmod 600 "$root/bin/sing-box"
     if sb doctor --json >/dev/null 2>&1; then
@@ -1830,7 +1830,7 @@ test_core_digest_adversarial() {
     bad_app=$(mktemp -d)
     TEST_ROOTS+=("$bad_app")
     cp -a "$APP_DIR/." "$bad_app/"
-    jq '.versions["1.13.15"]["linux-amd64"].sha256="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"' \
+    jq '.versions["1.13.16"]["linux-amd64"].sha256="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"' \
       "$bad_app/checksums.json" >"$bad_app/checksums.new"
     mv "$bad_app/checksums.new" "$bad_app/checksums.json"
     rc=0

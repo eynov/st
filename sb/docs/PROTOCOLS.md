@@ -1,6 +1,6 @@
 # 协议与客户端矩阵
 
-本矩阵以固定 sing-box `1.13.15` 的实际 `sing-box check` 和隔离参数矩阵测试为准。
+本矩阵以固定 sing-box `1.13.16` 的实际 `sing-box check` 和隔离参数矩阵测试为准。
 “禁用”表示项目不会生成看似可用但未经验证的配置。
 
 | 协议 | 服务端 | URI | Surge | Mihomo/Clash | sing-box outbound | 端口 |
