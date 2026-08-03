@@ -5,8 +5,13 @@ SB_RELEASES_DIR="${SB_RELEASES_DIR:-${SB_INSTALL_ROOT}/releases}"
 SB_APP_LINK="${SB_APP_LINK:-${SB_INSTALL_ROOT}/app}"
 SB_COMMAND_LINK="${SB_COMMAND_LINK:-/usr/local/bin/sb}"
 
+manager_source_core_version() {
+    jq -er '.sing_box_version | select(type == "string" and length > 0)' \
+      "$1/version.json"
+}
+
 manager_validate_source() {
-    local source="$1" file source_version
+    local source="$1" file source_version source_core_version
     [[ -x "$source/sb" && -f "$source/version.json" && -f "$source/checksums.json" ]] || {
         err "invalid sb source directory: $source"
         return 1
@@ -21,6 +26,19 @@ manager_validate_source() {
     }
     grep -Fqx "SB_PROJECT_VERSION=\"${source_version}\"" "$source/core/common.sh" || {
         err "source version metadata does not match core/common.sh"
+        return 1
+    }
+    source_core_version=$(manager_source_core_version "$source") || {
+        err "source sing-box version metadata is missing"
+        return 1
+    }
+    grep -Fqx "SB_CORE_VERSION=\"${source_core_version}\"" "$source/core/common.sh" || {
+        err "source sing-box version metadata does not match core/common.sh"
+        return 1
+    }
+    jq -e --arg version "$source_core_version" \
+      '.versions[$version] | type == "object"' "$source/checksums.json" >/dev/null || {
+        err "source checksums do not contain the declared sing-box version"
         return 1
     }
     local checksums_hash declared_hash

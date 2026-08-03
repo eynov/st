@@ -12,6 +12,24 @@
 
 ## 灰度
 
+已有安装跨核心 pin 升级时，先确认 reviewed checkout 的 commit，再执行：
+
+```bash
+sb validate
+sb doctor
+sb backup
+env -u SB_APP_DIR /path/to/reviewed/sb/sb upgrade \
+  --source /path/to/reviewed/sb --upgrade-core --yes
+sb version
+sb validate
+sb doctor
+```
+
+首个不支持该标志的旧 manager 必须由 reviewed source 的 `sb` 启动迁移；不要再次调用旧
+`/usr/local/bin/sb`，也不要先从新源码单独运行核心升级。未带 `--upgrade-core` 的跨 pin
+manager upgrade 必须在任何修改前以 `64` 拒绝；组合升级失败必须自动恢复旧 manager、旧
+核心/receipt、unit 与数据。
+
 1. 先执行 `file.sh sb ...`，不添加新节点。
 2. 确认 `sb-core` enabled；无节点时必须 stopped。
 3. 执行 `sb validate`、`sb doctor --json`。
@@ -32,10 +50,10 @@ sb validate
 sb doctor
 ```
 
-若新管理器本身不可用，恢复 `/opt/sb/app` 到旧 release，并恢复备份 unit 后执行
-daemon-reload；若核心升级失败，恢复备份 sing-box 二进制。最后复核 state、config、
-client output 哈希、active 与监听。防火墙变更不属于项目自动回滚范围，必须按灰度前
-记录由使用者单独恢复。
+组合升级的自动回滚会恢复 `/opt/sb/app`、旧 sing-box binary/receipt、备份 unit 与数据。
+只有命令返回 `70` 时才进入人工恢复：严格按错误输出指名的 pre-manager backup 和暂存路径
+恢复，不要继续重试或清理材料。最后复核 state、config、client output 哈希、active 与监听。
+防火墙变更不属于项目自动回滚范围，必须按灰度前记录由使用者单独恢复。
 
 ## 验收标准
 

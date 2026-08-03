@@ -25,15 +25,17 @@ SB_TEST_SSURL_BIN=/path/to/shadowsocks-rust-v1.24.0/ssurl \
   sb/tests/run.sh
 ```
 
-`sb/tests/run.sh` 当前注册 30 个测试函数。VLESS 三模式新增专项入口
+`sb/tests/run.sh` 当前注册 50 个测试函数。VLESS 三模式新增专项入口
 `test_vless_three_mode_contract`，覆盖 add/edit/enable/disable/delete、非法组合、旧 state
 兼容、backup/restore、state export/import、manager upgrade、URI、Mihomo，以及固定核心对
-服务端和客户端配置的真实 check。
+服务端和客户端配置的真实 check。`test_cross_pin_upgrade_bootstrap` 与
+`test_cross_pin_upgrade_rollback` 覆盖核心 pin 变化时的无修改拒绝、显式组合升级、完整回滚及
+rc=70 恢复材料保留。
 
 当前套件的执行结果为：
 
 ```text
-RESULT: pass=652 fail=0
+RESULT: pass=689 fail=0
 skip=0
 xfail=0
 ```

@@ -734,6 +734,54 @@ upgrade_restore_unit() {
     "$SB_SYSTEMCTL" daemon-reload || return 1
 }
 
+# Restore the exact core binary and receipt captured before a combined
+# manager/core upgrade.  This runs before the old manager restores data, so
+# every config check during rollback uses the version that old manager pins.
+upgrade_restore_core() {
+    local backup_dir="$1" stage receipt_stage target
+    [[ -x "$backup_dir/sing-box" ]] || {
+        err "pre-upgrade backup is missing the previous sing-box binary"
+        return 1
+    }
+    stage=$(mktemp "$(dirname "$SB_BIN")/.sing-box.manager-rollback.XXXXXX") || return 1
+    if ! cp --preserve=mode,timestamps -- "$backup_dir/sing-box" "$stage"; then
+        rm -f -- "$stage"
+        return 1
+    fi
+    chmod 755 "$stage" || {
+        rm -f -- "$stage"
+        return 1
+    }
+    target="$SB_BIN"
+    if fault_armed upgrade-core-restore; then
+        target="${SB_BIN%/*}/.sb-fault-missing/sing-box"
+    fi
+    if ! mv -fT -- "$stage" "$target"; then
+        err "CRITICAL: the pre-upgrade sing-box binary could not be restored"
+        err "manual recovery: move ${stage} to ${SB_BIN}"
+        err "pre-upgrade backup retained at: ${backup_dir}"
+        return "$SB_EX_UNRECOVERABLE"
+    fi
+
+    if [[ -f "$backup_dir/core.json" ]]; then
+        receipt_stage=$(mktemp "${SB_DATA_DIR}/.core-receipt.manager-rollback.XXXXXX") || return 1
+        if ! cp -- "$backup_dir/core.json" "$receipt_stage" ||
+          ! chmod 600 "$receipt_stage" ||
+          ! mv -fT -- "$receipt_stage" "$SB_CORE_RECEIPT"; then
+            rm -f -- "$receipt_stage"
+            err "CRITICAL: the pre-upgrade core receipt could not be restored"
+            err "manual recovery: copy ${backup_dir}/core.json to ${SB_CORE_RECEIPT}"
+            err "pre-upgrade backup retained at: ${backup_dir}"
+            return "$SB_EX_UNRECOVERABLE"
+        fi
+    elif ! rm -f -- "$SB_CORE_RECEIPT"; then
+        err "CRITICAL: the replacement core receipt could not be removed"
+        err "manual recovery: remove ${SB_CORE_RECEIPT}"
+        err "pre-upgrade backup retained at: ${backup_dir}"
+        return "$SB_EX_UNRECOVERABLE"
+    fi
+}
+
 # Roll a failed upgrade all the way back.
 #
 # Order matters. The application link and unit are restored first so that the
@@ -743,6 +791,7 @@ upgrade_restore_unit() {
 # data a newer schema had already migrated.
 upgrade_rollback() {
     local backup_dir="$1" previous_app_link="$2" new_release="$3" reason="$4"
+    local restore_core="${5:-false}"
     local backup_id failed=false
     err "$reason"
 
@@ -754,6 +803,10 @@ upgrade_rollback() {
             err "pre-upgrade backup retained at: ${backup_dir}"
             return "$SB_EX_UNRECOVERABLE"
         fi
+    fi
+    if [[ "$restore_core" == "true" ]] && ! upgrade_restore_core "$backup_dir"; then
+        err "CRITICAL: the sing-box core could not be restored from ${backup_dir}"
+        return "$SB_EX_UNRECOVERABLE"
     fi
     upgrade_restore_unit "$backup_dir" || {
         err "CRITICAL: the systemd unit could not be restored from ${backup_dir}"
@@ -779,23 +832,79 @@ upgrade_rollback() {
     fi
 
     [[ -z "$new_release" ]] || rm -rf -- "$new_release"
-    err "manager upgrade rolled back; application, unit and data restored"
+    if [[ "$restore_core" == "true" ]]; then
+        err "manager upgrade rolled back; application, core, unit and data restored"
+    else
+        err "manager upgrade rolled back; application, unit and data restored"
+    fi
     return 1
 }
 
 cmd_upgrade() {
-    [[ "${1:-}" == "--source" && -n "${2:-}" ]] || {
-        err "usage: sb upgrade --source DIR"
+    local source_arg="" upgrade_core=false
+    while (($#)); do
+        case "$1" in
+            --source)
+                [[ $# -ge 2 && -n "$2" ]] || {
+                    err "usage: sb upgrade --source DIR [--upgrade-core]"
+                    return 64
+                }
+                source_arg="$2"
+                shift 2
+                ;;
+            --upgrade-core)
+                upgrade_core=true
+                shift
+                ;;
+            *)
+                err "usage: sb upgrade --source DIR [--upgrade-core]"
+                return 64
+                ;;
+        esac
+    done
+    [[ -n "$source_arg" ]] || {
+        err "usage: sb upgrade --source DIR [--upgrade-core]"
         return 64
     }
-    confirm "Upgrade the sb manager application" || return 1
-    local source_dir previous_app_link="" upgrade_backup new_release="" rc
-    source_dir=$(cd "$2" && pwd) || return 1
-    [[ -L "$SB_APP_LINK" ]] && previous_app_link=$(readlink "$SB_APP_LINK")
+    local source_dir source_core_version installed_app_dir installed_core_version
+    local previous_app_link="" upgrade_backup new_release="" rc
+    source_dir=$(cd "$source_arg" && pwd) || return 1
+    manager_validate_source "$source_dir" || return 1
+    source_core_version=$(manager_source_core_version "$source_dir") || return 1
+    [[ -L "$SB_APP_LINK" ]] || {
+        err "the installed manager link is unavailable: ${SB_APP_LINK}"
+        return 1
+    }
+    previous_app_link=$(readlink "$SB_APP_LINK") || return 1
+    installed_app_dir=$(readlink -f "$SB_APP_LINK") || return 1
+    installed_core_version=$(manager_source_core_version "$installed_app_dir") || {
+        err "the installed manager core pin is unavailable"
+        return 1
+    }
+    if [[ "$source_core_version" != "$installed_core_version" && "$upgrade_core" != "true" ]]; then
+        err "source changes the sing-box core pin: ${installed_core_version} -> ${source_core_version}"
+        err "rerun with '--upgrade-core' to authorize an atomic manager/core upgrade"
+        return 64
+    fi
+    if [[ "$upgrade_core" == "true" ]]; then
+        if ! env -u SB_APP_DIR SB_JSON=false "$SB_APP_LINK/sb" validate >/dev/null; then
+            err "the installed manager and its pinned core must validate before a combined upgrade"
+            return 1
+        fi
+        confirm "Upgrade the sb manager and pinned sing-box core" || return 1
+    else
+        confirm "Upgrade the sb manager application" || return 1
+    fi
 
-    # Stage 1 - data backup. Nothing has been modified yet, so a failure here
-    # needs no rollback.
-    upgrade_backup=$(backup_create "pre-manager-upgrade" true true) || return 1
+    # Stage 1 - the installed manager creates the backup with the schema and
+    # core pin it currently owns. This also makes direct execution from a newer
+    # reviewed source a safe bootstrap entrypoint. Nothing has been modified
+    # yet, so a failure here needs no rollback.
+    upgrade_backup=$(env -u SB_APP_DIR SB_JSON=false "$SB_APP_LINK/sb" backup) || return 1
+    [[ "$upgrade_backup" == "$SB_BACKUP_DIR"/* && -d "$upgrade_backup" ]] || {
+        err "the installed manager returned an invalid upgrade backup path"
+        return 1
+    }
     info "upgrade backup: $upgrade_backup"
 
     # Stage 2 - application switch. manager_install_source restores the previous
@@ -804,15 +913,26 @@ cmd_upgrade() {
     manager_install_source "$source_dir" || return $?
     new_release="${SB_MANAGER_INSTALLED_RELEASE:-}"
 
-    # Stage 3 - the new manager runs install, which may migrate schemas, rebuild
+    # Stage 3 - an explicitly authorized core-pin transition is performed by
+    # the new manager while the pre-manager backup still protects the old app,
+    # core, receipt, unit and data as one rollback boundary.
+    if [[ "$upgrade_core" == "true" ]] &&
+      ! env -u SB_APP_DIR SB_JSON=false "$SB_APP_LINK/sb" core upgrade --yes; then
+        upgrade_rollback "$upgrade_backup" "$previous_app_link" "$new_release" \
+          "combined manager/core upgrade failed after the application switch" true
+        rc=$?
+        return "$rc"
+    fi
+
+    # Stage 4 - the new manager runs install, which may migrate schemas, rebuild
     # generations and migrate certificates. Every failure from this point on has
-    # to assume live data was already modified.
+    # to assume live data and, for a combined upgrade, the core were modified.
     if env -u SB_APP_DIR "$SB_APP_LINK/sb" install --yes; then
         ok "sb manager upgraded: $new_release"
         return 0
     fi
     upgrade_rollback "$upgrade_backup" "$previous_app_link" "$new_release" \
-      "manager upgrade verification failed after the application switch"
+      "manager upgrade verification failed after the application switch" "$upgrade_core"
     rc=$?
     return "$rc"
 }
@@ -924,7 +1044,7 @@ Global options: --json --yes --dry-run --show-secrets
 
 Commands:
   sb install [--endpoint HOST] [--listen-mode dual|ipv4|ipv6]
-  sb upgrade --source DIR
+  sb upgrade --source DIR [--upgrade-core]
   sb core install|upgrade
   sb endpoint set HOST | detect | show
   sb listen set dual|ipv4|ipv6 | show

@@ -22,11 +22,30 @@
 
 ```bash
 sb upgrade --source /path/to/reviewed/sb --yes
+
+# 当 reviewed source 改变 sing-box pin 时
+sb upgrade --source /path/to/reviewed/sb --upgrade-core --yes
+
+# 首次迁移：已安装的旧 manager 还不认识 --upgrade-core
+env -u SB_APP_DIR /path/to/reviewed/sb/sb upgrade \
+  --source /path/to/reviewed/sb --upgrade-core --yes
 ```
 
 升级前备份 app、state、cert、output、unit 与核心。新源码先执行 Bash 语法、版本
 元数据与来源校验，复制进 staging 目录后**再校验一次**，才原子发布为新 release；
 随后原子切换 app 链接，由新版本执行 self-check 与完整 install 验收。
+
+manager 在任何备份或链接切换之前读取当前 pin 与 source pin。二者不同时，未带
+`--upgrade-core` 的命令以 `64` 拒绝并给出精确迁移命令。显式授权后，升级共用一个全局锁和
+一份 pre-manager 备份：先切换新 manager，再由新 manager 安装并验证其固定核心，最后执行
+install。app、旧核心与 receipt、unit、settings/state/generation/certs/output 属于同一个
+rollback 边界。
+
+首个引入该能力的生产升级必须使用上面的 reviewed-source 入口。它加载新升级逻辑，但从
+`/opt/sb/app` 读取实际已安装 manager 的 pin，并让**旧 manager**在同一继承锁内创建备份，
+因此备份校验仍使用旧 schema 与旧核心。直接调用不支持该标志的旧 `/usr/local/bin/sb` 仍会
+走旧流程，无法解决 bootstrap；不要用它完成这一次迁移。迁移完成后的 manager 已支持普通
+`sb upgrade ... --upgrade-core`。
 
 该契约现已实现，具体行为如下：
 
@@ -37,6 +56,8 @@ sb upgrade --source /path/to/reviewed/sb --yes
 - 链接切换失败时上一个 release 保持生效，失败的 release 被删除；
 - self-check、命令目录创建或 CLI 链接失败都会调用 `manager_rollback_app()` 回滚，
   **并原样传播其返回码**——包括表示不可自动恢复的 `70`，该值不会被压平成 1。
+- 组合升级在 core 或 install 验收失败时，先恢复旧 app 和旧核心/receipt，再恢复 unit 与
+  数据，并由旧 manager 重跑 `validate`、`doctor`；回滚本身失败仍返回 `70` 并保留恢复材料。
 
 升级流程不会整体删除 `/opt/sb`。unit 重载与 MainPID/cgroup 归属已在真实主机上验证，
 零节点状态下的升级不会启动服务。
@@ -49,6 +70,11 @@ sb upgrade --source /path/to/reviewed/sb --yes
 sb core install
 sb core upgrade
 ```
+
+这两个命令始终使用**当前已安装 manager** 的固定 pin，既不查询上游 `latest`，也不能解决
+“源码 manager pin 已更新、已安装 manager pin 尚未更新”的 bootstrap。首次跨 pin 迁移必须
+使用 `sb upgrade --source DIR --upgrade-core`；不支持先从新源码手工升级核心再尝试 manager
+升级，因为后一阶段失败时旧 manager 无法对新核心提供完整回滚保证。
 
 项目固定 `1.13.15`：
 
@@ -128,10 +154,12 @@ salvage 模式不能从环境变量启用。
 
 ## 升级失败与数据回滚
 
-`sb upgrade --source DIR` 分为三个阶段：数据备份、应用切换、由新 manager 执行 `install`。
-第三阶段之后的任何失败都必须假设 live 数据已被修改，此时会**先**恢复 app 链接与 systemd
-unit，**再**由恢复后的旧 manager 用升级前备份恢复 settings、state、generation、证书与
-输出，最后用旧 manager 重新 `validate` 和 `doctor`。
+普通同 pin 的 `sb upgrade --source DIR` 分为三个阶段：数据备份、应用切换、由新 manager
+执行 `install`。跨 pin 的 `sb upgrade --source DIR --upgrade-core` 在应用切换和 install
+之间增加核心切换阶段。新 app 切换之后的任何失败都必须假设 live 状态已被修改，此时会
+**先**恢复 app 链接；组合升级再恢复旧核心与 receipt；随后恢复 systemd unit，**再**由
+恢复后的旧 manager 用升级前备份恢复 settings、state、generation、证书与输出，最后用旧
+manager 重新 `validate` 和 `doctor`。
 
 顺序是有意的：反过来会让旧 manager 读到新 schema，或让新 manager 读到半恢复的数据。
 

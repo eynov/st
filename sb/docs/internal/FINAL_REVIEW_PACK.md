@@ -5,6 +5,16 @@
 > 核心、Hysteria v2.10.0 和 shadowsocks-rust ssurl v1.24.0 的完整隔离套件结果为
 > `652 pass / 0 fail`。本补充未连接或部署生产 VPS；下文 `1.13.14` 与旧 pass 数均为
 > 2026-07-25 当轮的历史证据，不应改写。
+>
+> 2026-08-03 bootstrap 补充：修复 `1.13.14 → 1.13.15` 首次生产迁移的 manager/core
+> 互锁。`sb upgrade --source DIR --upgrade-core` 现在用一个锁和一份升级前备份完成组合迁移；
+> 未带该标志的跨 pin 升级在修改前返回 `64`。失败回滚覆盖旧 app、core binary/receipt、unit
+> 与数据，恢复失败仍为 fail-closed `70` 并保留材料。专项测试为 `37 pass / 0 fail`；完整
+> 50 函数隔离套件为 `689 pass / 0 fail`。本补充同样未连接或部署生产 VPS。
+> 首次部署的 canonical 入口是
+> `env -u SB_APP_DIR /root/st/sb/sb upgrade --source /root/st/sb --upgrade-core --yes`：旧 manager
+> 本身不认识新增 flag，因此由 reviewed source 加载新事务逻辑，再读取 installed pin 并调用旧
+> manager 创建升级前备份。后续已安装版本才可直接使用 `/usr/local/bin/sb`。
 
 日期：2026-07-25
 范围：Gitea `S/st` 仓库的 `sb` 项目

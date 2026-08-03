@@ -274,11 +274,128 @@ test_migration_failure_cleanup_and_retry() {
     done
 }
 
+# Build a self-contained previous-pin manager/core fixture.  The fake 1.13.14
+# binary reports the previous version while delegating all real config checks
+# to the current, independently verified test core.  Its archive and manifest
+# are still digest-pinned, so the production download/receipt path is exercised
+# without adding a second binary dependency to the repository.
+make_previous_pin_source() {
+    local destination="$1" archive="$2" payload binary archive_sha binary_sha checksums_sha
+    cp -a "$APP_DIR/." "$destination/" || return 1
+    payload=$(mktemp -d "$TEST_ROOT/previous-core-payload.XXXXXX") || return 1
+    binary="$payload/sing-box-1.13.14-linux-amd64/sing-box"
+    mkdir -p "$(dirname "$binary")" || return 1
+    printf '%s\n' \
+      '#!/usr/bin/env bash' \
+      'if [[ "${1:-}" == version ]]; then' \
+      '  printf "sing-box version 1.13.14\\n"' \
+      'else' \
+      "  exec \"$REAL_CORE\" \"\$@\"" \
+      'fi' >"$binary" || return 1
+    chmod 755 "$binary" || return 1
+    tar -czf "$archive" -C "$payload" sing-box-1.13.14-linux-amd64 || return 1
+    archive_sha=$(sha256sum "$archive" | awk '{print $1}') || return 1
+    binary_sha=$(sha256sum "$binary" | awk '{print $1}') || return 1
+    jq -n --arg archive_sha "$archive_sha" --arg binary_sha "$binary_sha" '{
+      schema_version:1,
+      source:"https://api.github.com/repos/SagerNet/sing-box/releases/tags/v1.13.14",
+      versions:{"1.13.14":{"linux-amd64":{
+        url:"https://github.com/SagerNet/sing-box/releases/download/v1.13.14/sing-box-1.13.14-linux-amd64.tar.gz",
+        sha256:$archive_sha,binary_sha256:$binary_sha
+      }}}
+    }' >"$destination/checksums.json" || return 1
+    jq '.sing_box_version="1.13.14"' "$destination/version.json" \
+      >"$destination/version.json.new" || return 1
+    mv -f "$destination/version.json.new" "$destination/version.json" || return 1
+    sed -i 's/^SB_CORE_VERSION=.*/SB_CORE_VERSION="1.13.14"/' \
+      "$destination/core/common.sh" || return 1
+    checksums_sha=$(sha256sum "$destination/checksums.json" | awk '{print $1}') || return 1
+    sed -i "s/^SB_CHECKSUMS_SHA256=.*/SB_CHECKSUMS_SHA256=\"${checksums_sha}\"/" \
+      "$destination/core/common.sh" || return 1
+}
+
+setup_previous_pin_install() {
+    local old_source old_archive
+    new_env
+    old_source="$TEST_ROOT/old-source"
+    old_archive="$TEST_ROOT/sing-box-1.13.14.tar.gz"
+    mkdir -p "$old_source" || return 1
+    make_previous_pin_source "$old_source" "$old_archive" || return 1
+    SB_APP_DIR="$old_source" SB_CORE_ARCHIVE="$old_archive" \
+      "$old_source/sb" install --endpoint node.example.com --yes >/dev/null || return 1
+    SB_APP_DIR="$old_source" bash -c '
+      source "$SB_APP_DIR/core/common.sh"
+      source "$SB_APP_DIR/core/manager.sh"
+      manager_install_source "$SB_APP_DIR"
+    ' >/dev/null || return 1
+    PREVIOUS_PIN_CORE_SHA=$(sha256sum "$SB_BIN" | awk '{print $1}') || return 1
+    PREVIOUS_PIN_APP=$(readlink "$SB_APP_LINK") || return 1
+}
+
+test_cross_pin_upgrade_bootstrap() {
+    local root before_state before_releases invalid_source out rc
+    setup_previous_pin_install
+    root="$TEST_ROOT"
+    env -u SB_APP_DIR "$SB_APP_LINK/sb" add SS --port 18901 --yes >/dev/null
+    before_state=$(sha256sum "$root/data/current/instances.json" | awk '{print $1}')
+    before_releases=$(manager_release_count)
+
+    out=$(env -u SB_APP_DIR "$APP_DIR/sb" upgrade --source "$APP_DIR" --yes 2>&1) &&
+      rc=0 || rc=$?
+    assert "cross-pin manager upgrade without authorization returns EX_USAGE" test "$rc" -eq 64
+    assert "cross-pin refusal names the old and new pins" sh -c \
+      "printf '%s' \"\$1\" | rg -q '1.13.14 -> 1.13.15'" _ "$out"
+    assert "cross-pin refusal gives the explicit bootstrap flag" sh -c \
+      "printf '%s' \"\$1\" | rg -q -- '--upgrade-core'" _ "$out"
+    assert "cross-pin refusal leaves the manager link unchanged" \
+      test "$(readlink "$SB_APP_LINK")" = "$PREVIOUS_PIN_APP"
+    assert "cross-pin refusal leaves the previous core unchanged" \
+      test "$(sha256sum "$SB_BIN" | awk '{print $1}')" = "$PREVIOUS_PIN_CORE_SHA"
+    assert "cross-pin refusal creates no release" \
+      test "$(manager_release_count)" -eq "$before_releases"
+
+    invalid_source="$root/invalid-source"
+    cp -a "$APP_DIR" "$invalid_source"
+    jq '.sing_box_version="9.9.9"' "$invalid_source/version.json" \
+      >"$invalid_source/version.json.new"
+    mv -fT "$invalid_source/version.json.new" "$invalid_source/version.json"
+    out=$(env -u SB_APP_DIR "$APP_DIR/sb" upgrade --source "$invalid_source" \
+      --upgrade-core --yes 2>&1) && rc=0 || rc=$?
+    assert "cross-pin source rejects inconsistent core metadata" test "$rc" -ne 0
+    assert "cross-pin metadata rejection is actionable" sh -c \
+      "printf '%s' \"\$1\" | rg -q 'does not match core/common.sh'" _ "$out"
+    assert "invalid cross-pin source leaves the manager unchanged" \
+      test "$(readlink "$SB_APP_LINK")" = "$PREVIOUS_PIN_APP"
+    assert "invalid cross-pin source leaves the previous core unchanged" \
+      test "$(sha256sum "$SB_BIN" | awk '{print $1}')" = "$PREVIOUS_PIN_CORE_SHA"
+    assert "invalid cross-pin source creates no release" \
+      test "$(manager_release_count)" -eq "$before_releases"
+
+    env -u SB_APP_DIR "$APP_DIR/sb" upgrade --source "$APP_DIR" \
+      --upgrade-core --yes >/dev/null
+    assert "authorized cross-pin upgrade switches the manager" \
+      test "$(readlink "$SB_APP_LINK")" != "$PREVIOUS_PIN_APP"
+    assert "authorized cross-pin upgrade installs the new core version" \
+      test "$("$SB_BIN" version | awk 'NR==1{print $3}')" = "1.13.15"
+    assert "authorized cross-pin upgrade installs the pinned core digest" \
+      test "$(sha256sum "$SB_BIN" | awk '{print $1}')" = \
+      "$(jq -r '.versions["1.13.15"]["linux-amd64"].binary_sha256' "$APP_DIR/checksums.json")"
+    assert "authorized cross-pin upgrade writes the new receipt" \
+      jq -e '.version=="1.13.15"' "$root/data/core.json"
+    assert "authorized cross-pin upgrade preserves state" \
+      test "$(sha256sum "$root/data/current/instances.json" | awk '{print $1}')" = "$before_state"
+    assert "authorized cross-pin upgrade validates with the new manager" \
+      env -u SB_APP_DIR "$SB_APP_LINK/sb" validate
+    assert "authorized cross-pin upgrade passes doctor" \
+      env -u SB_APP_DIR "$SB_APP_LINK/sb" doctor --json
+}
+
 test_manager_upgrade_preserves_data() {
     local root before after password uuid cert_hash releases password_hash uuid_hash
     new_env
     root="$TEST_ROOT"
     init_env
+    manager_baseline
     sb add ANYTLS --port 19001 --sni any.example.com --tls-mode self-signed --yes >/dev/null
     sb add VLESS --port 19002 --server-name www.icloud.com --yes >/dev/null
     before=$(sha256sum "$root/data/current/instances.json" | awk '{print $1}')
@@ -306,7 +423,7 @@ test_manager_upgrade_preserves_data() {
     printf 'EVIDENCE upgrade_hashes state_before=%s state_after=%s password_sha256=%s uuid_sha256=%s cert_tree_sha256=%s\n' \
       "$before" "$after" "$password_hash" "$uuid_hash" "$cert_hash"
     releases=$(find "$root/opt/releases" -mindepth 1 -maxdepth 1 -type d | wc -l)
-    assert "manager upgrades use staged releases" test "$releases" -eq 2
+    assert "manager upgrades use staged releases" test "$releases" -eq 3
     assert "manager app is atomic symlink" test -L "$root/opt/app"
 }
 
@@ -636,6 +753,7 @@ test_vless_three_mode_contract() {
     new_env
     root="$TEST_ROOT"
     init_env
+    manager_baseline
 
     sb add VLESS --port 21101 --server-name www.icloud.com --yes >/dev/null
     sb add VLESS --port 21102 --mode reality \
@@ -2144,6 +2262,78 @@ PY
     chmod 755 "$destination/sb"
 }
 
+test_cross_pin_upgrade_rollback() {
+    local root source before_state before_settings before_receipt before_releases out rc
+    setup_previous_pin_install
+    root="$TEST_ROOT"
+    env -u SB_APP_DIR "$SB_APP_LINK/sb" add SS --port 27201 --yes >/dev/null
+    before_state=$(sha256sum "$root/data/current/instances.json" | awk '{print $1}')
+    before_settings=$(sha256sum "$root/data/current/settings.json" | awk '{print $1}')
+    before_receipt=$(sha256sum "$root/data/core.json" | awk '{print $1}')
+    before_releases=$(manager_release_count)
+    source="$root/failing-cross-pin-source"
+    mkdir -p "$source"
+    make_failing_upgrade_source "$source" state
+
+    out=$(env -u SB_APP_DIR "$APP_DIR/sb" upgrade --source "$source" \
+      --upgrade-core --yes 2>&1) && rc=0 || rc=$?
+    assert "failed cross-pin install returns nonzero" test "$rc" -ne 0
+    assert "failed cross-pin install reports the manager rollback" sh -c \
+      "printf '%s' \"\$1\" | rg -q 'manager upgrade rolled back'" _ "$out"
+    assert "failed cross-pin install restores the previous manager" \
+      test "$(readlink "$SB_APP_LINK")" = "$PREVIOUS_PIN_APP"
+    assert "failed cross-pin install restores the previous core binary" \
+      test "$(sha256sum "$SB_BIN" | awk '{print $1}')" = "$PREVIOUS_PIN_CORE_SHA"
+    assert "failed cross-pin install restores the previous core receipt" \
+      test "$(sha256sum "$root/data/core.json" | awk '{print $1}')" = "$before_receipt"
+    assert "failed cross-pin install restores the previous state" \
+      test "$(sha256sum "$root/data/current/instances.json" | awk '{print $1}')" = "$before_state"
+    assert "failed cross-pin install restores the previous settings" \
+      test "$(sha256sum "$root/data/current/settings.json" | awk '{print $1}')" = "$before_settings"
+    assert "failed cross-pin install removes the rejected manager release" \
+      test "$(manager_release_count)" -eq "$before_releases"
+    assert "failed cross-pin install validates with the previous manager/core" \
+      env -u SB_APP_DIR "$SB_APP_LINK/sb" validate
+    assert "failed cross-pin install passes previous manager doctor" \
+      env -u SB_APP_DIR "$SB_APP_LINK/sb" doctor --json
+
+    # A failure inside the new manager's core upgrade is also inside the same
+    # outer rollback boundary.  core_upgrade first restores its local switch;
+    # cmd_upgrade then restores the old app/core/receipt/data snapshot.
+    setup_previous_pin_install
+    out=$(SB_TEST_FAULTS=core-post-switch-verify env -u SB_APP_DIR "$APP_DIR/sb" \
+      upgrade --source "$APP_DIR" --upgrade-core --yes 2>&1) && rc=0 || rc=$?
+    assert "failed bootstrap core switch returns nonzero" test "$rc" -ne 0
+    assert "failed bootstrap core switch restores the previous manager" \
+      test "$(readlink "$SB_APP_LINK")" = "$PREVIOUS_PIN_APP"
+    assert "failed bootstrap core switch restores the previous core" \
+      test "$(sha256sum "$SB_BIN" | awk '{print $1}')" = "$PREVIOUS_PIN_CORE_SHA"
+    assert "failed bootstrap core switch validates after rollback" \
+      env -u SB_APP_DIR "$SB_APP_LINK/sb" validate
+
+    # If restoring the old core itself fails, the command must stop with rc=70,
+    # retain both the pre-upgrade backup and staged old binary, and print the
+    # exact manual recovery path instead of attempting a data restore under a
+    # mismatched manager/core pair.
+    setup_previous_pin_install
+    root="$TEST_ROOT"
+    source="$root/failing-cross-pin-source"
+    mkdir -p "$source"
+    make_failing_upgrade_source "$source" state
+    out=$(SB_TEST_FAULTS=upgrade-core-restore env -u SB_APP_DIR "$APP_DIR/sb" \
+      upgrade --source "$source" --upgrade-core --yes 2>&1) && rc=0 || rc=$?
+    assert "cross-pin core rollback failure is unrecoverable" test "$rc" -eq 70
+    assert "cross-pin core rollback failure prints manual recovery" sh -c \
+      "printf '%s' \"\$1\" | rg -q 'manual recovery: move .*sing-box.manager-rollback'" _ "$out"
+    local artifact
+    artifact=$(rg -o '/[^ ]*\.sing-box\.manager-rollback\.[A-Za-z0-9]+' <<<"$out" | head -1)
+    assert "cross-pin core rollback retains the staged previous binary" test -f "$artifact"
+    assert "cross-pin core rollback retains the pre-upgrade backup" sh -c \
+      "printf '%s' \"\$1\" | rg -q 'pre-upgrade backup retained at:'" _ "$out"
+    assert "cross-pin core rollback prints no upgrade success" sh -c \
+      "! printf '%s' \"\$1\" | rg -q 'sb manager upgraded'" _ "$out"
+}
+
 test_upgrade_data_rollback() {
     local root mutation source rc
     for mutation in state settings generation certs; do
@@ -2491,6 +2681,7 @@ TESTS=(
     test_conflicts_and_check_failure
     test_legacy_migration
     test_migration_failure_cleanup_and_retry
+    test_cross_pin_upgrade_bootstrap
     test_manager_upgrade_preserves_data
     test_hy2_hopping_matrix
     test_root_routing_and_no_implicit_yes
@@ -2524,6 +2715,7 @@ TESTS=(
     test_transaction_fault_across_operations
     test_manager_app_switch_fault_injection
     test_command_link_conflicts
+    test_cross_pin_upgrade_rollback
     test_upgrade_data_rollback
     test_listener_expected_observed_divergence
     test_endpoint_special_purpose_matrix

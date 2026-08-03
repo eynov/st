@@ -17,4 +17,7 @@ schema 和行为在未测试时漂移。
 ## 后果
 
 核心升级必须是显式命令。更新固定版本时需要独立核对官方 release 摘要、更新项目
-metadata，并重新运行全部协议矩阵和迁移/rollback 测试。
+metadata，并重新运行全部协议矩阵和迁移/rollback 测试。已安装 manager 的
+`sb core upgrade` 只安装该 manager 的固定 pin；source 改变 pin 时，必须显式使用
+`sb upgrade --source DIR --upgrade-core`，让新 manager 与新核心在一个可回滚事务中迁移。
+不自动查询 upstream latest，也不允许普通 manager upgrade 隐式改变核心。

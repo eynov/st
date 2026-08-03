@@ -61,7 +61,7 @@ nftables/iptables 示例，绝不默认执行防火墙命令。
 
 ```text
 sb install
-sb upgrade --source DIR
+sb upgrade --source DIR [--upgrade-core]
 sb core install
 sb core upgrade
 sb endpoint set HOST
@@ -138,12 +138,31 @@ sb state import state.json
 管理器升级使用显式来源，不从未固定的 `latest` 隐式更新：
 
 ```bash
+# 仅升级 manager，来源的核心 pin 必须与当前 manager 相同
 sb upgrade --source /path/to/reviewed/sb
-sb core upgrade
+
+# 来源改变了核心 pin 时，在一个回滚边界内升级 manager 与核心
+sb upgrade --source /path/to/reviewed/sb --upgrade-core
+
+# 旧 manager 尚不认识 --upgrade-core 时，从 reviewed source 启动同一事务
+env -u SB_APP_DIR /path/to/reviewed/sb/sb upgrade \
+  --source /path/to/reviewed/sb --upgrade-core
 ```
 
-核心升级与管理器升级分离。执行任何升级前先运行 `sb validate`、`sb doctor` 和
-`sb backup`。数据恢复入口为：
+来源的核心 pin 与当前 manager 不同时，普通 `sb upgrade` 会在备份或链接切换前以退出码
+`64` 拒绝，并提示显式使用 `--upgrade-core`。该选项是版本迁移授权：新 manager 切换后立即
+安装其固定核心，再执行完整 install 验收；任一步失败都会把旧 manager、旧核心与 receipt、
+unit 和数据作为一个整体恢复。不要先用新源码手工替换核心，否则 manager 安装失败时无法
+保证跨版本整体回滚。
+
+首次从不支持 `--upgrade-core` 的旧 manager 迁移时，必须直接执行 reviewed source 中的
+`sb`（如上第三条命令），而不是再次调用旧的 `/usr/local/bin/sb`。新入口会读取已安装
+manager 的 pin，由旧 manager 创建升级前备份，然后才切换新 manager。完成这次迁移后，
+后续版本可直接使用已安装的 `sb upgrade ... --upgrade-core`。
+
+`sb core upgrade` 仍是已安装 manager 对其自身固定版本执行的显式核心修复/重装命令，不会
+查询上游 `latest`，也不是首次跨 pin 升级的 bootstrap 步骤。执行任何升级前先运行
+`sb validate`、`sb doctor` 和 `sb backup`。数据恢复入口为：
 
 ```bash
 sb backup
@@ -153,10 +172,10 @@ sb restore <backup-id>
 `sb restore` 恢复 settings、state、generation 和证书数据；app、systemd unit 与
 sing-box 核心不属于数据恢复范围。
 
-`sb upgrade` 在应用切换之后失败时，会先恢复 app 链接与 systemd unit，再由恢复后的旧
-manager 用升级前备份完整恢复 settings、state、generation、证书与输出，并重新校验。若
-恢复本身失败，命令以退出码 `70` 报告不可自动恢复，并保留全部恢复材料。完整语义与
-rollback 边界见 [运维文档](docs/OPERATIONS.md)。
+`sb upgrade` 在应用切换之后失败时，会先恢复 app 链接；组合升级还会恢复旧核心与 receipt；
+随后恢复 systemd unit，再由旧 manager 用升级前备份完整恢复 settings、state、generation、
+证书与输出，并重新校验。若恢复本身失败，命令以退出码 `70` 报告不可自动恢复，并保留全部
+恢复材料。完整语义与 rollback 边界见 [运维文档](docs/OPERATIONS.md)。
 
 ## TLS
 

@@ -90,7 +90,9 @@ flock
 `last_publish` 检查用于发现 current、state 与运行服务之间的漂移。
 
 同样的原则适用于管理器自身：`manager_install_source` 的 release 发布、app 链接切换、
-CLI 链接创建全部显式检查，回滚失败同样返回 70 并保留被拒 release。
+CLI 链接创建全部显式检查，回滚失败同样返回 70 并保留被拒 release。source 改变核心 pin
+时，只有显式 `--upgrade-core` 才会进入组合事务；旧 app、核心 binary/receipt、unit 与数据
+由同一份 pre-manager 备份保护，并按“app → core → unit → data”的顺序回滚。
 
 ## 无节点行为
 

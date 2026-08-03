@@ -41,6 +41,21 @@ MainPID 的 fork-before-exec 窗口已由 `service_wait_ownership()` 的有界�
 固定 executable 与 cgroup 两个归属谓词，永久不匹配时仍失败并回滚，不能把 mock 结果表述
 为新的真实 systemd 验收。
 
+同日发现首个 `1.13.14 → 1.13.15` 生产迁移存在 bootstrap deadlock：旧 manager 的
+`sb core upgrade` 只能安装旧 pin，而新 manager 在 install 阶段会拒绝旧核心并回滚。修复后，
+跨 pin 的普通 `sb upgrade` 在任何修改前返回 `64`；显式
+`sb upgrade --source DIR --upgrade-core` 在一个锁和一份 pre-manager 备份内切换新 manager、
+升级固定核心并执行 install，失败时整体恢复旧 app/core receipt/unit/data。专项测试覆盖成功、
+未授权拒绝、source metadata 漂移、core switch 失败、install 失败及恢复失败 rc=70；真实 VPS
+部署仍未在仓库隔离测试中验证。加入这些回归后，完整 50 函数隔离套件为
+`689 pass / 0 fail`。
+
+bootstrap 的首个调用必须来自 reviewed checkout：
+`env -u SB_APP_DIR /root/st/sb/sb upgrade --source /root/st/sb --upgrade-core --yes`。
+原因是此前已安装的 manager 不可能认识后来新增的 flag。新源码入口比较 source pin 与
+`/opt/sb/app/version.json` 中的 installed pin，并调用旧 manager 在继承锁内创建 pre-upgrade
+backup；测试不能只模拟“旧 pin + 新代码”，必须保留这个 source-entrypoint 边界。
+
 ## 真实主机验证
 
 隔离环境的 PID 1 是 `bwrap`，无法连接 systemd system bus，因此涉及真实 systemd、内核
