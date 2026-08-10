@@ -11,7 +11,7 @@
 ## 复现与验证入口
 
 ```bash
-SB_TEST_REAL_CORE=/path/to/sing-box-1.13.16 \
+SB_TEST_REAL_CORE=/path/to/sing-box-1.13.18 \
 SB_TEST_HYSTERIA_BIN=/path/to/hysteria-v2.10.0-linux-amd64 \
 SB_TEST_SSURL_BIN=/path/to/shadowsocks-rust-v1.24.0/ssurl \
   sb/tests/run.sh
@@ -84,6 +84,17 @@ metadata 一致，解压后二进制摘要为 `9069f805…` / `94bfe2fc…`，�
 （`--severity=warning --external-sources`）与 `git diff --check` 均通过。本轮没有连接或
 部署任何生产 VPS，也没有在真实主机上执行 manager/core upgrade；真实部署仍须按生产
 checklist 单独验收。
+
+2026-08-10 将受控核心 pin 从 `1.13.16` 更新到官方 Stable `1.13.18`，继续由仓库外的
+Release Assistant 按语义分类执行；`tests/run.sh` 的 previous-pin fixture 前移到 `1.13.16`，
+跨 pin 断言为 `'1.13.16 -> 1.13.18'`。官方 release `v1.13.18` 为非 draft、非 prerelease，
+发布时间为 `2026-08-09T07:55:08Z`；amd64/arm64 使用 plain 归档，归档摘要
+`d34d987e…` / `a894f615…` 与 release metadata 一致，解压后二进制摘要为
+`8cb29c5b…` / `1a202eda…`。amd64 二进制实际执行并报告 `1.13.18`；arm64 只核对摘要，未在
+arm64 主机执行。发布说明仅列出 NaiveProxy 更新和修复改进，未要求配置迁移；完整隔离套件
+使用真实 `1.13.18` 核心、Hysteria v2.10.0 与 shadowsocks-rust ssurl v1.24.0，结果为
+`766 pass / 0 fail`。本轮没有连接或部署任何生产 VPS；真实升级仍须从 reviewed checkout
+使用下述 bootstrap 入口，并按生产 checklist 单独验收。
 
 bootstrap 的首个调用必须来自 reviewed checkout：
 `env -u SB_APP_DIR /root/st/sb/sb upgrade --source /root/st/sb --upgrade-core --yes`。

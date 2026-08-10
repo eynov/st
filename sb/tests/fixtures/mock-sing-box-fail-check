@@ -3,7 +3,7 @@ set -u
 
 case "${1:-}" in
     version)
-        printf 'sing-box version 1.13.16\n'
+        printf 'sing-box version 1.13.18\n'
         ;;
     check)
         printf 'forced config validation failure\n' >&2
