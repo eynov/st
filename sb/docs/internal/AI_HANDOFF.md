@@ -11,7 +11,7 @@
 ## 复现与验证入口
 
 ```bash
-SB_TEST_REAL_CORE=/path/to/sing-box-1.13.19 \
+SB_TEST_REAL_CORE=/path/to/sing-box-1.13.20 \
 SB_TEST_HYSTERIA_BIN=/path/to/hysteria-v2.10.0-linux-amd64 \
 SB_TEST_SSURL_BIN=/path/to/shadowsocks-rust-v1.24.0/ssurl \
   sb/tests/run.sh

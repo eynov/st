@@ -76,19 +76,19 @@ sb core upgrade
 使用 `sb upgrade --source DIR --upgrade-core`；不支持先从新源码手工升级核心再尝试 manager
 升级，因为后一阶段失败时旧 manager 无法对新核心提供完整回滚保证。
 
-项目固定 `1.13.19`：
+项目固定 `1.13.20`：
 
 | 架构 | 官方归档 SHA256 |
 |---|---|
-| linux-amd64 | `ef88a9e577d474210867bd708933d042e9b70106529df2656182c9db90106aa1` |
-| linux-arm64 | `7fe3597a95a3c5ad67477b1d7653b9ce097e0be7c676758eba1fcf558f353d57` |
+| linux-amd64 | `646bc01bf128c32a12eb50d8690e387bba7504da7b1d65c704bd53916e38595a` |
+| linux-arm64 | `7f8187b1d1d30258cd4fa70892eaa232649f8f28b294078eeac719579e14cf42` |
 
 安装后二进制 SHA256：
 
 | 架构 | 官方归档内 `sing-box` SHA256 |
 |---|---|
-| linux-amd64 | `7e9dcd7239c49478a576d79f272751e5ed1c2aba7cc08ab1b2bd69c00c904ba1` |
-| linux-arm64 | `0bd9f22cd677d7fe70324944b3dfaf967971607ac3f713d1b754248d8b0d702d` |
+| linux-amd64 | `211cd08f6cc6269f3064c35154549740dd810acdb9d89a3dfc9bf82f9792b1b6` |
+| linux-arm64 | `fb5e7ee4a3be3a4e956f05f703a9ffd4b83e14eb577cf9563cf3826324ffd363` |
 
 上述值来自对应官方 Release 归档；`checksums.json` 自身的固定摘要写入
 `core/common.sh`。更新核心时必须从官方 release 获取两种架构归档，分别验证归档
