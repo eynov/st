@@ -1,17 +1,17 @@
 {
   "schema_version": 1,
-  "source": "https://api.github.com/repos/SagerNet/sing-box/releases/tags/v1.13.20",
+  "source": "https://api.github.com/repos/SagerNet/sing-box/releases/tags/v1.13.21",
   "versions": {
-    "1.13.20": {
+    "1.13.21": {
       "linux-amd64": {
-        "url": "https://github.com/SagerNet/sing-box/releases/download/v1.13.20/sing-box-1.13.20-linux-amd64.tar.gz",
-        "sha256": "646bc01bf128c32a12eb50d8690e387bba7504da7b1d65c704bd53916e38595a",
-        "binary_sha256": "211cd08f6cc6269f3064c35154549740dd810acdb9d89a3dfc9bf82f9792b1b6"
+        "url": "https://github.com/SagerNet/sing-box/releases/download/v1.13.21/sing-box-1.13.21-linux-amd64.tar.gz",
+        "sha256": "24f9ef8e7234e13e71e74c3598a4164c5fe07b7b67ccc6e96cf68b54789f72cd",
+        "binary_sha256": "ddf3a5c6f7594b18992c1b374e1694d12fe0e3e37accef7b97c6f987dd7b7479"
       },
       "linux-arm64": {
-        "url": "https://github.com/SagerNet/sing-box/releases/download/v1.13.20/sing-box-1.13.20-linux-arm64.tar.gz",
-        "sha256": "7f8187b1d1d30258cd4fa70892eaa232649f8f28b294078eeac719579e14cf42",
-        "binary_sha256": "fb5e7ee4a3be3a4e956f05f703a9ffd4b83e14eb577cf9563cf3826324ffd363"
+        "url": "https://github.com/SagerNet/sing-box/releases/download/v1.13.21/sing-box-1.13.21-linux-arm64.tar.gz",
+        "sha256": "3e30b876c9a93c19e503e2a2d6249cf05e6a26766553d4b61e1daf48223f304f",
+        "binary_sha256": "d5669c8c7f5ee0b3cbff72a5eb91c552e503b3e6f115b5fb5eface5896b7d317"
       }
     }
   }
