@@ -76,21 +76,12 @@ sb core upgrade
 使用 `sb upgrade --source DIR --upgrade-core`；不支持先从新源码手工升级核心再尝试 manager
 升级，因为后一阶段失败时旧 manager 无法对新核心提供完整回滚保证。
 
-项目固定 `1.14.3`：
+固定版本只记录在三处并互相校验：`core/common.sh` 的 `SB_CORE_VERSION`、
+`version.json` 的 `sing_box_version`、`checksums.json` 的 `versions` 键。
+`checksums.json` 按架构记录官方归档 SHA256（`sha256`）与归档内二进制 SHA256
+（`binary_sha256`），文档不再重复这些值。
 
-| 架构 | 官方归档 SHA256 |
-|---|---|
-| linux-amd64 | `e2bdf179c15a3652955dc44867e33ca0965c9c9b91b34267dcc5a5d639a5feee` |
-| linux-arm64 | `29dae24d76bea3bc62d07dd3e60cfc12003de7debbd6b768df9be9c68360174e` |
-
-安装后二进制 SHA256：
-
-| 架构 | 官方归档内 `sing-box` SHA256 |
-|---|---|
-| linux-amd64 | `768d31fa7f68debc067bb4626539498a1e8751d36a7b99e1a54bee6a23815f93` |
-| linux-arm64 | `299f9f6080d9c43504714ddddae6aa9b853d430ccfc816c456a73613b5455689` |
-
-上述值来自对应官方 Release 归档；`checksums.json` 自身的固定摘要写入
+这些值来自对应官方 Release 归档；`checksums.json` 自身的固定摘要写入
 `core/common.sh`。更新核心时必须从官方 release 获取两种架构归档，分别验证归档
 摘要、精确内部路径、解压后二进制摘要和版本，再更新文件及其固定摘要。
 
