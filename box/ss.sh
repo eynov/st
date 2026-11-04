@@ -158,7 +158,7 @@ PYEOF
   }
 
   local URL LATEST_VERSION
-  URL=$(echo "$LATEST_DATA" | grep browser_download_url | grep x86_64-unknown-linux-gnu.tar.xz | grep -v sha256 | cut -d '"' -f4)
+  URL=$(echo "$LATEST_DATA" | grep browser_download_url | grep x86_64-unknown-linux-musl.tar.xz | grep -v sha256 | cut -d '"' -f4)
   LATEST_VERSION=$(echo "$LATEST_DATA" | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/')
 
   if [ -z "$URL" ]; then
