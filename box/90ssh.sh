@@ -30,11 +30,21 @@
 #   90ssh.sh guard-check --token T --backup DIR
 #   90ssh.sh test                           # isolated self-test (needs no root)
 #
+# v2.1.0 portability options (v2.1 keeps every v2.0 interface):
+#   --service ssh|sshd|auto   unit that owns sshd (auto detects sshd.service on RHEL)
+#   --socket auto|none|NAME   socket unit to drive (auto detects ssh.socket)
+#   --keep-port N             extra port to keep in dual mode (repeatable);
+#                             defaults to every port currently effective, NOT 22
+#   --listen ADDR|all         final-mode listen address (default 0.0.0.0; all = 0.0.0.0 + ::)
+#   --create-include          append Include ... when sshd_config has none (explicit only)
+#   --allow-firewall-pending  proceed although the host firewall has no rule for the new port
+#   --selinux-add             run semanage for the new port when SELinux is enforcing
+#
 # Isolated testing: set PREFIX=/tmp/fake and the script operates on
 # $PREFIX/etc/ssh, never calls systemctl/ss, and validates with `sshd -t -f`.
 set -uo pipefail
 
-VER=2.0.0
+VER=2.1.0
 PREFIX="${PREFIX:-}"
 DRY="${DRY_RUN:-0}"
 NEW_PORT=""
@@ -51,6 +61,17 @@ TOKEN=""
 BACKUP_DIR=""
 REASON="manual"
 SVC="ssh"
+SVC_FORCED=""
+SOCKET_UNIT=""
+SOCKET_FORCED=""
+LISTEN_ADDR="0.0.0.0"
+KEEP_PORTS=""
+CREATE_INCLUDE=0
+FW_PENDING=0
+SELINUX_ADD=0
+KEPT=""
+SELF="$0"
+STATE_DIR="$PREFIX/var/lib/90ssh"
 
 S_DIR="$PREFIX/etc/ssh"
 S_CFG="$S_DIR/sshd_config"
@@ -102,7 +123,92 @@ socket_state() {
     printf '%s' "${st:-none}"
 }
 
-socket_active() { ! fake && svc_active ssh.socket; }
+# v2.1: Debian/Ubuntu ship ssh.service, RHEL-family ships sshd.service.
+detect_units() {
+    [ -n "$SVC_FORCED" ] && SVC="$SVC_FORCED"
+    if [ -z "$SVC_FORCED" ] && ! fake; then
+        svc_active ssh || { svc_active sshd && SVC=sshd; }
+        if ! systemctl cat "$SVC.service" >/dev/null 2>&1; then
+            local s
+            for s in ssh sshd; do
+                systemctl cat "$s.service" >/dev/null 2>&1 && { SVC="$s"; break; }
+            done
+        fi
+    fi
+    SOCKET_UNIT=""
+    case "${SOCKET_FORCED:-auto}" in
+        none) return 0 ;;
+        auto) ;;
+        *)    SOCKET_UNIT="$SOCKET_FORCED"; return 0 ;;
+    esac
+    fake && return 0
+    local s
+    for s in ssh.socket sshd.socket; do
+        systemctl cat "$s" >/dev/null 2>&1 || continue
+        svc_active "$s" && { SOCKET_UNIT="$s"; break; }
+    done
+}
+
+# Active socket listeners.  systemd exposes them as "Listen" (newer) or
+# "ListenStream" (older); both carry "<addr>:<port>".
+sock_ports() {
+    [ -n "$SOCKET_UNIT" ] || return 0
+    systemctl show -p Listen --value "$SOCKET_UNIT" 2>/dev/null | tr ' ' '\n' | sed -n 's/.*:\([0-9][0-9]*\).*/\1/p'
+    systemctl show -p ListenStream --value "$SOCKET_UNIT" 2>/dev/null | tr ' ' '\n' | sed 's/.*://'
+}
+
+socket_active() { fake && { [ -n "${FAKE_SOCKET:-}" ] && return 0; return 1; }; [ -n "$SOCKET_UNIT" ] && svc_active "$SOCKET_UNIT"; }
+
+# Ports that are effective right now (config + active socket), minus the target.
+# This is what dual mode must preserve; v2.0 wrongly assumed it was always 22.
+current_ports() {
+    {
+        if fake; then
+            sshd_dump "" 2>/dev/null | awk '$1=="port"{print $2}'
+            printf '%s\n' ${FAKE_PORTS:-}
+        else
+            sshd_dump "" 2>/dev/null | awk '$1=="port"{print $2}'
+            sock_ports
+        fi
+        printf '%s\n' $KEEP_PORTS
+    } | grep -E '^[0-9]+$' | grep -vx "${NEW_PORT:-0}" | sort -un | tr '\n' ' '
+}
+
+fw_drop_policy() {
+    fake && return 1
+    nft list ruleset 2>/dev/null | grep -qE 'hook input.*policy drop' && return 0
+    iptables -S INPUT 2>/dev/null | grep -qE '^-P INPUT DROP' && return 0
+    command -v firewall-cmd >/dev/null 2>&1 && [ "$(firewall-cmd --state 2>/dev/null)" = running ] && return 0
+    return 1
+}
+
+fw_allows_port() {
+    local p="$1"
+    fake && return 0
+    nft list ruleset 2>/dev/null | grep -qE "(dport|:$p[ ,);]).*accept" && return 0
+    iptables -S INPUT 2>/dev/null | grep -qE "dport $p .*ACCEPT" && return 0
+    command -v firewall-cmd >/dev/null 2>&1 && firewall-cmd --query-port="$p/tcp" 2>/dev/null | grep -qx yes && return 0
+    return 1
+}
+
+selinux_blocked() {
+    local p="$1"
+    fake && return 1
+    command -v getenforce >/dev/null 2>&1 || return 1
+    [ "$(getenforce 2>/dev/null)" = Enforcing ] || return 1
+    command -v semanage >/dev/null 2>&1 || return 0
+    semanage port -l 2>/dev/null | grep -qE "ssh_port_t.*(^|[ ,])$p([ ,]|$)" && return 1
+    return 0
+}
+
+other_socket_dropins() {
+    local f
+    for f in "$SOCK_DIR"/*.conf; do
+        [ -f "$f" ] || continue
+        [ "$(basename "$f")" = zz-90ssh.conf ] && continue
+        grep -qE '^[[:space:]]*ListenStream=' "$f" && printf '%s\n' "$f"
+    done
+}
 
 listening_ports() {
     if fake; then printf '%s' "${FAKE_PORTS:-}"; return; fi
@@ -145,7 +251,7 @@ have_include() {
 }
 
 write_dropin() {
-    local p="$1" mode="$2" target
+    local p="$1" mode="$2" target k
     target="$(managed_path)"
     run install -d -m 0755 "$D_DIR"
     local tmp; tmp="$(mktemp)"
@@ -153,12 +259,17 @@ write_dropin() {
         echo "# Managed by box/90ssh.sh v$VER -- do not edit by hand."
         echo "# Authentication policy is intentionally NOT set here."
         if [ "$mode" = "final" ]; then
-            echo "# mode: final (single port, IPv4 only)"
+            echo "# mode: final (single port, listen: $LISTEN_ADDR)"
             echo "Port $p"
-            echo "ListenAddress 0.0.0.0"
+            if [ "$LISTEN_ADDR" = all ]; then
+                echo "ListenAddress 0.0.0.0"
+                echo "ListenAddress ::"
+            else
+                echo "ListenAddress $LISTEN_ADDR"
+            fi
         else
-            echo "# mode: dual (transition; old port 22 kept until confirmed)"
-            echo "Port 22"
+            echo "# mode: dual (transition; keeps current port(s) until confirmed)"
+            for k in $KEPT; do echo "Port $k"; done
             echo "Port $p"
         fi
     } > "$tmp"
@@ -170,20 +281,34 @@ write_dropin() {
     log "  wrote drop-in: $target"
 }
 
+# One ListenStream line per address/port.  Dual mode keeps both families for
+# every retained port so an IPv6 client is not cut off by the transition.
+socket_streams() {
+    local p="$1" mode="$2" k a
+    if [ "$mode" = final ]; then
+        case "$LISTEN_ADDR" in
+            all)   echo "ListenStream=0.0.0.0:$p"; echo "ListenStream=[::]:$p" ;;
+            *:*)   echo "ListenStream=[$LISTEN_ADDR]:$p" ;;
+            *)     echo "ListenStream=$LISTEN_ADDR:$p" ;;
+        esac
+        return
+    fi
+    for k in $KEPT $p; do
+        echo "ListenStream=0.0.0.0:$k"
+        echo "ListenStream=[::]:$k"
+    done
+}
+
 write_socket_override() {
-    local p="$1" mode="$2"
+    local p="$1" mode="$2" f="$SOCK_DIR/zz-90ssh.conf" tmp
     [ -d "$SOCK_DIR" ] || run install -d -m 0755 "$SOCK_DIR"
-    local f="$SOCK_DIR/90ssh.conf" tmp; tmp="$(mktemp)"
+    run rm -f "$SOCK_DIR/90ssh.conf"
+    tmp="$(mktemp)"
     {
         echo "# Managed by box/90ssh.sh v$VER"
         echo "[Socket]"
         echo "ListenStream="
-        if [ "$mode" = "final" ]; then
-            echo "ListenStream=0.0.0.0:$p"
-        else
-            echo "ListenStream=0.0.0.0:22"
-            echo "ListenStream=0.0.0.0:$p"
-        fi
+        socket_streams "$p" "$mode"
         echo "Accept=no"
     } > "$tmp"
     if [ -f "$f" ] && cmp -s "$tmp" "$f"; then rm -f "$tmp"; log "  socket override unchanged"; return 0; fi
@@ -279,7 +404,11 @@ do_rollback() {
 
     if ! fake; then
         run systemctl daemon-reload
-        if socket_active; then run systemctl restart ssh.socket; else run systemctl reload "$SVC"; fi
+        if socket_active; then
+            run systemctl restart "$SOCKET_UNIT" || run systemctl restart "$SVC"
+        else
+            run systemctl reload "$SVC" || run systemctl restart "$SVC"
+        fi
         sleep 2
         log "  ssh=$(systemctl is-active $SVC) ports=[$(listening_ports)]"
     fi
@@ -321,7 +450,22 @@ do_apply() {
         die "apply: final mode drops port 22 and needs --confirmed (verify the new port from an independent client first)"
     fi
     log "== preflight =="
-    if have_include; then log "  include: present"; else die "apply: $S_CFG has no 'Include /etc/ssh/sshd_config.d/*.conf'"; fi
+    if have_include; then
+        log "  include: present"
+    elif [ "$CREATE_INCLUDE" = 1 ]; then
+        log "  include: absent, appending (--create-include)"
+        run sh -c "printf '\n# Added by box/90ssh.sh\nInclude %s/*.conf\n' '$D_DIR' >> '$S_CFG'"
+    else
+        die "apply: $S_CFG has no 'Include $D_DIR/*.conf' (rerun with --create-include to append it)"
+    fi
+    if grep -qE '^[[:space:]]*Match[[:space:]]+' "$S_CFG" && \
+       [ "$(grep -nE '^[[:space:]]*Match[[:space:]]+' "$S_CFG" | head -1 | cut -d: -f1)" -lt \
+         "$(grep -nE '^[[:space:]]*Include[[:space:]]+' "$S_CFG" | head -1 | cut -d: -f1)" ]; then
+        die "apply: sshd_config has a Match block before the Include line; a drop-in there would be Match-scoped"
+    fi
+    KEPT="$(current_ports)"
+    [ -n "$KEPT" ] || KEPT="22"
+    log "  keeping port(s): $KEPT  target: $p"
     if port_listening "$p" && ! owns_port "$p"; then
         case " $(foreign_port_lines)" in
             *"Port[[:space:]]*$p"*) : ;;   # declared elsewhere; handled below
@@ -335,6 +479,30 @@ do_apply() {
             die "apply: Port directives exist outside the managed drop-in; rerun with --take-over (they are backed up and commented out)"
         fi
         log "  taking over foreign Port directives (backup first)"
+    fi
+    if fw_drop_policy && ! fw_allows_port "$p"; then
+        warn "host firewall drops input and has no accept rule for tcp/$p"
+        if [ "$FW_PENDING" != 1 ]; then
+            if [ "$mode" = final ]; then
+                die "apply: open tcp/$p in the host firewall and the provider security group first, then rerun with --allow-firewall-pending"
+            fi
+            warn "dual mode keeps the current port, but $p will be unreachable until the firewall/security group allows it"
+        fi
+    fi
+    if selinux_blocked "$p"; then
+        if [ "$SELINUX_ADD" = 1 ]; then
+            log "  selinux: adding tcp/$p to ssh_port_t"
+            run sh -c "semanage port -a -t ssh_port_t -p tcp $p 2>/dev/null || semanage port -m -t ssh_port_t -p tcp $p"
+        elif [ "$mode" = final ]; then
+            die "apply: SELinux is enforcing and tcp/$p is not in ssh_port_t (rerun with --selinux-add)"
+        else
+            warn "SELinux enforcing: tcp/$p is not in ssh_port_t; the new listener may be denied"
+        fi
+    fi
+    local od; od="$(other_socket_dropins)"
+    if [ -n "$od" ]; then
+        printf '%s\n' "$od" | sed 's/^/  other socket drop-in: /'
+        warn "another ssh.socket drop-in sets ListenStream; zz-90ssh.conf is ordered last but review the files above"
     fi
     if ! fake; then
         if ! svc_active "$SVC"; then die "apply: $SVC is not active"; fi
@@ -371,7 +539,7 @@ do_apply() {
     log "== reload =="
     if [ "$DRY" != 1 ] && ! fake; then
         if socket_active; then
-            systemctl daemon-reload && systemctl restart ssh.socket || { do_rollback "$dir" "socket-restart-failed"; return 4; }
+            systemctl daemon-reload && systemctl restart "$SOCKET_UNIT" || { do_rollback "$dir" "socket-restart-failed"; return 4; }
         else
             systemctl reload "$SVC" || systemctl restart "$SVC" || { do_rollback "$dir" "reload-failed"; return 4; }
         fi
@@ -381,8 +549,14 @@ do_apply() {
     log "== post-checks =="
     if [ "$DRY" != 1 ] && ! fake; then
         if ! port_listening "$p"; then warn "new port not listening -> rollback"; do_rollback "$dir" "new-port-missing"; return 5; fi
-        if [ "$mode" = "dual" ] && ! port_listening 22; then
-            warn "old port 22 lost during transition -> rollback"; do_rollback "$dir" "old-port-lost"; return 5
+        if [ "$mode" = "dual" ]; then
+            local k
+            for k in $KEPT; do
+                if ! port_listening "$k"; then
+                    warn "previous port $k lost during transition -> rollback"
+                    do_rollback "$dir" "old-port-lost"; return 5
+                fi
+            done
         fi
         after_eff="$(sshd_dump "" 2>/dev/null)"
         if [ "$(printf '%s' "$before_eff" | strip_port_lines)" != "$(printf '%s' "$after_eff" | strip_port_lines)" ]; then
@@ -397,13 +571,18 @@ do_apply() {
     log "APPLY OK mode=$mode ports=[$(listening_ports)] backup=$dir"
     if [ "$GUARD" -gt 0 ] && [ "$DRY" != 1 ] && ! fake; then
         TOKEN="p6-$(date +%s)-$$"
-        install -d -m 0700 /run/90ssh
+        install -d -m 0700 /run/90ssh "$STATE_DIR"
         rm -f "/run/90ssh/$TOKEN.ok"
-        systemd-run --unit="90ssh-guard-$TOKEN" --on-active="$GUARD" --collect \
+        SELF="$(readlink -f "$0" 2>/dev/null || printf '%s' "$0")"
+        printf 'token=%s\ndeadline=%s\nbackup=%s\nport=%s\nmode=%s\n' \
+            "$TOKEN" "$(( $(date +%s) + GUARD ))" "$dir" "$p" "$mode" > "$STATE_DIR/pending"
+        if systemd-run --unit="90ssh-guard-$TOKEN" --on-active="$GUARD" --collect \
             --description="90ssh safety net ($p)" \
-            "$0" guard-check --token "$TOKEN" --backup "$dir" >/dev/null 2>&1 \
-            && log "GUARD armed: ${GUARD}s (confirm with: 90ssh.sh confirm --token $TOKEN)" \
-            || warn "guard could not be armed"
+            "$SELF" guard-check --token "$TOKEN" --backup "$dir" >/dev/null 2>&1; then
+            log "GUARD armed: ${GUARD}s (confirm with: 90ssh.sh confirm --token $TOKEN)"
+        else
+            warn "guard could not be armed; pending marker kept in $STATE_DIR/pending"
+        fi
     fi
     return 0
 }
@@ -414,24 +593,32 @@ do_confirm() {
     : > "/run/90ssh/$TOKEN.ok"
     systemctl stop "90ssh-guard-$TOKEN.timer" 2>/dev/null || true
     systemctl reset-failed "90ssh-guard-$TOKEN.service" "90ssh-guard-$TOKEN.timer" 2>/dev/null || true
+    rm -f "$STATE_DIR/pending"
     log "confirmed: guard for $TOKEN disarmed"
 }
 
 do_guard_check() {
     [ -n "$TOKEN" ] || die "guard-check: --token required"
-    if [ -f "/run/90ssh/$TOKEN.ok" ]; then log "guard $TOKEN: confirmed, standing down"; exit 0; fi
+    if [ -f "/run/90ssh/$TOKEN.ok" ]; then log "guard $TOKEN: confirmed, standing down"; rm -f "$STATE_DIR/pending"; exit 0; fi
     logger -t 90ssh "guard $TOKEN expired without confirmation -> rolling back"
     dir="$BACKUP_DIR"; [ -n "$dir" ] || dir="$(latest_backup)"
     do_rollback "$dir" "guard-timeout-$TOKEN"
+    rm -f "$STATE_DIR/pending"
 }
 
 # ----------------------------------------------------------------- report ---
 do_status() {
     log "90ssh.sh v$VER  host=$(hostname)  mode=$MODE"
     log "config: $S_CFG"
+    log "service: $SVC.service (unit: $(svc_enabled_str)/$(svc_active_str))  socket: ${SOCKET_UNIT:-none}"
     log "managed drop-in: $(managed_path) $([ -f "$(managed_path)" ] && echo '(present)' || echo '(absent)')"
     [ -f "$(managed_path)" ] && sed 's/^/  | /' "$(managed_path)"
     log "include present: $(have_include && echo yes || echo NO)"
+    log "effective port(s): [$(current_ports)]"
+    if [ -f "$STATE_DIR/pending" ]; then
+        log "PENDING transition: $(tr '\n' ' ' < "$STATE_DIR/pending")"
+        log "  (a guard rollback may not have run: check 'rollback --backup <dir>' if the change was not confirmed)"
+    fi
     local fp; fp="$(foreign_port_lines)"
     if [ -n "$fp" ]; then
         log "foreign Port directives: yes"; printf '%s\n' "$fp" | sed 's/^/  | /'
@@ -449,13 +636,13 @@ do_plan() {
     local p="$1"
     [ -n "$p" ] || die "plan: --port is required"
     log "PLAN v$VER host=$(hostname)"
-    log "  current: ports=[$(listening_ports)] socket=$(socket_state)"
-    log "  target : port $p ($MODE$([ "$MODE" = dual ] && echo ', keeping 22' || echo ', IPv4 only'))"
+    log "  current: ssh ports=[$(current_ports)] socket=$(socket_state)"
+    log "  target : port $p ($MODE$([ "$MODE" = dual ] && echo ", keeping [$(current_ports)]" || echo ", listen $LISTEN_ADDR"))"
     log "  drop-in: $(managed_path)"
     local fp; fp="$(foreign_port_lines)"
     if [ -n "$fp" ]; then printf '%s\n' "$fp" | sed 's/^/  foreign: /'; else log "  foreign Port directives: none"; fi
     log "  writes: managed drop-in"
-    socket_active && log "  writes: $SOCK_DIR/90ssh.conf (socket is active on this host)"
+    socket_active && log "  writes: $SOCK_DIR/zz-90ssh.conf (socket is active on this host)"
     log "  auth policy: never written"
     log "  backup -> $PREFIX/root/90ssh-backup-<ts>"
 }
@@ -536,7 +723,10 @@ do_selftest() {
     grep -q '#90ssh-disabled # Port 2222' "$e/etc/ssh/sshd_config.d/20-foreign.conf" \
         && ok "E take-over commented the foreign Port" || { bad "E take-over failed"; cat "$e/etc/ssh/sshd_config.d/20-foreign.conf"; }
     snap "$e"
-    grep -qx 'port 2222' "$e/eff.txt" && bad "E 2222 still effective" || ok "E 2222 no longer effective"
+    grep -qx 'port 2222' "$e/eff.txt" && ok "E 2222 kept during transition" || bad "E 2222 dropped during dual"
+    apply "$e" apply --port 47032 --mode final --confirmed > "$e/out7"
+    snap "$e"
+    grep -qx 'port 2222' "$e/eff.txt" && bad "E 2222 survived final" || ok "E 2222 dropped in final"
 
     # F: rollback restores the exact pre-change state
     local f="$base/f"; fixture "$f"
@@ -560,6 +750,49 @@ do_selftest() {
     grep -q 'PLAN v' "$g/out8" && ok "G plan output" || bad "G plan output"
     [ "$(sha256sum "$g/etc/ssh/sshd_config")" = "$gsum" ] && ok "G read-only" || bad "G plan/status wrote config"
     [ -f "$g/etc/ssh/sshd_config.d/10-homelab-ssh.conf" ] && bad "G plan created a drop-in" || ok "G plan created nothing"
+
+    applyp() { local d="$1" p="$2"; shift 2; PREFIX="$d" FAKE_PORTS="$p" bash "$0" "$@" 2>&1; }
+
+    # H: VPS-shaped host whose current port is 37091, not 22
+    local h="$base/h"; fixture "$h"
+    printf 'Port 37091\n' > "$h/etc/ssh/sshd_config.d/99-foreign.conf"
+    applyp "$h" "37091" apply --port 47040 --mode dual --take-over > "$h/out"
+    grep -q 'APPLY OK' "$h/out" && ok "H dual apply on 37091 host" || { bad "H dual apply"; tail -3 "$h/out"; }
+    grep -qx 'Port 37091' "$h/etc/ssh/sshd_config.d/10-homelab-ssh.conf" \
+        && ok "H keeps current port 37091" || bad "H current port 37091 not kept"
+    grep -qx 'Port 22' "$h/etc/ssh/sshd_config.d/10-homelab-ssh.conf" \
+        && bad "H added port 22 to a 37091 host" || ok "H does not invent port 22"
+    snap "$h"
+    grep -qx 'port 37091' "$h/eff.txt" && ok "H 37091 effective" || bad "H 37091 lost"
+    grep -qx 'port 47040' "$h/eff.txt" && ok "H 47040 effective" || bad "H 47040 missing"
+
+    # I: socket-activated host (Ubuntu style), override must be ordered last
+    local i="$base/i"; fixture "$i"
+    PREFIX="$i" FAKE_PORTS=37091 FAKE_SOCKET=1 bash "$0" apply --port 47040 --mode dual --take-over >/dev/null 2>&1
+    local so="$i/etc/systemd/system/ssh.socket.d/zz-90ssh.conf"
+    [ -f "$so" ] && ok "I socket override written as zz-90ssh.conf" || bad "I socket override missing"
+    grep -qx 'ListenStream=0.0.0.0:37091' "$so" 2>/dev/null && ok "I keeps IPv4 37091" || bad "I IPv4 37091 missing"
+    grep -qx 'ListenStream=\[::\]:37091' "$so" 2>/dev/null && ok "I keeps IPv6 37091" || bad "I IPv6 37091 missing"
+    grep -qx 'ListenStream=0.0.0.0:47040' "$so" 2>/dev/null && ok "I new port in socket" || bad "I new port missing"
+
+    # J: final mode with --listen all keeps both families
+    local j="$base/j"; fixture "$j"
+    applyp "$j" "" apply --port 47040 --mode final --confirmed --listen all >/dev/null 2>&1
+    snap "$j"
+    grep -qx 'listenaddress 0.0.0.0:47040' "$j/eff.txt" && grep -qx 'listenaddress \[::\]:47040' "$j/eff.txt" \
+        && ok "J --listen all binds IPv4+IPv6" || bad "J --listen all incomplete"
+
+    # K: RHEL-style service name is selectable
+    local k="$base/k"; fixture "$k"
+    local kout; kout="$(PREFIX="$k" bash "$0" status --service sshd 2>&1)"
+    case "$kout" in *"service: sshd.service"*) ok "K --service sshd";; *) bad "K --service sshd not honoured: $(printf '%s' "$kout" | head -2 | tr '\n' ' ')";; esac
+
+    # L: no Include + --create-include appends one
+    local l="$base/l"; install -d -m 0755 "$l/etc/ssh"; ssh-keygen -q -t ed25519 -N '' -f "$l/hk" >/dev/null 2>&1
+    printf 'Port 22\nHostKey %s/hk\n' "$l" > "$l/etc/ssh/sshd_config"
+    applyp "$l" "" apply --port 47040 --mode dual --create-include --take-over > "$l/out"
+    grep -q 'APPLY OK' "$l/out" && grep -q "^Include $l/etc/ssh/sshd_config.d/\*\.conf" "$l/etc/ssh/sshd_config" \
+        && ok "L --create-include works" || { bad "L --create-include failed"; tail -3 "$l/out"; }
 
     log "== self-test $([ $rc = 0 ] && echo PASS || echo FAIL) =="
     [ "$rc" = 0 ] && rm -rf "$base" || log "  (artifacts kept: $base)"
@@ -585,9 +818,18 @@ while [ $# -gt 0 ]; do
         --backup) BACKUP_DIR="$2"; shift 2;;
         --reason) REASON="$2"; shift 2;;
         --dry-run) DRY=1; shift;;
+        --service) SVC_FORCED="$2"; shift 2;;
+        --socket) SOCKET_FORCED="$2"; shift 2;;
+        --keep-port) KEEP_PORTS="$KEEP_PORTS $2"; shift 2;;
+        --listen) LISTEN_ADDR="$2"; shift 2;;
+        --create-include) CREATE_INCLUDE=1; shift;;
+        --allow-firewall-pending) FW_PENDING=1; shift;;
+        --selinux-add) SELINUX_ADD=1; shift;;
         *) die "unknown option: $1";;
     esac
 done
+
+[ "$CMD" = test ] || detect_units
 
 case "$CMD" in
     status) do_status;;
