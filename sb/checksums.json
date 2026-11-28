@@ -1,17 +1,17 @@
 {
   "schema_version": 1,
-  "source": "https://api.github.com/repos/SagerNet/sing-box/releases/tags/v1.14.4",
+  "source": "https://api.github.com/repos/SagerNet/sing-box/releases/tags/v1.14.6",
   "versions": {
-    "1.14.4": {
+    "1.14.6": {
       "linux-amd64": {
-        "url": "https://github.com/SagerNet/sing-box/releases/download/v1.14.4/sing-box-1.14.4-linux-amd64.tar.gz",
-        "sha256": "699a1b510aa4396b2176d32d1181920399ebf1e267835da6f3b598d0f7c24968",
-        "binary_sha256": "1264361b5f8868c8768f7555d3e77e20118bf503c41ac08bb290a0d99056aa3a"
+        "url": "https://github.com/SagerNet/sing-box/releases/download/v1.14.6/sing-box-1.14.6-linux-amd64.tar.gz",
+        "sha256": "273e16c1c7881bee94d71e2e38f5bbb5e14971995fd8dd4e145394bf6d23311b",
+        "binary_sha256": "b25ff28e2c9e90e1d2f201736d156200f2d5cd22ce98578e40bdbb6c2cfc31d2"
       },
       "linux-arm64": {
-        "url": "https://github.com/SagerNet/sing-box/releases/download/v1.14.4/sing-box-1.14.4-linux-arm64.tar.gz",
-        "sha256": "436441f76ee2f7fe21b5b2d426d3cb261a480455a704865789ad533e4273ec26",
-        "binary_sha256": "d953af885f11d6b547c21a3c0ffe70796963afc802fab959d548311002b4908a"
+        "url": "https://github.com/SagerNet/sing-box/releases/download/v1.14.6/sing-box-1.14.6-linux-arm64.tar.gz",
+        "sha256": "7c38264607307de3d2d715f231833b329d84720da4cfd820400ff7ec7ca0d5ea",
+        "binary_sha256": "81d8832df1ff9b1bcc6a20edbd7e61507293537d950a03dc7b8e1bd50c18af22"
       }
     }
   }
